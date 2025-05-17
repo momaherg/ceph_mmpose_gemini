@@ -203,35 +203,56 @@ def launch_mmpose_training():
     print(f"PYTHONPATH for subprocess: {env.get('PYTHONPATH')}")
     os.makedirs(work_dir, exist_ok=True)
 
-    # Determine the path to MMPose's train.py script
-    # Option 1: Assume mmpose repo is cloned as 'mmpose' in the workspace root
-    mmpose_train_script_candidate1 = os.path.join(current_dir, 'mmpose', 'tools', 'train.py')
-    # Option 2: Assume tools/train.py is directly accessible if running from mmpose root (less likely for this script)
-    mmpose_train_script_candidate2 = os.path.join(current_dir, 'tools', 'train.py')
+    # Determine the command to run for training
+    cmd = None
+    mmpose_train_executable = shutil.which('mmpose_train')
+    mim_executable = shutil.which('mim')
 
-    mmpose_train_script = None
-    if os.path.exists(mmpose_train_script_candidate1):
-        mmpose_train_script = mmpose_train_script_candidate1
-    elif os.path.exists(mmpose_train_script_candidate2):
-        mmpose_train_script = mmpose_train_script_candidate2
-    
-    if not mmpose_train_script:
-        print(f"Warning: MMPose train script not found at expected locations:")
-        print(f"  - {mmpose_train_script_candidate1}")
-        print(f"  - {mmpose_train_script_candidate2}")
-        print("Please ensure MMPose is cloned (e.g., as 'mmpose' in the project root) or adjust the path.")
-        print("Alternatively, if MMPose is installed via pip and `mmpose_train` is in your PATH, you can try:")
-        print(f"  mmpose_train {config_file} --work-dir {work_dir}")
-        print("Attempting to use a generic 'tools/train.py' which might fail.")
-        mmpose_train_script = 'tools/train.py' # Fallback
+    if mmpose_train_executable:
+        print(f"Found `mmpose_train` executable at: {mmpose_train_executable}")
+        cmd = [
+            mmpose_train_executable,
+            config_file,
+            '--work-dir', work_dir,
+            '--launcher', 'none' # For single GPU training
+        ]
+    elif mim_executable:
+        print(f"Found `mim` executable at: {mim_executable}. Will use 'mim train mmpose ...'")
+        cmd = [
+            mim_executable, 'train', 'mmpose',
+            config_file,
+            '--work-dir', work_dir,
+            '--launcher', 'none' # For single GPU training
+        ]
+    else:
+        print("Neither `mmpose_train` nor `mim` found in PATH. Falling back to direct script execution.")
+        # Fallback: Try to find local train.py script (original logic)
+        mmpose_train_script_candidate1 = os.path.join(current_dir, 'mmpose', 'tools', 'train.py')
+        mmpose_train_script_candidate2 = os.path.join(current_dir, 'tools', 'train.py')
+        
+        mmpose_train_script_path = None
+        if os.path.exists(mmpose_train_script_candidate1):
+            mmpose_train_script_path = mmpose_train_script_candidate1
+        elif os.path.exists(mmpose_train_script_candidate2):
+            mmpose_train_script_path = mmpose_train_script_candidate2
+        
+        if not mmpose_train_script_path:
+            print(f"Warning: MMPose train script also not found at expected local paths:")
+            print(f"  - {mmpose_train_script_candidate1}")
+            print(f"  - {mmpose_train_script_candidate2}")
+            print("Please ensure MMPose is cloned (e.g., as 'mmpose' in the project root) or adjust the path.")
+            print("Attempting to use a generic 'tools/train.py' which will likely fail.")
+            mmpose_train_script_path = 'tools/train.py' # Last resort fallback
+        else:
+            print(f"Found local MMPose train script at: {mmpose_train_script_path}")
 
-    cmd = [
-        'python', # Or 'python3', or sys.executable
-        mmpose_train_script,
-        config_file,
-        '--work-dir', work_dir,
-        '--launcher', 'none' # For single GPU training
-    ]
+        cmd = [
+            'python', # Or 'python3', or sys.executable
+            mmpose_train_script_path,
+            config_file,
+            '--work-dir', work_dir,
+            '--launcher', 'none' # For single GPU training
+        ]
 
     print(f"Executing training command: {' '.join(cmd)}")
     try:
@@ -244,8 +265,11 @@ def launch_mmpose_training():
         else:
             print("Training process completed successfully.")
     except FileNotFoundError:
-        print(f"Error: Failed to find the training script '{mmpose_train_script}'.")
-        print("Ensure MMPose is installed and the script path is correct or use `mmpose_train` if available.")
+        # This specific error might be less likely now if cmd[0] is found by shutil.which
+        # but could occur if the fallback tools/train.py is used and not found.
+        executable_name = cmd[0] if cmd and cmd[0] else "[command not set]"
+        print(f"Error: Failed to find the training script or executable '{executable_name}'.")
+        print("Ensure MMPose is installed correctly and accessible in your PATH or cloned locally.")
     except Exception as e:
         print(f"An error occurred during the training subprocess: {e}")
 
