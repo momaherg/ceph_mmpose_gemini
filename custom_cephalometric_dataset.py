@@ -9,87 +9,43 @@ class CustomCephalometricDataset(BaseDataset):
     """Custom dataset for Cephalometric landmark detection.
 
     Args:
-        ann_file (str, optional): Annotation file path. Defaults to ''.
-            Used if data_df is not provided.
-        data_df (pd.DataFrame, optional): Pandas DataFrame containing the dataset.
-            Defaults to None.
+        ann_file (str): Annotation file path.
         pipeline (list): Processing pipeline.
-        filter_cfg (dict, optional): Config for filtering data. Defaults to None.
-        **kwargs: Other arguments passed to BaseDataset.
+        metainfo (dict, optional): Metadata for the dataset. Defaults to None.
+        test_mode (bool, optional): Whether the dataset is in test mode. Defaults to False.
+        # Other arguments from BaseDataset like data_root, test_mode etc.
     """
     METAINFO: dict = dataset_info
 
     def __init__(self, 
-                 ann_file='', 
-                 data_df: pd.DataFrame = None, 
-                 pipeline=(), 
-                 filter_cfg=None,
+                 ann_file: str, 
+                 pipeline: list,
+                 metainfo: dict = None, # Will be passed from config
+                 test_mode: bool = False, # Will be passed from config
                  **kwargs):
         
-        if data_df is None and not ann_file:
-            # If using ann_file, it should be a valid path string. 
-            # If it's an empty string and no data_df, BaseDataset might try to load from '' which is an error.
-            # However, if ann_file is empty string, BaseDataset usually calls _load_data_list.
-            # The critical part is to have a way for _load_data_list to then load the df if needed.
-            pass # Allow BaseDataset to initialize with ann_file='', it will call load_data_list
-
-        self.data_df = data_df
-        # Store ann_file if it might be used by our _load_data_list later
-        self._ann_file_path = ann_file if ann_file else None 
-
-        # Pass pipeline and other relevant args to BaseDataset.
-        # BaseDataset will set self.ann_file. If 'ann_file' is empty, it will try to call
-        # self._load_data_list via its own self.load_data_list.
-        super().__init__(ann_file=ann_file, # Pass the original ann_file string here
+        # BaseDataset will handle ann_file, pipeline, and merging METAINFO with passed metainfo.
+        # It also sets self.test_mode based on the argument.
+        super().__init__(ann_file=ann_file, 
                          pipeline=pipeline, 
-                         filter_cfg=filter_cfg, 
+                         metainfo=metainfo,
+                         test_mode=test_mode,
                          **kwargs)
 
-    def load_data_list(self) -> list:
-        """Load annotations.
-        If self.data_df is provided, parse it directly.
-        Otherwise, fall back to BaseDataset's logic (which might use self.ann_file
-        and eventually call self._load_data_list if ann_file is empty or None).
-        """
-        if self.data_df is not None:
-            # If DataFrame is directly provided, use our parsing logic.
-            print("DataFrame provided, using custom _load_data_list directly.")
-            data_list = self._load_data_list() # Call our implementation
-        else:
-            # If no DataFrame, let BaseDataset handle it (e.g. load from self.ann_file path).
-            # This will also call our _load_data_list if self.ann_file was initially empty/''
-            # or if BaseDataset.load_data_list decides to call the internal one.
-            print("DataFrame not provided directly, falling back to BaseDataset.load_data_list().")
-            data_list = super().load_data_list()
-        return data_list
-
     def _load_data_list(self) -> list:
-        """Load annotations from self.data_df or from self._ann_file_path if df not pre-loaded."""
+        """Load annotations from self.ann_file (set by BaseDataset)."""
         data_list = []
         
-        current_df = self.data_df # Use the pre-loaded DataFrame if available
+        print(f"Attempting to load custom annotations from: {self.ann_file}")
+        try:
+            current_df = pd.read_json(self.ann_file)
+            print(f"Successfully loaded DataFrame from {self.ann_file}. Shape: {current_df.shape}")
+        except Exception as e:
+            raise IOError(f"Error loading annotation JSON file {self.ann_file}: {e}")
 
-        if current_df is None:
-            # If self.data_df was not provided during __init__, try to load it using self._ann_file_path
-            if self._ann_file_path:
-                print(f"Initial self.data_df is None. Attempting to load DataFrame from self._ann_file_path: '{self._ann_file_path}'")
-                try:
-                    current_df = pd.read_json(self._ann_file_path)
-                    print(f"Successfully loaded DataFrame from self._ann_file_path. Shape: {current_df.shape}")
-                except Exception as e:
-                    print(f"Error loading DataFrame from self._ann_file_path ('{self._ann_file_path}'): {e}")
-                    return [] # Critical error, cannot proceed without data
-            else:
-                # This case (current_df is None and _ann_file_path is also None/empty) 
-                # should ideally be caught by __init__ or the first part of load_data_list.
-                # If BaseDataset.load_data_list calls this _load_data_list with ann_file=''
-                # and we didn't have a data_df, this is the state.
-                print("Error: DataFrame is None and no annotation file path was specified for loading.")
-                return []
-        
-        if current_df is None: # Should not happen if logic above is correct
-             print("Critical Error: current_df is still None in _load_data_list.")
-             return []
+        if current_df.empty:
+            print(f"Warning: DataFrame loaded from {self.ann_file} is empty.")
+            return []
 
         num_keypoints = len(self.METAINFO['keypoint_info'])
 
@@ -98,11 +54,11 @@ class CustomCephalometricDataset(BaseDataset):
             try:
                 img_np = np.array(img_array_list, dtype=np.uint8).reshape((224, 224, 3))
             except Exception as e:
-                print(f"Error processing image for patient_id {row.get('patient_id', 'Unknown')}: {e}")
+                print(f"Error processing image for patient_id {row.get('patient_id', 'Unknown')} at index {index}: {e}")
                 continue 
             
             keypoints = np.zeros((num_keypoints, 2), dtype=np.float32)
-            keypoints_visible = np.ones(num_keypoints, dtype=np.int32) * 2 
+            keypoints_visible = np.ones(num_keypoints, dtype=np.int32) * 2 # Assume visible and not occluded initially
 
             for i, kp_name in enumerate(landmark_names_in_order):
                 x_col = original_landmark_cols[i*2]
@@ -112,34 +68,37 @@ class CustomCephalometricDataset(BaseDataset):
                     keypoints[i, 0] = row[x_col]
                     keypoints[i, 1] = row[y_col]
                 else:
-                    keypoints[i, 0] = 0 
+                    keypoints[i, 0] = 0 # Or some other placeholder like -1, depending on pipeline expectations
                     keypoints[i, 1] = 0
-                    keypoints_visible[i] = 0 
+                    keypoints_visible[i] = 0 # Mark as not visible and not labeled
             
-            bbox_xywh = np.array([0, 0, 224, 224], dtype=np.float32)
+            # Bbox in [x1, y1, x2, y2] format. Assuming full image is the bbox.
+            bbox = np.array([0, 0, 224, 224], dtype=np.float32)
 
             data_info = {
-                'img': img_np,
-                'img_path': str(row.get('patient_id', f'index_{index}')),
-                'img_id': str(row.get('patient_id', index)),
-                'bbox': bbox_xywh,
+                'img': img_np, # The actual image numpy array
+                'img_path': str(row.get('patient_id', f'index_{index}')), # For metadata/logging
+                'img_id': str(row.get('patient_id', index)), # MMPose often uses img_id
+                'bbox': bbox, # Expected by top-down pipelines: [x1, y1, x2, y2]
                 'keypoints': keypoints,
                 'keypoints_visible': keypoints_visible,
-                'id': str(row.get('patient_id', index)),
-                'ori_shape': (224, 224),
-                'img_shape': (224, 224),
+                'id': str(row.get('patient_id', index)), # Your custom ID field
+                # 'ori_shape' and 'img_shape' will be added by transforms like LoadImageNumpy
                 'patient_text_id': row.get('patient', ''),
                 'set': row.get('set', 'train'),
-                'class': row.get('class', None)
+                'class_label': row.get('class', None) # Renamed from 'class'
             }
             data_list.append(data_info)
         
         if not data_list and not current_df.empty:
-            print("Warning: Data list is empty but DataFrame was not. Check processing logic in _load_data_list.")
-        elif current_df.empty:
-            print("Warning: DataFrame was empty, so data list is empty.")
-
+            print("Warning: _load_data_list resulted in an empty list, but the DataFrame was not empty. Check parsing logic.")
+        
+        print(f"_load_data_list finished. Parsed {len(data_list)} items.")
         return data_list
+
+    # No need to override load_data_list(self) - BaseDataset will call _load_data_list.
+    # No need to override get_data_info(self, idx) - BaseDataset.get_data_info will use self.data_list.
+    # __getitem__ is handled by BaseDataset, which calls `self.pipeline(self.get_data_info(idx))`
 
     def get_data_info(self, idx: int) -> dict:
         """Get data information by index. Used by the BaseDataset for __getitem__.
