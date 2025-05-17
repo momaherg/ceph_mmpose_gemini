@@ -60,7 +60,6 @@ model = dict(
     head=dict(
         type='HeatmapHead', # MMPose 1.x HeatmapHead
         in_channels=[18, 36, 72, 144], # Corresponds to HRNet stage4 output
-        in_index=(0, 1, 2, 3), # Takes features from all branches of stage4
         input_transform='resize_concat', # How to process multi-scale features
         out_channels=num_keypoints,
         loss=dict(type='KeypointMSELoss', use_target_weight=True),
