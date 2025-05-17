@@ -9,72 +9,91 @@ class CustomCephalometricDataset(BaseDataset):
     """Custom dataset for Cephalometric landmark detection.
 
     Args:
-        ann_file_arg (str): Annotation file path. Used if data_df is not provided.
-        data_df (pd.DataFrame): Pandas DataFrame containing the dataset.
+        ann_file (str, optional): Annotation file path. Defaults to ''.
+            Used if data_df is not provided.
+        data_df (pd.DataFrame, optional): Pandas DataFrame containing the dataset.
+            Defaults to None.
         pipeline (list): Processing pipeline.
         filter_cfg (dict, optional): Config for filtering data. Defaults to None.
-        # Other arguments from BaseDataset like data_root, test_mode etc.
+        **kwargs: Other arguments passed to BaseDataset.
     """
     METAINFO: dict = dataset_info
 
     def __init__(self, 
-                 ann_file_arg='', # Renamed to avoid confusion with self.ann_file set by super
+                 ann_file='', 
                  data_df: pd.DataFrame = None, 
+                 pipeline=(), 
                  filter_cfg=None,
-                 pipeline=(), # Explicitly accept pipeline, default to empty tuple
                  **kwargs):
         
-        if data_df is None and not ann_file_arg:
-            raise ValueError("Either 'data_df' or 'ann_file_arg' must be provided.")
-        
-        self.data_df = data_df
-        
-        # Determine what ann_file to pass to the superclass
-        actual_ann_file_for_super = None
-        if self.data_df is not None:
-            # If DataFrame is provided, tell superclass there's no annotation file path to load from.
-            # Its load_data_list will then call our _load_data_list, which uses self.data_df.
-            actual_ann_file_for_super = None 
-        elif ann_file_arg: # If df not given, but ann_file_arg is, pass it to super
-            actual_ann_file_for_super = ann_file_arg
-        # If data_df is None and ann_file_arg is also empty, the ValueError above handles it.
+        if data_df is None and not ann_file:
+            # If using ann_file, it should be a valid path string. 
+            # If it's an empty string and no data_df, BaseDataset might try to load from '' which is an error.
+            # However, if ann_file is empty string, BaseDataset usually calls _load_data_list.
+            # The critical part is to have a way for _load_data_list to then load the df if needed.
+            pass # Allow BaseDataset to initialize with ann_file='', it will call load_data_list
 
-        # BaseDataset __init__ expects metainfo to be passed if it's overriding class METAINFO
-        # or it will use self.METAINFO. We set METAINFO as a class var, so it's fine.
-        # It also expects pipeline. kwargs will catch others like data_root, test_mode.
-        super().__init__(ann_file=actual_ann_file_for_super, 
-                         filter_cfg=filter_cfg, 
+        self.data_df = data_df
+        # Store ann_file if it might be used by our _load_data_list later
+        self._ann_file_path = ann_file if ann_file else None 
+
+        # Pass pipeline and other relevant args to BaseDataset.
+        # BaseDataset will set self.ann_file. If 'ann_file' is empty, it will try to call
+        # self._load_data_list via its own self.load_data_list.
+        super().__init__(ann_file=ann_file, # Pass the original ann_file string here
                          pipeline=pipeline, 
+                         filter_cfg=filter_cfg, 
                          **kwargs)
 
-    def _load_data_list(self):
-        """Load annotations, primarily from self.data_df, or from self.ann_file if df is not pre-loaded."""
+    def load_data_list(self) -> list:
+        """Load annotations.
+        If self.data_df is provided, parse it directly.
+        Otherwise, fall back to BaseDataset's logic (which might use self.ann_file
+        and eventually call self._load_data_list if ann_file is empty or None).
+        """
+        if self.data_df is not None:
+            # If DataFrame is directly provided, use our parsing logic.
+            print("DataFrame provided, using custom _load_data_list directly.")
+            data_list = self._load_data_list() # Call our implementation
+        else:
+            # If no DataFrame, let BaseDataset handle it (e.g. load from self.ann_file path).
+            # This will also call our _load_data_list if self.ann_file was initially empty/''
+            # or if BaseDataset.load_data_list decides to call the internal one.
+            print("DataFrame not provided directly, falling back to BaseDataset.load_data_list().")
+            data_list = super().load_data_list()
+        return data_list
+
+    def _load_data_list(self) -> list:
+        """Load annotations from self.data_df or from self._ann_file_path if df not pre-loaded."""
         data_list = []
         
-        if self.data_df is None:
-            # This block executes if data_df was not passed to __init__ directly.
-            # self.ann_file is what was passed to super().__init__.
-            if self.ann_file and isinstance(self.ann_file, str):
-                print(f"Initial self.data_df is None. Attempting to load DataFrame from self.ann_file: '{self.ann_file}'")
-                try:
-                    # Assuming self.ann_file is a complete path to a JSON file that pandas can read.
-                    # If self.data_root is set (e.g. via kwargs from a config), and self.ann_file is relative,
-                    # one might need to construct the full path: os.path.join(self.data_root, self.ann_file)
-                    # For now, assume self.ann_file is directly usable by pd.read_json.
-                    self.data_df = pd.read_json(self.ann_file)
-                    print(f"Successfully loaded DataFrame from self.ann_file. Shape: {self.data_df.shape}")
-                except Exception as e:
-                    print(f"Error loading DataFrame from self.ann_file ('{self.ann_file}'): {e}")
-                    # self.data_df remains None, and the check below will handle it.
-            
-            if self.data_df is None: # If still None (ann_file was None, empty, or loading failed)
-                print("Error: DataFrame (self.data_df) is None and could not be loaded from self.ann_file.")
-                return [] # Return empty list, subsequent processing will show 0 samples.
+        current_df = self.data_df # Use the pre-loaded DataFrame if available
 
-        # Proceed to process self.data_df (which is now guaranteed to be populated if we reach here)
+        if current_df is None:
+            # If self.data_df was not provided during __init__, try to load it using self._ann_file_path
+            if self._ann_file_path:
+                print(f"Initial self.data_df is None. Attempting to load DataFrame from self._ann_file_path: '{self._ann_file_path}'")
+                try:
+                    current_df = pd.read_json(self._ann_file_path)
+                    print(f"Successfully loaded DataFrame from self._ann_file_path. Shape: {current_df.shape}")
+                except Exception as e:
+                    print(f"Error loading DataFrame from self._ann_file_path ('{self._ann_file_path}'): {e}")
+                    return [] # Critical error, cannot proceed without data
+            else:
+                # This case (current_df is None and _ann_file_path is also None/empty) 
+                # should ideally be caught by __init__ or the first part of load_data_list.
+                # If BaseDataset.load_data_list calls this _load_data_list with ann_file=''
+                # and we didn't have a data_df, this is the state.
+                print("Error: DataFrame is None and no annotation file path was specified for loading.")
+                return []
+        
+        if current_df is None: # Should not happen if logic above is correct
+             print("Critical Error: current_df is still None in _load_data_list.")
+             return []
+
         num_keypoints = len(self.METAINFO['keypoint_info'])
 
-        for index, row in self.data_df.iterrows():
+        for index, row in current_df.iterrows():
             img_array_list = row['Image'] 
             try:
                 img_np = np.array(img_array_list, dtype=np.uint8).reshape((224, 224, 3))
@@ -115,9 +134,9 @@ class CustomCephalometricDataset(BaseDataset):
             }
             data_list.append(data_info)
         
-        if not data_list and not self.data_df.empty:
+        if not data_list and not current_df.empty:
             print("Warning: Data list is empty but DataFrame was not. Check processing logic in _load_data_list.")
-        elif self.data_df.empty:
+        elif current_df.empty:
             print("Warning: DataFrame was empty, so data list is empty.")
 
         return data_list
