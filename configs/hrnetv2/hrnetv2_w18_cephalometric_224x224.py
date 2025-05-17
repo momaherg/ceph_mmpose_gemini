@@ -98,7 +98,7 @@ common_pipeline_suffix = [
     dict(type='TopdownAffine', input_size=input_size),
     dict(type='GenerateTarget', 
          encoder=dict(
-            type='GaussianHeatmap', 
+            type='MSRAHeatmap',
             input_size=input_size, 
             heatmap_size=(input_size[0] // 4, input_size[1] // 4),
             sigma=2 # Sigma for Gaussian heatmap generation
