@@ -190,6 +190,7 @@ test_evaluator = val_evaluator
 
 # Training schedule
 train_cfg = dict(by_epoch=True, max_epochs=60, val_interval=1)
+val_cfg = dict()
 
 # Optimizer
 optim_wrapper = dict(optimizer=dict(
