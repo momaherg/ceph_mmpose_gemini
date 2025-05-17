@@ -5,7 +5,13 @@ import numpy as np
 from typing import Any, List, Optional, Union, Dict
 
 from mmpose.registry import DATASETS
-from mmpose.datasets.datasets.base import BaseTopdownDataset
+# Try a more common import path for BaseTopdownDataset in recent MMPose versions
+# from mmpose.datasets.datasets.base import BaseTopdownDataset # Old path
+try:
+    from mmpose.datasets.base_dataset import BaseTopdownDataset
+except ImportError:
+    # Fallback to the older path if the new one fails, just in case
+    from mmpose.datasets.datasets.base import BaseTopdownDataset
 from mmpose.datasets.datasets.utils import parse_pose_metainfo
 
 
