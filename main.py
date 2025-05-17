@@ -33,13 +33,7 @@ def main():
     # In a real scenario, this would come from a config file.
     # This pipeline assumes 'img' is a NumPy array, which our custom dataset provides.
     pipeline = [
-        dict(type='LoadImage'), # This is a new transform to handle the 'img' field as numpy array
-        dict(type='KeypointConverter', num_keypoints=19, 
-             # From (x,y) to (x,y,visibility=1) if not already done by dataset
-             # Our dataset already provides keypoints_visible, so this might just reformat
-             # or could be more specific depending on what PackPoseInputs expects.
-             # Let's simplify and assume PackPoseInputs handles it correctly based on keypoints and keypoints_visible.
-            ),
+        dict(type='LoadImageNumpy'), # Our custom loader for numpy arrays
         dict(type='PackPoseInputs', 
              meta_keys=('img_id', 'img_path', 'ori_shape', 'img_shape',
                         'bbox', 'id', 'patient_text_id', 'set', 'class')

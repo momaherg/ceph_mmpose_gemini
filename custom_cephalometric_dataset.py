@@ -1,6 +1,6 @@
 import numpy as np
 import pandas as pd
-from mmpose.datasets.datasets.base import BaseDataset
+from mmengine.dataset import BaseDataset
 from mmpose.registry import DATASETS
 from cephalometric_dataset_info import dataset_info, landmark_names_in_order, original_landmark_cols
 
