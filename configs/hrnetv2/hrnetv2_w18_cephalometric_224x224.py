@@ -18,7 +18,7 @@ num_keypoints = 19 # From your dataset_info
 
 # Model definition
 model = dict(
-    type='TopDownPoseEstimator',
+    type='TopdownPoseEstimator',
     data_preprocessor=dict(
         type='PoseDataPreprocessor',
         mean=[123.675, 116.28, 103.53], # Default MMEngine/MMCV mean
