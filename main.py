@@ -3,22 +3,20 @@ import os
 import os.path as osp
 
 from mmengine.config import Config, DictAction
-from mmengine.registry import RUNNERS, init_default_scope
-
-# Initialize the default scope *before* importing custom modules that might register things.
-init_default_scope('mmpose')
-print("[DEBUG main.py] Called init_default_scope('mmpose') at the global level (top of main.py).")
-
+from mmengine.registry import RUNNERS
 from mmengine.runner import Runner
+from mmengine.registry import init_default_scope
+
+# Initialize the scope BEFORE importing custom modules that register components
+print("Initializing mmpose scope before imports...")
+init_default_scope('mmpose')
 
 # Import your custom modules to ensure they are registered
 # These imports are crucial for the MMEngine registry to find your custom classes
+print("Importing custom modules for registration...")
 import custom_cephalometric_dataset # Registers CustomCephalometricDataset
 import custom_transforms           # Registers LoadImageNumpy
 import cephalometric_dataset_info  # Makes dataset_info available for the config file
-
-# For debugging, explicitly import the TRANSFORMS registry from mmpose
-from mmpose.registry import TRANSFORMS as MMPoseTransformsRegistry
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Train a pose model using MMEngine')
@@ -49,21 +47,9 @@ def parse_args():
     return parser
 
 def main():
-    # init_default_scope('mmpose') # This call can be kept or removed as it's also at global scope now.
-    # For clarity, let's ensure it's called if not already at global, or rely on global one.
-    # init_default_scope('mmpose') # Redundant if called globally, but harmless.
-    print(f"[DEBUG main.py] MMPoseTransformsRegistry scope: {MMPoseTransformsRegistry.scope}")
-    print(f"[DEBUG main.py] Is 'LoadImageNumpy' in MMPoseTransformsRegistry? {'LoadImageNumpy' in MMPoseTransformsRegistry}")
-    if 'LoadImageNumpy' not in MMPoseTransformsRegistry:
-        print(f"[DEBUG main.py] 'LoadImageNumpy' NOT FOUND. Listing keys in {MMPoseTransformsRegistry.scope} scope of TRANSFORMS registry:")
-        try:
-            scope_specific_modules = MMPoseTransformsRegistry._scope_module_dict.get(MMPoseTransformsRegistry.scope, {})
-            print(f"[DEBUG main.py] Keys: {list(scope_specific_modules.keys())}")
-        except Exception as e:
-            print(f"[DEBUG main.py] Error listing keys: {e}")
-    else:
-        print(f"[DEBUG main.py] 'LoadImageNumpy' IS FOUND in MMPoseTransformsRegistry.")
-
+    # Scope is already initialized at the top of the file
+    # No need to call init_default_scope again
+    
     print("Starting training process...")
     
     # --- Configuration Loading ---

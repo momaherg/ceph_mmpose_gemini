@@ -88,7 +88,9 @@ data_root = '/content/drive/MyDrive/Lala\'s Masters/' # Base path for your data 
 # `PackPoseInputs` prepares data for the model.
 
 common_pipeline_prefix = [
-    dict(type='LoadImageNumpy'),
+    dict(type='LoadImageNumpy'),  # Our custom transform - will attempt to use this first
+    # If LoadImageNumpy fails, provide a fallback option with mmpose's Identity transform
+    # dict(type='Identity'),  # Uncomment this if LoadImageNumpy fails to be registered
     # Assuming CustomCephalometricDataset provides 'bbox' as [0, 0, 224, 224] or similar
     # If not, TopDownGetBboxCenterScale might be needed if bboxes are in annotations.
     # dict(type='TopDownGetBboxCenterScale', padding=1.0), # Example if needed
