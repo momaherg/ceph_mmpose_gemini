@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+import os
 from mmengine.dataset import BaseDataset
 from mmpose.registry import DATASETS
 from cephalometric_dataset_info import dataset_info, landmark_names_in_order, original_landmark_cols
@@ -15,6 +16,7 @@ class CustomCephalometricDataset(BaseDataset):
             Defaults to None.
         pipeline (list): Processing pipeline.
         filter_cfg (dict, optional): Config for filtering data. Defaults to None.
+        data_root (str, optional): Root directory of the dataset. Defaults to None.
         **kwargs: Other arguments passed to BaseDataset.
     """
     METAINFO: dict = dataset_info
@@ -24,26 +26,31 @@ class CustomCephalometricDataset(BaseDataset):
                  data_df: pd.DataFrame = None, 
                  pipeline=(), 
                  filter_cfg=None,
+                 data_root: str = None,
                  **kwargs):
         
-        if data_df is None and not ann_file:
-            # If using ann_file, it should be a valid path string. 
-            # If it's an empty string and no data_df, BaseDataset might try to load from '' which is an error.
-            # However, if ann_file is empty string, BaseDataset usually calls _load_data_list.
-            # The critical part is to have a way for _load_data_list to then load the df if needed.
-            pass # Allow BaseDataset to initialize with ann_file='', it will call load_data_list
-
         self.data_df = data_df
-        # Store ann_file if it might be used by our _load_data_list later
-        self._ann_file_path = ann_file if ann_file else None 
+        # _ann_file_path will be set after super().__init__ using self.ann_file
+        self._ann_file_path = None 
 
-        # Pass pipeline and other relevant args to BaseDataset.
-        # BaseDataset will set self.ann_file. If 'ann_file' is empty, it will try to call
-        # self._load_data_list via its own self.load_data_list.
-        super().__init__(ann_file=ann_file, # Pass the original ann_file string here
+        # Pass ann_file, data_root, etc., to BaseDataset
+        # BaseDataset uses data_root to make ann_file absolute if it's relative.
+        super().__init__(ann_file=ann_file, 
                          pipeline=pipeline, 
                          filter_cfg=filter_cfg, 
+                         data_root=data_root,
                          **kwargs)
+        
+        # After super().__init__(), self.ann_file should be the resolved path
+        # If self.ann_file exists and is a string, use it.
+        if hasattr(self, 'ann_file') and isinstance(self.ann_file, str) and self.ann_file:
+            self._ann_file_path = self.ann_file
+        elif ann_file: # Fallback if self.ann_file isn't set as expected but original ann_file was
+            if data_root and not os.path.isabs(ann_file):
+                self._ann_file_path = os.path.join(data_root, ann_file)
+            else:
+                self._ann_file_path = ann_file
+        # If data_df is provided, _ann_file_path might not be strictly needed unless for reload.
 
     def load_data_list(self) -> list:
         """Load annotations.
@@ -56,7 +63,7 @@ class CustomCephalometricDataset(BaseDataset):
             print("CustomCephalometricDataset.load_data_list(): DataFrame was pre-loaded.")
         elif hasattr(self, '_ann_file_path') and self._ann_file_path:
             print(f"CustomCephalometricDataset.load_data_list(): DataFrame not pre-loaded, _ann_file_path is '{self._ann_file_path}'. Will attempt to load.")
-        elif self.ann_file: # ann_file is a property of BaseDataset
+        elif hasattr(self, 'ann_file') and self.ann_file: # ann_file is a property of BaseDataset
             print(f"CustomCephalometricDataset.load_data_list(): DataFrame not pre-loaded, self.ann_file is '{self.ann_file}'. Will attempt to load via _load_data_list.")
         else:
             print("CustomCephalometricDataset.load_data_list(): DataFrame not pre-loaded and no ann_file path seems available for _load_data_list. This might cause issues in _load_data_list.")
@@ -83,6 +90,9 @@ class CustomCephalometricDataset(BaseDataset):
             # If self.data_df was not provided during __init__, try to load it using self._ann_file_path
             if self._ann_file_path:
                 print(f"Initial self.data_df is None. Attempting to load DataFrame from self._ann_file_path: '{self._ann_file_path}'")
+                if not os.path.exists(self._ann_file_path):
+                    print(f"Critical Error: Annotation file does not exist at path: {self._ann_file_path}")
+                    return [] # Cannot proceed if file doesn't exist
                 try:
                     current_df = pd.read_json(self._ann_file_path)
                     print(f"Successfully loaded DataFrame from self._ann_file_path. Shape: {current_df.shape}")
@@ -90,10 +100,6 @@ class CustomCephalometricDataset(BaseDataset):
                     print(f"Error loading DataFrame from self._ann_file_path ('{self._ann_file_path}'): {e}")
                     return [] # Critical error, cannot proceed without data
             else:
-                # This case (current_df is None and _ann_file_path is also None/empty) 
-                # should ideally be caught by __init__ or the first part of load_data_list.
-                # If BaseDataset.load_data_list calls this _load_data_list with ann_file=''
-                # and we didn't have a data_df, this is the state.
                 print("Error: DataFrame is None and no annotation file path was specified for loading.")
                 return []
         
