@@ -43,11 +43,11 @@ def parse_args():
     return parser
 
 def main():
-    # init_default_scope('mmpose') # Initialize the mmpose scope to load mmpose components
-    # The config does this implicitly if it uses mmpose types, or you can do it explicitly.
-    # It's good practice to have it if you're using types from mmpose registry directly.
-    # If your custom dataset/transforms are in a different scope, initialize that one.
-    init_default_scope('mmpose') # Or your project's scope if you have one
+    # Initialize the default scope to mmpose *before* config parsing
+    # This ensures that any custom modules registered under mmpose scope
+    # are findable when the config file itself is processed, especially if it
+    # directly references types or imports modules that do.
+    init_default_scope('mmpose') 
 
     print("Starting training process...")
     
