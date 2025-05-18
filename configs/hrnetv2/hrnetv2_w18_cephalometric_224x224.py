@@ -110,7 +110,7 @@ common_pipeline_suffix = [
              'input_size', 'input_center', 'input_scale',
              'flip', 'flip_direction',
              'num_joints', 'joint_weights', # from metainfo
-             'id', 'patient_text_id', 'set', 'class_label' # Custom keys from dataset, changed 'class' to 'class_label'
+             'id', 'patient_text_id', 'set', 'class' # Custom keys from dataset
             )
         )
 ]
@@ -123,7 +123,7 @@ val_test_pipeline_suffix = [
             'input_size', 'input_center', 'input_scale',
             'flip', 'flip_direction',
             'num_joints', 'joint_weights',
-            'id', 'patient_text_id', 'set', 'class_label' # Changed 'class' to 'class_label'
+            'id', 'patient_text_id', 'set', 'class'
             )
         )
 ]
