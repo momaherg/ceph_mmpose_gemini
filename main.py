@@ -12,6 +12,14 @@ import custom_cephalometric_dataset # Registers CustomCephalometricDataset
 import custom_transforms           # Registers LoadImageNumpy
 import cephalometric_dataset_info  # Makes dataset_info available for the config file
 
+# --- Diagnostic print --- #
+from mmpose.registry import TRANSFORMS as MMPTR_DIAGNOSTIC
+if 'LoadImageNumpy' in MMPTR_DIAGNOSTIC.module_dict:
+    print("DIAGNOSTIC: 'LoadImageNumpy' IS found in mmpose.registry.TRANSFORMS after import.")
+else:
+    print("DIAGNOSTIC: 'LoadImageNumpy' IS NOT found in mmpose.registry.TRANSFORMS after import. Registration failed or is not visible.")
+# --- End Diagnostic print --- #
+
 from mmengine.registry import init_default_scope
 
 def parse_args():
@@ -43,11 +51,11 @@ def parse_args():
     return parser
 
 def main():
-    # Initialize the default scope to mmpose *before* config parsing
-    # This ensures that any custom modules registered under mmpose scope
-    # are findable when the config file itself is processed, especially if it
-    # directly references types or imports modules that do.
-    init_default_scope('mmpose') 
+    # init_default_scope('mmpose') # Initialize the mmpose scope to load mmpose components
+    # The config does this implicitly if it uses mmpose types, or you can do it explicitly.
+    # It's good practice to have it if you're using types from mmpose registry directly.
+    # If your custom dataset/transforms are in a different scope, initialize that one.
+    init_default_scope('mmpose') # Or your project's scope if you have one
 
     print("Starting training process...")
     
