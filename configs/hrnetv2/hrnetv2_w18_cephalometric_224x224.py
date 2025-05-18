@@ -163,34 +163,17 @@ train_dataloader = dict(
     )
 )
 
-val_dataloader = dict(
-    batch_size=32,
-    num_workers=4,
-    persistent_workers=True,
-    drop_last=False,
-    sampler=dict(type='DefaultSampler', shuffle=False),
-    dataset=dict(
-        type=dataset_type,
-        data_root=data_root,
-        ann_file='dev_data_pure_old_numpy.json', # Assuming you have a dev set JSON
-        metainfo=cephalometric_metainfo,
-        pipeline=val_pipeline,
-        test_mode=True,
-    )
-)
-test_dataloader = val_dataloader # Use val_dataloader for test if same data/settings
+val_dataloader = None # Set to None to disable validation
+test_dataloader = None
 
 # Evaluator
-# PCKAccuracy is common. NME (Normalized Mean Error) might be more domain-specific.
-# For NME, you need a way to define the normalization factor (e.g., interocular distance, bbox size).
-# If your dataset_info provides 'sigmas', OKS can be calculated by KeypointAPEMetric or similar.
-val_evaluator = dict(type='PCKAccuracy') # Or NME, KeypointAPEMetric etc.
-test_evaluator = val_evaluator
+val_evaluator = None # Set to None to disable validation
+test_evaluator = None
 
 # Training schedule
-train_cfg = dict(by_epoch=True, max_epochs=60, val_interval=1)
-val_cfg = dict()
-test_cfg = dict()
+train_cfg = dict(by_epoch=True, max_epochs=60) # Removed val_interval
+val_cfg = None 
+test_cfg = None
 
 # Optimizer
 optim_wrapper = dict(optimizer=dict(
