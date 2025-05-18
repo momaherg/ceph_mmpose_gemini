@@ -1,5 +1,5 @@
 # Inherit from default runtime settings
-_base_ = ['../../../_base_/default_runtime.py']
+_base_ = ['../_base_/default_runtime.py']
 
 # Import custom dataset meta-information
 # This assumes cephalometric_dataset_info.py is in Python's import path
