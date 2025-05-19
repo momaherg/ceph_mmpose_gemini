@@ -92,8 +92,7 @@ common_pipeline_prefix = [
     # If LoadImageNumpy fails, provide a fallback option with mmpose's Identity transform
     # dict(type='Identity'),  # Uncomment this if LoadImageNumpy fails to be registered
     # Assuming CustomCephalometricDataset provides 'bbox' as [0, 0, 224, 224] or similar
-    # If not, TopDownGetBboxCenterScale might be needed if bboxes are in annotations.
-    # dict(type='TopDownGetBboxCenterScale', padding=1.0), # Example if needed
+    dict(type='TopDownGetBboxCenterScale', padding=1.0), # This prepares center and scale for TopdownAffine
 ]
 
 common_pipeline_suffix = [
