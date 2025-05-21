@@ -77,6 +77,47 @@ class CustomTopdownPoseEstimator(torch.nn.Module):
         
         # Forward to the original model
         return self.model(*args, **kwargs)
+    
+    def test_step(self, data, *args, **kwargs):
+        """Delegate test_step to the wrapped model."""
+        # Pre-process the data to add missing attributes
+        batch_inputs, batch_data_samples = data['inputs'], data['data_samples']
+        for sample in batch_data_samples:
+            if hasattr(sample, 'gt_instances'):
+                if not hasattr(sample.gt_instances, 'bbox_scores'):
+                    # Add dummy bbox_scores with value 1.0
+                    import torch
+                    import numpy as np
+                    if hasattr(sample.gt_instances, 'bboxes'):
+                        num_bboxes = len(sample.gt_instances.bboxes)
+                        if isinstance(sample.gt_instances.bboxes, torch.Tensor):
+                            sample.gt_instances.bbox_scores = torch.ones(num_bboxes, dtype=torch.float32)
+                        else:
+                            sample.gt_instances.bbox_scores = np.ones(num_boxes, dtype=np.float32)
+        
+        # Now pass to original model's test_step
+        if hasattr(self.model, 'test_step'):
+            return self.model.test_step(data, *args, **kwargs)
+        
+        # If original model doesn't have test_step, implement basic functionality
+        # Most models implement test_step using predict, which we can do directly
+        with torch.no_grad():
+            batch_outputs = self.model(
+                batch_inputs, batch_data_samples, mode='predict')
+        return batch_outputs
+    
+    # Delegate other common methods to the wrapped model
+    def train_step(self, *args, **kwargs):
+        """Delegate train_step to the wrapped model."""
+        if hasattr(self.model, 'train_step'):
+            return self.model.train_step(*args, **kwargs)
+        raise NotImplementedError("train_step not implemented in wrapped model")
+    
+    def val_step(self, *args, **kwargs):
+        """Delegate val_step to the wrapped model."""
+        if hasattr(self.model, 'val_step'):
+            return self.model.val_step(*args, **kwargs)
+        raise NotImplementedError("val_step not implemented in wrapped model")
 
 def evaluate_checkpoint_mre(config_file_path: str,
                             checkpoint_file_path: str,
