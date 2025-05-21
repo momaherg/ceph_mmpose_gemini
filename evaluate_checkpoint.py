@@ -148,9 +148,13 @@ def evaluate_checkpoint(config_path, checkpoint_path, test_json=None, out_dir='e
     from mmpose.registry import MODELS # Ensure MODELS registry is imported
     model = MODELS.build(cfg.model)
     
+    # For PyTorch 2.6+ safety, explicitly allow ConfigDict if checkpoint contains it
+    from mmengine.config import ConfigDict
+    import torch.serialization
+    torch.serialization.add_safe_globals([ConfigDict])
+
     # Load checkpoint
-    # Set weights_only=False as MMEngine checkpoints contain more than just weights (e.g., ConfigDict)
-    load_checkpoint(model, checkpoint_path, map_location='cpu', weights_only=False)
+    load_checkpoint(model, checkpoint_path, map_location='cpu') # Removed weights_only=False
     model.eval()
     
     # Convert to GPU if available
