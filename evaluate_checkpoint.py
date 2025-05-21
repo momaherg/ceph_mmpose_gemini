@@ -149,7 +149,8 @@ def evaluate_checkpoint(config_path, checkpoint_path, test_json=None, out_dir='e
     model = MODELS.build(cfg.model)
     
     # Load checkpoint
-    load_checkpoint(model, checkpoint_path, map_location='cpu')
+    # Set weights_only=False as MMEngine checkpoints contain more than just weights (e.g., ConfigDict)
+    load_checkpoint(model, checkpoint_path, map_location='cpu', weights_only=False)
     model.eval()
     
     # Convert to GPU if available

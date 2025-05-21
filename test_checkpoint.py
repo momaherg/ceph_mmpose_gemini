@@ -57,7 +57,7 @@ if __name__ == '__main__':
         print("Usage: python test_checkpoint.py <checkpoint_path> [test_json_path] [visualize]")
         sys.exit(1)
     
-    checkpoint_path = sys.argv[1]
+    checkpoint_path = "/content/ceph_mmpose_gemini/work_dirs/hrnetv2_w18_cephalometric_experiment/epoch_60.pth"
     test_json = sys.argv[2] if len(sys.argv) > 2 else None
     visualize = (sys.argv[3].lower() == 'true') if len(sys.argv) > 3 else False
     
