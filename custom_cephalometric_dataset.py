@@ -15,6 +15,7 @@ class CustomCephalometricDataset(BaseDataset):
             Defaults to None.
         pipeline (list): Processing pipeline.
         filter_cfg (dict, optional): Config for filtering data. Defaults to None.
+        test_mode (bool, optional): Whether the dataset is in test mode. Defaults to False.
         **kwargs: Other arguments passed to BaseDataset.
     """
     METAINFO: dict = dataset_info
@@ -24,6 +25,7 @@ class CustomCephalometricDataset(BaseDataset):
                  data_df: pd.DataFrame = None, 
                  pipeline=(), 
                  filter_cfg=None,
+                 test_mode=False,
                  **kwargs):
         
         if data_df is None and not ann_file:
@@ -34,6 +36,7 @@ class CustomCephalometricDataset(BaseDataset):
             pass # Allow BaseDataset to initialize with ann_file='', it will call load_data_list
 
         self.data_df = data_df
+        self.test_mode_custom = test_mode # Store test_mode passed from config
 
         # Pass pipeline and other relevant args to BaseDataset.
         # BaseDataset will set self.ann_file. If 'ann_file' is empty, it will try to call
@@ -41,6 +44,7 @@ class CustomCephalometricDataset(BaseDataset):
         super().__init__(ann_file=ann_file, # Pass the original ann_file string here
                          pipeline=pipeline, 
                          filter_cfg=filter_cfg, 
+                         test_mode=test_mode, # Pass test_mode to BaseDataset
                          **kwargs)
 
     def load_data_list(self) -> list:
@@ -92,6 +96,36 @@ class CustomCephalometricDataset(BaseDataset):
         if current_df is None: # Should not happen if logic above is correct
              print("Critical Error: current_df is still None in _load_data_list.")
              return []
+
+        # Filter DataFrame if in test_mode and 'set' column exists
+        # self.test_mode is inherited from BaseDataset and set by its __init__
+        if self.test_mode: # Check the test_mode flag set by BaseDataset
+            print(f"Dataset is in test_mode. Filtering for 'set == \"test\"' in the DataFrame.")
+            if 'set' in current_df.columns:
+                original_count = len(current_df)
+                current_df = current_df[current_df['set'] == 'test'].copy()
+                print(f"Filtered for test set: {original_count} -> {len(current_df)} samples.")
+                if current_df.empty:
+                    print("Warning: No samples found with 'set == \"test\"'. Test set will be empty.")
+            else:
+                print("Warning: 'set' column not found in DataFrame. Cannot filter for test set. Using all data.")
+        elif hasattr(self, 'test_mode_custom') and self.test_mode_custom: # Fallback for direct instantiation for safety
+            print(f"Dataset is in test_mode (custom flag). Filtering for 'set == \"test\"' in the DataFrame.")
+            if 'set' in current_df.columns:
+                original_count = len(current_df)
+                current_df = current_df[current_df['set'] == 'test'].copy()
+                print(f"Filtered for test set: {original_count} -> {len(current_df)} samples.")
+                if current_df.empty:
+                    print("Warning: No samples found with 'set == \"test\"'. Test set will be empty.")
+            else:
+                print("Warning: 'set' column not found in DataFrame. Cannot filter for test set. Using all data.")
+        else:
+            # If not in test mode, you might want to filter out 'test' samples for training/validation
+            # Or, assume the correct ann_file (train/dev) is provided for these stages.
+            # For now, we assume that if not test_mode, it's for training and uses the whole file unless `set` column is used differently.
+            if 'set' in current_df.columns:
+                 current_df = current_df[current_df['set'] != 'test'].copy()
+                 print(f"Dataset is not in test_mode. Filtered out 'test' samples. Remaining: {len(current_df)} samples.")
 
         num_keypoints = len(self.METAINFO['keypoint_info'])
 

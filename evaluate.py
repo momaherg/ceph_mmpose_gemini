@@ -125,7 +125,7 @@ if __name__ == '__main__':
     EXAMPLE_CONFIG_PATH = 'configs/hrnetv2/hrnetv2_w18_cephalometric_224x224.py'
     # Replace with the actual path to your best checkpoint
     EXAMPLE_CHECKPOINT_PATH = "work_dirs/hrnetv2_w18_cephalometric_experiment/epoch_60.pth" # Update this to your best checkpoint
-    EXAMPLE_TEST_ANN_FILE = "test_data_pure_old_numpy.json" # Your test annotation file name
+    EXAMPLE_TEST_ANN_FILE = "train_data_pure_old_numpy.json" # Use the main JSON file
     EXAMPLE_DATA_ROOT = "/content/drive/MyDrive/Lala's Masters/" # Your data root
     TEMP_EVAL_DIR = "temp_eval_dir_example"
 
