@@ -131,7 +131,6 @@ val_test_pipeline_suffix = [
 
 train_pipeline = [
     *common_pipeline_prefix,
-    dict(type='RandomFlip', direction='horizontal', prob=0.5), # Check if scientifically valid for cephalometrics
     dict(type='RandomBBoxTransform', # Includes scaling and rotation
          scale_factor=[0.8, 1.2],
          rotate_factor=15,
