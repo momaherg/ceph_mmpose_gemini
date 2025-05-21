@@ -93,7 +93,7 @@ class CustomTopdownPoseEstimator(torch.nn.Module):
                         if isinstance(sample.gt_instances.bboxes, torch.Tensor):
                             sample.gt_instances.bbox_scores = torch.ones(num_bboxes, dtype=torch.float32)
                         else:
-                            sample.gt_instances.bbox_scores = np.ones(num_boxes, dtype=np.float32)
+                            sample.gt_instances.bbox_scores = np.ones(num_bboxes, dtype=np.float32)
         
         # Now pass to original model's test_step
         if hasattr(self.model, 'test_step'):
