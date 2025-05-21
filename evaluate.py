@@ -3,6 +3,8 @@ import os.path as osp
 from mmengine.config import Config
 from mmengine.runner import Runner
 from mmengine.registry import init_default_scope
+import torch
+from mmengine.registry import RUNNERS
 
 # These imports are crucial for the MMEngine registry to find your custom classes
 # and for the config to load dataset metainfo.
@@ -12,6 +14,29 @@ init_default_scope('mmpose')
 import custom_cephalometric_dataset
 import custom_transforms
 from cephalometric_dataset_info import dataset_info as cephalometric_metainfo # For explicit use if needed
+
+# Define a custom runner class that handles the checkpoint loading issue
+@RUNNERS.register_module(force=True)
+class CustomRunner(Runner):
+    """Custom Runner that overrides load_checkpoint to handle PyTorch 2.6+ loading restrictions."""
+    
+    def load_checkpoint(self, filename, map_location='cpu', strict=False):
+        """Load checkpoint with weights_only=False to handle MMEngine config objects."""
+        print(f"Loading checkpoint from {filename} with weights_only=False for PyTorch 2.6+ compatibility...")
+        try:
+            # Try loading with weights_only=False for PyTorch 2.6+
+            checkpoint = torch.load(filename, map_location=map_location, weights_only=False)
+            self.model.load_state_dict(checkpoint['state_dict'], strict=strict)
+            return checkpoint
+        except TypeError as e:
+            # If weights_only is not a valid parameter (older PyTorch), try without it
+            if 'weights_only' in str(e):
+                print("Your PyTorch version doesn't have the weights_only parameter. Using default loading.")
+                checkpoint = torch.load(filename, map_location=map_location)
+                self.model.load_state_dict(checkpoint['state_dict'], strict=strict)
+                return checkpoint
+            else:
+                raise
 
 def evaluate_checkpoint_mre(config_file_path: str,
                             checkpoint_file_path: str,
@@ -97,9 +122,27 @@ def evaluate_checkpoint_mre(config_file_path: str,
 
     # --- Build the Runner and Run Evaluation ---
     print("Building runner...")
-    runner = Runner.from_cfg(cfg)
-
+    # Use our custom runner to handle checkpoint loading restrictions in PyTorch 2.6+
+    cfg.runner_type = 'CustomRunner'
+    runner = RUNNERS.build(cfg)
+    
     print(f"Starting evaluation with checkpoint: {checkpoint_file_path}")
+    # Load the checkpoint directly, avoiding the Runner.load_checkpoint method
+    # This isn't ideal, but we're working around limitations in MMEngine with PyTorch 2.6+
+    try:
+        print("Attempting to load checkpoint...")
+        runner.load_checkpoint(checkpoint_file_path)
+    except Exception as e:
+        print(f"Error loading checkpoint: {e}")
+        print("\nFallback: You can try manually loading this checkpoint in a separate script that adds")
+        print("the necessary MMEngine classes to PyTorch's safe globals list:")
+        print("```python")
+        print("import torch.serialization")
+        print("from mmengine.config import ConfigDict")
+        print("torch.serialization.add_safe_globals([ConfigDict])")
+        print("```")
+        return None
+        
     metrics = runner.test()
 
     print("\n--- Evaluation Results ---")
