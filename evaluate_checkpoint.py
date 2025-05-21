@@ -7,6 +7,7 @@ import torch
 from mmengine.config import Config
 from mmengine.runner import Runner, load_checkpoint
 from mmengine.registry import init_default_scope, MODELS
+from mmengine.config.config import ConfigDict
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 
@@ -147,8 +148,20 @@ def evaluate_checkpoint(config_path, checkpoint_path, test_json=None, out_dir='e
     # Build the model
     model = MODELS.build(cfg.model)
     
-    # Load checkpoint
-    load_checkpoint(model, checkpoint_path, map_location='cpu')
+    # Add ConfigDict to safe globals to avoid PyTorch 2.6+ security errors
+    try:
+        import torch.serialization
+        # First option: Add ConfigDict to safe globals (preferred for security)
+        torch.serialization.add_safe_globals([ConfigDict])
+        # Load checkpoint
+        load_checkpoint(model, checkpoint_path, map_location='cpu')
+    except (ImportError, AttributeError):
+        # Fallback for older PyTorch versions or if add_safe_globals doesn't exist
+        print("Warning: Using torch.load with weights_only=False for compatibility.")
+        from mmengine.runner.checkpoint import _load_checkpoint
+        checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
+        _load_checkpoint(checkpoint, model, None, strict=True)
+    
     model.eval()
     
     # Convert to GPU if available
