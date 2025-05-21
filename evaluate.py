@@ -79,8 +79,19 @@ def evaluate_checkpoint_mre(config_file_path: str,
     )
 
     # --- Override/Set up Test Evaluator for MRE (EPE) ---
-    print("Setting up test evaluator for KeypointEndPointError (MRE/EPE).")
-    cfg.test_evaluator = dict(type='EPE')
+    print("Setting up test evaluator for PCKAccuracy and NME.")
+    cfg.test_evaluator = [
+        dict(
+            type='PCKAccuracy',  # Percentage of Correct Keypoints
+            thr=0.05, # 5% of the reference distance, adjust as needed
+            norm_item='bbox_size', # Can be 'bbox_size', 'bbox_diag'
+        ),
+        dict(
+            type='NME',  # Normalized Mean Error
+            norm_mode='keypoint_distance', # 'keypoint_distance' or 'bbox_size'
+            # norm_factor is calculated automatically based on keypoint distance
+        )
+    ]
     
     # --- Set up Test Configuration for the Runner ---
     cfg.test_cfg = dict() # Needs to be present
@@ -100,13 +111,22 @@ def evaluate_checkpoint_mre(config_file_path: str,
 
     print("\n--- Evaluation Results ---")
     if metrics:
-        mre_value = metrics.get('EPE', metrics.get('mEPE')) # Common keys for End-Point-Error
-        if mre_value is not None:
-            print(f"Mean Radial Error (EPE): {mre_value:.4f} pixels")
-        else:
-            print("EPE/MRE metric not found in results. Available metrics:")
+        # Check for NME or PCK metrics
+        nme_value = metrics.get('NME', None)
+        pck_value = metrics.get('PCK', None)
+        
+        if nme_value is not None:
+            print(f"Normalized Mean Error (NME): {nme_value:.4f}")
+        
+        if pck_value is not None:
+            print(f"Percentage of Correct Keypoints (PCK@0.05): {pck_value:.4f}")
+            
+        # If neither specific metric is found, show all available metrics
+        if nme_value is None and pck_value is None:
+            print("NME and PCK metrics not found. Available metrics:")
             for k, v in metrics.items():
                 print(f"  {k}: {v}")
+        
         return metrics
     else:
         print("Evaluation did not return any metrics.")
