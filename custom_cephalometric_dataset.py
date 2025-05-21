@@ -126,6 +126,7 @@ class CustomCephalometricDataset(BaseDataset):
                 'img_path': str(row.get('patient_id', f'index_{index}')),
                 'img_id': str(row.get('patient_id', index)),
                 'bbox': bbox,
+                'bbox_scores': np.array([1.0], dtype=np.float32).reshape(1,1), # Add bbox_scores for the ground truth
                 'keypoints': keypoints.reshape(1, num_keypoints, 2),  # Reshape to (1, K, 2) for single instance
                 'keypoints_visible': keypoints_visible.reshape(1, num_keypoints),  # Reshape to (1, K) for single instance
                 'id': str(row.get('patient_id', index)),
