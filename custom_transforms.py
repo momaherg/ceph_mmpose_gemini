@@ -41,4 +41,26 @@ class LoadImageNumpy(LoadImage):
 print(f"LoadImageNumpy registered: {TRANSFORMS.get('LoadImageNumpy') is not None}")
 
 # This will output all registered transforms for debugging
-print("Registered transforms:", list(TRANSFORMS.module_dict.keys())) 
+print("Registered transforms:", list(TRANSFORMS.module_dict.keys()))
+
+@TRANSFORMS.register_module(force=True)
+class DebugInspectKeys(LoadImage): # Inherits from LoadImage just to have a base class
+    def __init__(self, keys_to_inspect=None, shapes_only=True, **kwargs):
+        super().__init__(**kwargs)
+        self.keys_to_inspect = keys_to_inspect if keys_to_inspect else []
+        self.shapes_only = shapes_only
+        print(f"DebugInspectKeys initialized to inspect: {self.keys_to_inspect}")
+
+    def transform(self, results: dict) -> dict:
+        print("--- DebugInspectKeys: Inspecting results ---")
+        for key in self.keys_to_inspect:
+            if key in results:
+                value = results[key]
+                if self.shapes_only and hasattr(value, 'shape'):
+                    print(f"  Key: '{key}', Shape: {value.shape}, Type: {type(value)}")
+                else:
+                    print(f"  Key: '{key}', Value: {value}, Type: {type(value)}")
+            else:
+                print(f"  Key: '{key}' not found in results.")
+        print("--- DebugInspectKeys: Inspection done ---")
+        return results 
