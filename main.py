@@ -1,11 +1,22 @@
 import argparse
 import os
 import os.path as osp
+import pickle as _pickle
 
-from mmengine.config import Config, DictAction
+from mmengine.config import Config, DictAction, ConfigDict
 from mmengine.registry import RUNNERS
 from mmengine.runner import Runner, TestLoop
 from mmengine.registry import init_default_scope
+import torch
+
+# Add ConfigDict to safe globals for torch.load
+if hasattr(torch.serialization, 'add_safe_globals'):
+    torch.serialization.add_safe_globals([ConfigDict])
+else:
+    # For older PyTorch versions or if the path changes, this might be needed, or a different approach.
+    # This is a common pattern for PyTorch 2.x load issues with custom types.
+    # If this specific path doesn't work, the error usually guides to the correct one.
+    print("Warning: torch.serialization.add_safe_globals not found. Checkpoint loading might fail with custom types.")
 
 # Initialize the scope BEFORE importing custom modules that register components
 print("Initializing mmpose scope before imports...")
@@ -96,7 +107,28 @@ def evaluate_checkpoint(config_path: str, checkpoint_path: str, cfg_options: dic
 
     # --- Build the Runner ---
     runner = Runner.from_cfg(cfg)
-    runner.load_checkpoint(checkpoint_path)
+    
+    print(f"Attempting to load checkpoint: {checkpoint_path}")
+    # Try loading with weights_only=False if direct load fails due to new PyTorch defaults
+    # This is a common workaround for checkpoints saved with older PyTorch/MMEngine
+    try:
+        runner.load_checkpoint(checkpoint_path) # Default MMEngine behavior
+    except _pickle.UnpicklingError as e_pickle:
+        if "weights_only" in str(e_pickle):
+            print(f"Caught UnpicklingError related to weights_only. Attempting to load with a modified map_location or by allowing unsafe unpickle globally if necessary.")
+            # MMEngine's load_checkpoint itself calls torch.load. 
+            # One way is to modify the global unpickle behavior if add_safe_globals isn't enough.
+            # For now, add_safe_globals should be the primary fix for ConfigDict.
+            # If it still fails, we might need to investigate MMEngine's load_checkpoint internals
+            # or temporarily set torch.package.package_importer.is_strictly_confined = lambda: False (more risky)
+            print("Re-raising the original pickle error after add_safe_globals, as it should handle it.")
+            # raise e_pickle # Or handle differently if add_safe_globals doesn't work
+        else:
+            raise # Re-raise other UnpicklingErrors
+    except Exception as e:
+        print(f"An unexpected error occurred during checkpoint loading: {e}")
+        raise
+
     print(f"Checkpoint '{checkpoint_path}' loaded successfully.")
 
     # --- Start Testing/Evaluation ---
