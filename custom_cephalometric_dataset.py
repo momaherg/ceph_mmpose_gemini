@@ -118,15 +118,16 @@ class CustomCephalometricDataset(BaseDataset):
                     keypoints[i, 1] = 0
                     keypoints_visible[i] = 0 
             
-            bbox_xywh = np.array([0, 0, 224, 224], dtype=np.float32)
+            # Ensure bbox has the right shape for a single instance: (1, 4) instead of (4,)
+            bbox = np.array([[0, 0, 224, 224]], dtype=np.float32)  # Note the extra brackets to make it (1, 4)
 
             data_info = {
                 'img': img_np,
                 'img_path': str(row.get('patient_id', f'index_{index}')),
                 'img_id': str(row.get('patient_id', index)),
-                'bbox': bbox_xywh,
-                'keypoints': keypoints,
-                'keypoints_visible': keypoints_visible,
+                'bbox': bbox,
+                'keypoints': keypoints.reshape(1, num_keypoints, 2),  # Reshape to (1, K, 2) for single instance
+                'keypoints_visible': keypoints_visible.reshape(1, num_keypoints),  # Reshape to (1, K) for single instance
                 'id': str(row.get('patient_id', index)),
                 'ori_shape': (224, 224),
                 'img_shape': (224, 224),
