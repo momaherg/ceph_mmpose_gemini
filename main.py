@@ -4,7 +4,7 @@ import os.path as osp
 
 from mmengine.config import Config, DictAction
 from mmengine.registry import RUNNERS
-from mmengine.runner import Runner
+from mmengine.runner import Runner, TestLoop
 from mmengine.registry import init_default_scope
 
 # Initialize the scope BEFORE importing custom modules that register components
@@ -17,15 +17,17 @@ print("Importing custom modules for registration...")
 import custom_cephalometric_dataset # Registers CustomCephalometricDataset
 import custom_transforms           # Registers LoadImageNumpy
 import cephalometric_dataset_info  # Makes dataset_info available for the config file
+import mre_metric                  # Registers MeanRadialError metric
 
 def parse_args():
-    parser = argparse.ArgumentParser(description='Train a pose model using MMEngine')
+    parser = argparse.ArgumentParser(description='Train or Test a pose model using MMEngine')
     parser.add_argument(
         'config',
         default='configs/hrnetv2/hrnetv2_w18_cephalometric_224x224.py',
-        help='train config file path'
+        help='train/test config file path'
     )
     parser.add_argument('--work-dir', help='the directory to save logs and models')
+    parser.add_argument('--checkpoint', help='checkpoint file to load for testing')
     parser.add_argument(
         '--cfg-options',
         nargs='+',
@@ -33,69 +35,132 @@ def parse_args():
         help='override some settings in the used config, the key-value pair ' 
         'in xxx=yyy format will be merged into config file. If the value to ' 
         'be overwritten is a list, it should be like key="[a,b]" or key=a,b ' 
-        'It also allows nested list/tuple values, e.g. key="[(a,b),(c,d)]". '
+        'It also allows nested list/tuple values, e.g. key="[(a,b),(c,d)]". ' 
         'Note that string values are surrounded with "". Example: ' 
-        'python tools/train.py configs/hrnetv2_w18_cephalometric_224x224.py ' 
-        '--cfg-options model.backbone.depth=18 model.backbone.with_cp=True'
+        'python main.py configs/hrnetv2/... --cfg-options model.backbone.depth=18'
     )
-    # When running in Jupyter, args might be an empty list or None
-    # Provide a default for args if running in such an environment
-    # args = parser.parse_args(args=[]) # For Jupyter, pass empty list
-    # However, for a script, we expect command-line args or direct specification.
-    # For this setup, we'll use the default config path directly.
-    # args = parser.parse_args([]) # Use this if you need to run parse_args() in a notebook cell with no CLI args
-    return parser
+    parser.add_argument(
+        '--mode', 
+        choices=['train', 'test'], 
+        default='train', 
+        help='Whether to run training or testing'
+    )
+    args = parser.parse_args() # Use this for script execution
+    # For Jupyter, you might need to provide args manually if not running from CLI:
+    # args = parser.parse_args(args=[] + ['--mode', 'test', '--checkpoint', 'path/to/your.pth'])
+    return args
+
+def evaluate_checkpoint(config_path: str, checkpoint_path: str, cfg_options: dict = None):
+    """Evaluate a model checkpoint with the MRE metric."""
+    print(f"\n--- Starting Evaluation for Checkpoint: {checkpoint_path} ---")
+    
+    # --- Configuration Loading for Evaluation ---
+    cfg = Config.fromfile(config_path)
+    if cfg_options:
+        cfg.merge_from_dict(cfg_options)
+
+    # --- Setup for Testing --- 
+    # Ensure a test dataloader and evaluator are defined for MRE
+    # If you have a specific test JSON file, use it. Otherwise, use dev/val set for evaluation.
+    # For now, let's assume we use the 'dev_data_pure_old_numpy.json' for this example.
+    # IMPORTANT: Ensure this file exists or change to your actual test set annotation file.
+    test_ann_file = 'dev_data_pure_old_numpy.json' # Or your specific test set JSON
+    
+    if not osp.exists(osp.join(cfg.data_root, test_ann_file)):
+        print(f"Warning: Test annotation file '{test_ann_file}' not found at '{osp.join(cfg.data_root, test_ann_file)}'. Using train set for evaluation as a fallback.")
+        print("This is NOT recommended for proper evaluation. Please provide a valid test/dev set.")
+        test_ann_file = cfg.train_dataloader.dataset.ann_file # Fallback to train set if dev set not found
+
+    cfg.test_dataloader = dict(
+        batch_size=32,
+        num_workers=4,
+        persistent_workers=True,
+        drop_last=False,
+        sampler=dict(type='DefaultSampler', shuffle=False),
+        dataset=dict(
+            type=cfg.dataset_type, # Use from existing config
+            data_root=cfg.data_root, # Use from existing config
+            ann_file=test_ann_file, 
+            metainfo=cfg.train_dataloader.dataset.metainfo, # Reuse from train
+            pipeline=cfg.val_pipeline if hasattr(cfg, 'val_pipeline') and cfg.val_pipeline else cfg.train_pipeline, # Use val_pipeline if exists
+            test_mode=True,
+        )
+    )
+    cfg.test_evaluator = dict(type='MeanRadialError')
+    cfg.test_cfg = dict() # Ensure test_cfg is present
+
+    # --- Work Directory (Optional for testing, but good practice) ---
+    cfg.work_dir = osp.join('./work_dirs', osp.splitext(osp.basename(config_path))[0] + '_test')
+    os.makedirs(osp.abspath(cfg.work_dir), exist_ok=True)
+    print(f"Test work directory set to: {osp.abspath(cfg.work_dir)}")
+
+    # --- Build the Runner ---
+    runner = Runner.from_cfg(cfg)
+    runner.load_checkpoint(checkpoint_path)
+    print(f"Checkpoint '{checkpoint_path}' loaded successfully.")
+
+    # --- Start Testing/Evaluation ---
+    try:
+        print("Launching evaluation...")
+        metrics = runner.test() # MMEngine 0.6.0+ uses runner.test()
+        print("--- Evaluation Finished ---")
+        print("Evaluation Metrics:")
+        for k, v in metrics.items():
+            print(f"  {k}: {v:.4f}")
+        return metrics
+    except Exception as e:
+        print(f"An error occurred during evaluation: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
 
 def main():
     # Scope is already initialized at the top of the file
-    # No need to call init_default_scope again
-    
-    print("Starting training process...")
-    
+    args = parse_args()
+
+    print(f"Running in mode: {args.mode}")
+
     # --- Configuration Loading ---
-    # Use a fixed config path for simplicity in this notebook-like environment
-    # In a typical script, you'd use parse_args()
-    config_path = 'configs/hrnetv2/hrnetv2_w18_cephalometric_224x224.py'
-    work_dir = 'work_dirs/hrnetv2_w18_cephalometric_experiment' # Define a working directory
-    cfg_options = None # No overrides for now
+    config_path = args.config
+    cfg_options = args.cfg_options
+    
+    if args.mode == 'test':
+        if not args.checkpoint:
+            print("Error: Checkpoint path must be provided for testing. Use --checkpoint <path_to_checkpoint>")
+            return
+        evaluate_checkpoint(config_path, args.checkpoint, cfg_options)
+        return # Exit after testing
+
+    # --- Training Mode (existing code) --- 
+    print("Starting training process...")
+    work_dir = args.work_dir
 
     if not osp.exists(config_path):
         print(f"Config file not found at: {config_path}")
         print("Please ensure the config file exists at the specified path.")
         print(f"Current CWD: {os.getcwd()}")
-        # Try to provide a hint if it's in a common relative location
         if osp.exists(osp.join(os.getcwd(), config_path)):
             print(f"Found config at: {osp.join(os.getcwd(), config_path)}")
         return
 
     cfg = Config.fromfile(config_path)
-
-    if cfg_options is not None:
+    if cfg_options:
         cfg.merge_from_dict(cfg_options)
     
-    # --- Setup Work Directory ---
     if work_dir is not None:
         cfg.work_dir = work_dir
     elif cfg.get('work_dir', None) is None:
-        # Use config name as work_dir if not set
         cfg.work_dir = osp.join('./work_dirs', osp.splitext(osp.basename(config_path))[0])
     
     os.makedirs(osp.abspath(cfg.work_dir), exist_ok=True)
     print(f"Work directory set to: {osp.abspath(cfg.work_dir)}")
 
-    # --- Build the Runner ---
-    # The runner is responsible for managing the training, validation, and testing loops.
     if 'runner_type' not in cfg:
-        # Build a runner from config and registered modules
         runner = Runner.from_cfg(cfg)
     else:
-        # Build a runner from registry
         runner = RUNNERS.build(cfg)
-    
     print("Runner built successfully.")
 
-    # --- Start Training ---
-    # `train_dataloader` and `model` will be built by the runner based on the config
     try:
         print("Launching training...")
         runner.train()
@@ -106,19 +171,5 @@ def main():
         traceback.print_exc()
         return
 
-    # --- (Optional) Start Testing/Evaluation after training ---
-    # You might want to load the best checkpoint and evaluate
-    # best_checkpoint_path = osp.join(cfg.work_dir, 'best_PCKAccuracy_epoch_X.pth') # Replace X with actual epoch
-    # if osp.exists(best_checkpoint_path):
-    #     print(f"\nStarting evaluation with best checkpoint: {best_checkpoint_path}")
-    #     runner.load_checkpoint(best_checkpoint_path)
-    #     val_dataloader_cfg = cfg.val_dataloader
-    #     val_evaluator_cfg = cfg.val_evaluator
-    #     metrics = runner.test(val_dataloader_cfg, val_evaluator_cfg)
-    #     print("Evaluation metrics:", metrics)
-    # else:
-    #     print(f"Best checkpoint not found for evaluation. Looked in {cfg.work_dir}")
-
 if __name__ == '__main__':
-    # args = parse_args() # Uncomment if you want to use command-line arguments
     main()
