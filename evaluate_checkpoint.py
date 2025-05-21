@@ -144,8 +144,9 @@ def evaluate_checkpoint(config_path, checkpoint_path, test_json=None, out_dir='e
     if show_dir:
         os.makedirs(show_dir, exist_ok=True)
     
-    # Build the model
-    model = Runner.build_model(cfg.model)
+    # Build the model using the MODELS registry
+    from mmpose.registry import MODELS # Ensure MODELS registry is imported
+    model = MODELS.build(cfg.model)
     
     # Load checkpoint
     load_checkpoint(model, checkpoint_path, map_location='cpu')
