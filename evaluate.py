@@ -80,7 +80,7 @@ def evaluate_checkpoint_mre(config_file_path: str,
 
     # --- Override/Set up Test Evaluator for MRE (EPE) ---
     print("Setting up test evaluator for KeypointEndPointError (MRE/EPE).")
-    cfg.test_evaluator = dict(type='KeypointEndPointError')
+    cfg.test_evaluator = dict(type='EPE')
     
     # --- Set up Test Configuration for the Runner ---
     cfg.test_cfg = dict() # Needs to be present
