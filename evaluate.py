@@ -68,7 +68,20 @@ def evaluate_checkpoint_mre(config_file_path: str,
     input_size = cfg.get('input_size', (224, 224)) # Get from global scope or model if not top-level
     if isinstance(input_size, dict): # Sometimes it might be within model config
         input_size = cfg.model.head.decoder.get('input_size', (224,224))
-
+        
+    # Disable flip testing in the model
+    print("Disabling flip testing for cephalometric landmarks...")
+    if hasattr(cfg.model, 'test_cfg'):
+        cfg.model.test_cfg.flip_test = False
+        cfg.model.test_cfg.flip_mode = None
+        cfg.model.test_cfg.shift_heatmap = False
+    else:
+        # If test_cfg is not defined at model level, create it
+        cfg.model.test_cfg = dict(
+            flip_test=False,
+            flip_mode=None,
+            shift_heatmap=False
+        )
 
     # Define the test pipeline (should match val_pipeline if it was for testing)
     # Reconstructing based on what was in the original config's val_pipeline
