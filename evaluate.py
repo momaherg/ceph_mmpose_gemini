@@ -4,7 +4,7 @@ from mmengine.config import Config
 from mmengine.runner import Runner
 from mmengine.registry import init_default_scope
 import torch
-from mmengine.registry import RUNNERS
+from mmengine.registry import RUNNERS, MODELS
 
 # These imports are crucial for the MMEngine registry to find your custom classes
 # and for the config to load dataset metainfo.
@@ -37,6 +37,46 @@ class CustomRunner(Runner):
                 return checkpoint
             else:
                 raise
+
+# Define a custom pose estimator to handle missing bbox_scores
+@MODELS.register_module(force=True)
+class CustomTopdownPoseEstimator(torch.nn.Module):
+    """A custom wrapper for TopdownPoseEstimator that handles missing bbox_scores attribute."""
+    
+    def __init__(self, model):
+        super().__init__()
+        self.model = model
+        # Keep original attributes
+        self.backbone = model.backbone
+        self.neck = getattr(model, 'neck', None)
+        self.head = model.head
+        self.data_preprocessor = model.data_preprocessor
+        self.test_cfg = getattr(model, 'test_cfg', None)
+    
+    def forward(self, *args, **kwargs):
+        """Forward function that adds missing bbox_scores if needed."""
+        mode = kwargs.get('mode', 'tensor')
+        
+        if mode == 'predict':
+            # Get data_samples from kwargs
+            data_samples = kwargs.get('data_samples', None)
+            if data_samples is not None:
+                # Add bbox_scores if missing
+                for sample in data_samples:
+                    if hasattr(sample, 'gt_instances'):
+                        if not hasattr(sample.gt_instances, 'bbox_scores'):
+                            # Add dummy bbox_scores with value 1.0
+                            import torch
+                            import numpy as np
+                            if hasattr(sample.gt_instances, 'bboxes'):
+                                num_bboxes = len(sample.gt_instances.bboxes)
+                                if isinstance(sample.gt_instances.bboxes, torch.Tensor):
+                                    sample.gt_instances.bbox_scores = torch.ones(num_bboxes, dtype=torch.float32)
+                                else:
+                                    sample.gt_instances.bbox_scores = np.ones(num_bboxes, dtype=np.float32)
+        
+        # Forward to the original model
+        return self.model(*args, **kwargs)
 
 def evaluate_checkpoint_mre(config_file_path: str,
                             checkpoint_file_path: str,
@@ -137,6 +177,16 @@ def evaluate_checkpoint_mre(config_file_path: str,
     print("Building runner...")
     # Use our custom runner to handle checkpoint loading restrictions in PyTorch 2.6+
     cfg.runner_type = 'CustomRunner'
+    
+    # Modify the model definition to use our custom wrapper
+    # Save original model config
+    original_model_cfg = cfg.model.copy()
+    # Update to use our custom wrapper
+    cfg.model = dict(
+        type='CustomTopdownPoseEstimator',
+        model=original_model_cfg
+    )
+    
     runner = RUNNERS.build(cfg)
     
     print(f"Starting evaluation with checkpoint: {checkpoint_file_path}")
