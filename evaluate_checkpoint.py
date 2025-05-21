@@ -6,7 +6,7 @@ import numpy as np
 import torch
 from mmengine.config import Config
 from mmengine.runner import Runner, load_checkpoint
-from mmengine.registry import init_default_scope
+from mmengine.registry import init_default_scope, MODELS
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 
@@ -144,17 +144,11 @@ def evaluate_checkpoint(config_path, checkpoint_path, test_json=None, out_dir='e
     if show_dir:
         os.makedirs(show_dir, exist_ok=True)
     
-    # Build the model using the MODELS registry
-    from mmpose.registry import MODELS # Ensure MODELS registry is imported
+    # Build the model
     model = MODELS.build(cfg.model)
     
-    # For PyTorch 2.6+ safety, explicitly allow ConfigDict if checkpoint contains it
-    from mmengine.config import ConfigDict
-    import torch.serialization
-    torch.serialization.add_safe_globals([ConfigDict])
-
     # Load checkpoint
-    load_checkpoint(model, checkpoint_path, map_location='cpu') # Removed weights_only=False
+    load_checkpoint(model, checkpoint_path, map_location='cpu')
     model.eval()
     
     # Convert to GPU if available
