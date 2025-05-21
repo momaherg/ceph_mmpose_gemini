@@ -93,6 +93,13 @@ def evaluate_checkpoint(config_path: str, checkpoint_path: str, cfg_options: dic
     # --- Build the Runner ---
     runner = Runner.from_cfg(cfg)
     
+    # --- Disable flip testing ---
+    # Cephalometric landmarks don't have clear left-right counterparts
+    # This is needed because model's test_cfg tries to use flip_indices
+    print("Disabling flip testing for cephalometric landmarks...")
+    if hasattr(runner.model, 'test_cfg'):
+        runner.model.test_cfg.flip_test = False
+    
     # --- Load Checkpoint ---
     print(f"Loading checkpoint '{checkpoint_path}'...")
     import torch
