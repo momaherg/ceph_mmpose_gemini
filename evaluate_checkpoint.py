@@ -349,6 +349,8 @@ def evaluate_cephalometric_checkpoint(checkpoint_path: str,
         
         if config_path is None:
             raise FileNotFoundError(f"Could not find config file. Tried: {possible_configs}")
+        
+    config_path = "/content/ceph_mmpose_gemini/configs/hrnetv2/hrnetv2_w18_cephalometric_224x224.py"
     
     return evaluate_checkpoint(
         checkpoint_path=checkpoint_path,
@@ -366,7 +368,7 @@ if __name__ == "__main__":
     checkpoint_path = "work_dirs/hrnetv2_w18_cephalometric_experiment/best_PCKAccuracy_epoch_45.pth"
     
     # Example config path
-    config_path = "configs/hrnetv2/hrnetv2_w18_cephalometric_224x224.py"
+    config_path = "/content/ceph_mmpose_gemini/configs/hrnetv2/hrnetv2_w18_cephalometric_224x224.py"
     
     # Data root
     data_root = "/content/drive/MyDrive/Lala's Masters/"
