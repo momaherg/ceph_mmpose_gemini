@@ -12,6 +12,17 @@ from typing import Dict, List, Tuple, Optional
 import warnings
 warnings.filterwarnings('ignore')
 
+# PyTorch 2.6 compatibility for MMEngine checkpoints
+try:
+    from mmengine.config.config import ConfigDict
+    # Add ConfigDict to safe globals for PyTorch 2.6+ compatibility
+    torch.serialization.add_safe_globals([ConfigDict])
+    print("Added ConfigDict to PyTorch safe globals for checkpoint loading")
+except (ImportError, AttributeError) as e:
+    print(f"Note: Could not add ConfigDict to safe globals: {e}")
+    # Fallback: try to set weights_only=False globally if possible
+    pass
+
 # Import your custom modules (make sure these are available in your environment)
 try:
     import custom_cephalometric_dataset
@@ -198,8 +209,30 @@ def evaluate_checkpoint(checkpoint_path: str,
         model = init_model(config_path, checkpoint_path, device=device)
         print("Model loaded successfully!")
     except Exception as e:
-        print(f"Error loading model: {e}")
-        raise
+        error_msg = str(e)
+        if "weights_only" in error_msg or "WeightsUnpickler" in error_msg:
+            print(f"PyTorch 2.6 checkpoint loading error detected: {e}")
+            print("\nTrying alternative loading methods...")
+            
+            # Try with safe_globals context manager
+            try:
+                from mmengine.config.config import ConfigDict
+                with torch.serialization.safe_globals([ConfigDict]):
+                    model = init_model(config_path, checkpoint_path, device=device)
+                print("Model loaded successfully using safe_globals context manager!")
+            except Exception as e2:
+                print(f"Context manager approach failed: {e2}")
+                print("\nTo fix this PyTorch 2.6 compatibility issue, you can:")
+                print("1. Downgrade PyTorch: pip install torch==2.5.1")
+                print("2. Or add this code before evaluation:")
+                print("   import torch")
+                print("   from mmengine.config.config import ConfigDict")
+                print("   torch.serialization.add_safe_globals([ConfigDict])")
+                print("3. Or set weights_only=False in PyTorch load calls (less secure)")
+                raise RuntimeError("Failed to load checkpoint due to PyTorch 2.6 compatibility issue")
+        else:
+            print(f"Error loading model: {e}")
+            raise
     
     # Load test dataset
     try:
