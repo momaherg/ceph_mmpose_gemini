@@ -15,11 +15,34 @@ warnings.filterwarnings('ignore')
 # PyTorch 2.6 compatibility for MMEngine checkpoints
 try:
     from mmengine.config.config import ConfigDict
-    # Add ConfigDict to safe globals for PyTorch 2.6+ compatibility
-    torch.serialization.add_safe_globals([ConfigDict])
-    print("Added ConfigDict to PyTorch safe globals for checkpoint loading")
+    from mmengine.logging.history_buffer import HistoryBuffer
+    # Add common MMEngine classes to safe globals for PyTorch 2.6+ compatibility
+    mmengine_classes = [ConfigDict, HistoryBuffer]
+    
+    # Try to import other common MMEngine classes that might be in checkpoints
+    try:
+        from mmengine.logging.logger import MMLogger
+        mmengine_classes.append(MMLogger)
+    except ImportError:
+        pass
+    
+    try:
+        from mmengine.registry.registry import Registry
+        mmengine_classes.append(Registry)
+    except ImportError:
+        pass
+        
+    try:
+        from mmengine.utils.misc import DefaultScope
+        mmengine_classes.append(DefaultScope)
+    except ImportError:
+        pass
+    
+    torch.serialization.add_safe_globals(mmengine_classes)
+    print(f"Added {len(mmengine_classes)} MMEngine classes to PyTorch safe globals for checkpoint loading")
+    print(f"Classes: {[cls.__name__ for cls in mmengine_classes]}")
 except (ImportError, AttributeError) as e:
-    print(f"Note: Could not add ConfigDict to safe globals: {e}")
+    print(f"Note: Could not add MMEngine classes to safe globals: {e}")
     # Fallback: try to set weights_only=False globally if possible
     pass
 
@@ -217,7 +240,31 @@ def evaluate_checkpoint(checkpoint_path: str,
             # Try with safe_globals context manager
             try:
                 from mmengine.config.config import ConfigDict
-                with torch.serialization.safe_globals([ConfigDict]):
+                from mmengine.logging.history_buffer import HistoryBuffer
+                
+                # Collect all MMEngine classes that might be in checkpoints
+                safe_classes = [ConfigDict, HistoryBuffer]
+                
+                # Add other classes if available
+                try:
+                    from mmengine.logging.logger import MMLogger
+                    safe_classes.append(MMLogger)
+                except ImportError:
+                    pass
+                    
+                try:
+                    from mmengine.registry.registry import Registry
+                    safe_classes.append(Registry)
+                except ImportError:
+                    pass
+                    
+                try:
+                    from mmengine.utils.misc import DefaultScope
+                    safe_classes.append(DefaultScope)
+                except ImportError:
+                    pass
+                
+                with torch.serialization.safe_globals(safe_classes):
                     model = init_model(config_path, checkpoint_path, device=device)
                 print("Model loaded successfully using safe_globals context manager!")
             except Exception as e2:
@@ -227,7 +274,8 @@ def evaluate_checkpoint(checkpoint_path: str,
                 print("2. Or add this code before evaluation:")
                 print("   import torch")
                 print("   from mmengine.config.config import ConfigDict")
-                print("   torch.serialization.add_safe_globals([ConfigDict])")
+                print("   from mmengine.logging.history_buffer import HistoryBuffer")
+                print("   torch.serialization.add_safe_globals([ConfigDict, HistoryBuffer])")
                 print("3. Or set weights_only=False in PyTorch load calls (less secure)")
                 raise RuntimeError("Failed to load checkpoint due to PyTorch 2.6 compatibility issue")
         else:
