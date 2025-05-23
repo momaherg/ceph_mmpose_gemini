@@ -301,6 +301,7 @@ def evaluate_checkpoint(checkpoint_path: str,
                     img_np = img_np.astype(np.float32)
                     img_np = (img_np - mean.reshape(3, 1, 1)) / std.reshape(3, 1, 1)
                     
+                    # Add batch dimension: CHW -> NCHW
                     data_info['img'] = torch.from_numpy(img_np).unsqueeze(0).to(device)
                 
                 # Run model inference
@@ -311,14 +312,18 @@ def evaluate_checkpoint(checkpoint_path: str,
                         if isinstance(data_info, dict) and 'inputs' in data_info:
                             outputs = model.test_step(data_info)
                         else:
-                            # Prepare inputs for the model
+                            # Prepare inputs for the model - ensure NCHW format
                             inputs = data_info['img'] if isinstance(data_info['img'], torch.Tensor) else torch.from_numpy(data_info['img']).to(device)
-                            if len(inputs.shape) == 3:
-                                inputs = inputs.unsqueeze(0)
                             
-                            # Create a simple data batch
+                            # Ensure we have batch dimension
+                            if len(inputs.shape) == 3:  # CHW -> NCHW
+                                inputs = inputs.unsqueeze(0)
+                            elif len(inputs.shape) == 4 and inputs.shape[0] != 1:  # Make sure batch size is 1
+                                inputs = inputs[:1]  # Take first item if multiple
+                            
+                            # Create a proper data batch for test_step
                             data_batch = {
-                                'inputs': inputs,
+                                'inputs': inputs,  # Shape should be [1, 3, 224, 224]
                                 'data_samples': [{
                                     'img_shape': (224, 224),
                                     'ori_shape': (224, 224),
@@ -333,7 +338,9 @@ def evaluate_checkpoint(checkpoint_path: str,
                         inputs = data_info['img']
                         if not isinstance(inputs, torch.Tensor):
                             inputs = torch.from_numpy(inputs).to(device)
-                        if len(inputs.shape) == 3:
+                        
+                        # Ensure we have batch dimension for direct forward pass too
+                        if len(inputs.shape) == 3:  # CHW -> NCHW
                             inputs = inputs.unsqueeze(0)
                         
                         outputs = model(inputs)
