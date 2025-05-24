@@ -336,7 +336,16 @@ def evaluate_checkpoint(checkpoint_path: str,
                 if isinstance(outputs, list) and len(outputs) > 0:
                     output = outputs[0]
                     if hasattr(output, 'pred_instances') and hasattr(output.pred_instances, 'keypoints'):
-                        pred_keypoints = output.pred_instances.keypoints.cpu().numpy()
+                        pred_keypoints = output.pred_instances.keypoints
+                        # Handle both torch tensors and numpy arrays
+                        if isinstance(pred_keypoints, torch.Tensor):
+                            pred_keypoints = pred_keypoints.cpu().numpy()
+                        elif isinstance(pred_keypoints, np.ndarray):
+                            pred_keypoints = pred_keypoints
+                        else:
+                            print(f"Warning: Unexpected keypoints type: {type(pred_keypoints)}")
+                            continue
+                            
                         if len(pred_keypoints.shape) == 3 and pred_keypoints.shape[0] == 1:  # (1, K, 2)
                             pred_keypoints = pred_keypoints[0]  # Take first instance: (K, 2)
                     else:
