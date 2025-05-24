@@ -297,6 +297,9 @@ def evaluate_checkpoint(checkpoint_path: str,
                     'input_size': (224, 224),
                     'input_center': np.array([112.0, 112.0]),
                     'input_scale': np.array([224.0, 224.0]),
+                    # Add flip_indices - for cephalometric landmarks, most are midline so no real flipping
+                    # Using identity mapping (no actual flipping) since these are mostly midline landmarks
+                    'flip_indices': list(range(num_keypoints)),  # [0,1,2,...,18] - no actual flipping
                 })
                 
                 # Prepare batch data
@@ -308,7 +311,18 @@ def evaluate_checkpoint(checkpoint_path: str,
                 # Run inference
                 model.eval()
                 with torch.no_grad():
+                    # Temporarily disable flip testing for simpler evaluation
+                    original_test_cfg = getattr(model, 'test_cfg', None)
+                    if original_test_cfg and hasattr(original_test_cfg, 'flip_test'):
+                        # Temporarily disable flip testing
+                        model.test_cfg = model.test_cfg.copy() if hasattr(model.test_cfg, 'copy') else dict(model.test_cfg)
+                        model.test_cfg['flip_test'] = False
+                    
                     outputs = model.test_step(batch_data)
+                    
+                    # Restore original test_cfg
+                    if original_test_cfg:
+                        model.test_cfg = original_test_cfg
                 
                 # Extract keypoints from output
                 if isinstance(outputs, list) and len(outputs) > 0:
