@@ -302,6 +302,10 @@ def evaluate_checkpoint(checkpoint_path: str,
                     'flip_indices': list(range(num_keypoints)),  # [0,1,2,...,18] - no actual flipping
                 })
                 
+                # Add gt_instances (empty for inference, but required by the model)
+                gt_instances = InstanceData()
+                data_sample.gt_instances = gt_instances
+                
                 # Prepare batch data
                 batch_data = {
                     'inputs': img_tensor,
