@@ -265,116 +265,66 @@ def evaluate_checkpoint(checkpoint_path: str,
             )
             
             # Run inference
-            # Create a simple bbox for the entire image
-            bbox = np.array([0, 0, 224, 224])  # [x1, y1, x2, y2]
-            
             try:
-                # Use direct model inference instead of inference_topdown to avoid dataset issues
-                # Prepare data similar to how the training pipeline works
-                data_info = {
-                    'img': img_np,
-                    'img_path': str(row.get('patient_id', f'test_idx_{idx}')),
-                    'img_id': str(row.get('patient_id', idx)),
-                    'bbox': bbox.reshape(1, -1),  # Shape: (1, 4)
-                    'ori_shape': (224, 224),
+                # Simple direct inference approach
+                # Prepare image tensor in the format expected by MMPose
+                img_for_model = img_np.copy()
+                
+                # Convert to CHW format if needed
+                if len(img_for_model.shape) == 3 and img_for_model.shape[-1] == 3:
+                    img_for_model = img_for_model.transpose(2, 0, 1)  # HWC to CHW
+                
+                # Convert to float and normalize
+                img_for_model = img_for_model.astype(np.float32)
+                
+                # Apply normalization (same as in config)
+                mean = np.array([123.675, 116.28, 103.53])
+                std = np.array([58.395, 57.12, 57.375])
+                for i in range(3):
+                    img_for_model[i] = (img_for_model[i] - mean[i]) / std[i]
+                
+                # Convert to tensor and add batch dimension
+                img_tensor = torch.from_numpy(img_for_model).unsqueeze(0).to(device)  # Shape: (1, 3, 224, 224)
+                
+                # Create proper data samples for MMPose
+                from mmengine.structures import InstanceData
+                from mmpose.structures import PoseDataSample
+                
+                data_sample = PoseDataSample()
+                data_sample.set_metainfo({
                     'img_shape': (224, 224),
+                    'ori_shape': (224, 224), 
                     'input_size': (224, 224),
-                    'input_center': np.array([112, 112]),  # Center of 224x224 image
-                    'input_scale': np.array([224, 224]),
+                    'input_center': np.array([112.0, 112.0]),
+                    'input_scale': np.array([224.0, 224.0]),
+                })
+                
+                # Prepare batch data
+                batch_data = {
+                    'inputs': img_tensor,
+                    'data_samples': [data_sample]
                 }
                 
-                # Apply model's test pipeline to prepare data
-                if hasattr(model, 'cfg') and hasattr(model.cfg, 'test_pipeline'):
-                    # Use the model's test pipeline if available
-                    from mmcv.transforms import Compose
-                    test_pipeline = Compose(model.cfg.test_pipeline)
-                    data_info = test_pipeline(data_info)
-                else:
-                    # Manual preprocessing similar to the config pipeline
-                    # Ensure image is in the right format
-                    if len(img_np.shape) == 3:
-                        img_np = img_np.transpose(2, 0, 1)  # HWC to CHW
-                    
-                    # Normalize the image (same as config)
-                    mean = np.array([123.675, 116.28, 103.53])
-                    std = np.array([58.395, 57.12, 57.375])
-                    img_np = img_np.astype(np.float32)
-                    img_np = (img_np - mean.reshape(3, 1, 1)) / std.reshape(3, 1, 1)
-                    
-                    # Add batch dimension: CHW -> NCHW
-                    data_info['img'] = torch.from_numpy(img_np).unsqueeze(0).to(device)
-                
-                # Run model inference
+                # Run inference
                 model.eval()
                 with torch.no_grad():
-                    if hasattr(model, 'cfg') and hasattr(model.cfg, 'test_pipeline'):
-                        # If we used the pipeline, the data is already prepared
-                        if isinstance(data_info, dict) and 'inputs' in data_info:
-                            outputs = model.test_step(data_info)
-                        else:
-                            # Prepare inputs for the model - ensure NCHW format
-                            inputs = data_info['img'] if isinstance(data_info['img'], torch.Tensor) else torch.from_numpy(data_info['img']).to(device)
-                            
-                            # Ensure we have batch dimension
-                            if len(inputs.shape) == 3:  # CHW -> NCHW
-                                inputs = inputs.unsqueeze(0)
-                            elif len(inputs.shape) == 4 and inputs.shape[0] != 1:  # Make sure batch size is 1
-                                inputs = inputs[:1]  # Take first item if multiple
-                            
-                            # Create a proper data batch for test_step
-                            data_batch = {
-                                'inputs': inputs,  # Shape should be [1, 3, 224, 224]
-                                'data_samples': [{
-                                    'img_shape': (224, 224),
-                                    'ori_shape': (224, 224),
-                                    'input_size': (224, 224),
-                                    'input_center': np.array([112, 112]),
-                                    'input_scale': np.array([224, 224]),
-                                }]
-                            }
-                            outputs = model.test_step(data_batch)
-                    else:
-                        # Direct forward pass
-                        inputs = data_info['img']
-                        if not isinstance(inputs, torch.Tensor):
-                            inputs = torch.from_numpy(inputs).to(device)
-                        
-                        # Ensure we have batch dimension for direct forward pass too
-                        if len(inputs.shape) == 3:  # CHW -> NCHW
-                            inputs = inputs.unsqueeze(0)
-                        
-                        outputs = model(inputs)
+                    outputs = model.test_step(batch_data)
                 
-                # Extract keypoints from model output
+                # Extract keypoints from output
                 if isinstance(outputs, list) and len(outputs) > 0:
                     output = outputs[0]
                     if hasattr(output, 'pred_instances') and hasattr(output.pred_instances, 'keypoints'):
                         pred_keypoints = output.pred_instances.keypoints.cpu().numpy()
-                        if len(pred_keypoints.shape) == 3:  # (1, K, 2)
-                            pred_keypoints = pred_keypoints[0]  # Take first instance
-                    elif isinstance(output, dict) and 'keypoints' in output:
-                        pred_keypoints = output['keypoints']
-                        if isinstance(pred_keypoints, torch.Tensor):
-                            pred_keypoints = pred_keypoints.cpu().numpy()
+                        if len(pred_keypoints.shape) == 3 and pred_keypoints.shape[0] == 1:  # (1, K, 2)
+                            pred_keypoints = pred_keypoints[0]  # Take first instance: (K, 2)
                     else:
-                        print(f"Warning: Unexpected output format for sample {idx}: {type(output)}")
+                        print(f"Warning: No keypoints found in output for sample {idx}")
+                        print(f"Output type: {type(output)}")
+                        if hasattr(output, 'pred_instances'):
+                            print(f"Pred instances attributes: {dir(output.pred_instances)}")
                         continue
-                elif isinstance(outputs, torch.Tensor):
-                    # Direct tensor output from model forward
-                    pred_keypoints = outputs.cpu().numpy()
-                    if len(pred_keypoints.shape) == 4:  # (1, K, H, W) heatmaps
-                        # Convert heatmaps to keypoints (find argmax)
-                        batch_size, num_joints, h, w = pred_keypoints.shape
-                        pred_keypoints = pred_keypoints.reshape(batch_size, num_joints, -1)
-                        max_indices = np.argmax(pred_keypoints, axis=2)
-                        pred_keypoints = np.zeros((batch_size, num_joints, 2))
-                        pred_keypoints[:, :, 0] = max_indices % w  # x coordinate
-                        pred_keypoints[:, :, 1] = max_indices // w  # y coordinate
-                        pred_keypoints = pred_keypoints[0]  # Take first batch item
-                    elif len(pred_keypoints.shape) == 3:  # (1, K, 2)
-                        pred_keypoints = pred_keypoints[0]
                 else:
-                    print(f"Warning: Unexpected output type for sample {idx}: {type(outputs)}")
+                    print(f"Warning: Unexpected output format for sample {idx}")
                     continue
                 
                 if pred_keypoints.shape[0] != num_keypoints:
