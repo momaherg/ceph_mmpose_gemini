@@ -304,6 +304,8 @@ def evaluate_checkpoint(checkpoint_path: str,
                 
                 # Add gt_instances (empty for inference, but required by the model)
                 gt_instances = InstanceData()
+                # Add the required bbox for the entire image
+                gt_instances.bboxes = torch.tensor([[0, 0, 224, 224]], dtype=torch.float32)
                 data_sample.gt_instances = gt_instances
                 
                 # Prepare batch data
