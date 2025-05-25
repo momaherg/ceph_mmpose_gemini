@@ -179,22 +179,26 @@ val_dataloader = dict(
 test_dataloader = None
 
 # Evaluator
-val_evaluator = None # Set to None to disable validation
+val_evaluator = dict(
+    type='PCKAccuracy',
+    thr=0.05,  # 5% threshold for PCK accuracy
+    norm_item=['bbox', 'torso']
+)
 test_evaluator = None
 
 # Training schedule
 train_cfg = dict(by_epoch=True, max_epochs=60, val_interval=5)
-val_cfg = None 
+val_cfg = dict()  # Enable validation
 test_cfg = None
 
 # Optimizer
 optim_wrapper = dict(optimizer=dict(
     type='AdamW',
-    lr=2e-4, # Common starting LR for AdamW with HRNet
+    lr=1e-4, # Reduced from 2e-4 - critical fix for model performance
     weight_decay=0.0001
 ))
 
-# Learning rate scheduler
+# Learning rate scheduler - Changed to gentler CosineAnnealingLR
 param_scheduler = [
     dict(
         type='LinearLR',
@@ -204,12 +208,12 @@ param_scheduler = [
         end=500 # Warmup iterations
     ),
     dict(
-        type='MultiStepLR',
+        type='CosineAnnealingLR',  # Changed from aggressive MultiStepLR
         begin=0, 
         end=60, # Total epochs
         by_epoch=True,
-        milestones=[40, 55], # Epochs to decay LR
-        gamma=0.1
+        T_max=60,
+        eta_min=1e-6  # Minimum learning rate
     )
 ]
 
