@@ -222,7 +222,7 @@ default_hooks = dict(
     timer=dict(type='IterTimerHook'),
     logger=dict(type='LoggerHook', interval=50),
     param_scheduler=dict(type='ParamSchedulerHook'),
-    checkpoint=dict(type='CheckpointHook', interval=1, save_best='PCKAccuracy', rule='greater'), # Save best based on PCK
+    checkpoint=dict(type='CheckpointHook', interval=1, save_best='PCK', rule='greater'), # Fixed: use 'PCK' instead of 'PCKAccuracy'
     sampler_seed=dict(type='DistSamplerSeedHook'),
     visualization=dict(type='PoseVisualizationHook', enable=False) # Set enable=True to visualize predictions
 )
