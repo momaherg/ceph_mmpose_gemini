@@ -155,7 +155,7 @@ val_dataloader = dict(
     )
 )
 
-test_dataloader = val_dataloader
+test_dataloader = None
 
 # Training schedule
 train_cfg = dict(max_epochs=60, val_interval=5)
@@ -196,7 +196,7 @@ val_evaluator = dict(
     norm_mode='use_norm_item', 
     norm_item='bbox_size'
 )
-test_evaluator = val_evaluator
+test_evaluator = None
 
 # Hooks
 default_hooks = dict(
