@@ -197,12 +197,51 @@ def evaluate_on_training_samples(checkpoint_path: str,
                 if idx == 0:
                     print(f"DEBUG - Running model inference...")
                 
-                results = model.test_step({'inputs': image_tensor})
+                try:
+                    results = model.test_step({'inputs': image_tensor})
+                    
+                    if idx == 0:
+                        print(f"DEBUG - Model results type: {type(results)}")
+                        print(f"DEBUG - Model results: {results}")
+                        if results is not None:
+                            print(f"DEBUG - Model results length: {len(results) if results else 'None'}")
+                        else:
+                            print(f"DEBUG - Model returned None, trying alternative inference...")
+                            
+                    # If test_step returns None, try alternative inference
+                    if results is None:
+                        if idx == 0:
+                            print(f"DEBUG - Trying model.forward()...")
+                        # Try direct forward pass
+                        with torch.no_grad():
+                            output = model(image_tensor)
+                            if idx == 0:
+                                print(f"DEBUG - Forward output type: {type(output)}")
+                                print(f"DEBUG - Forward output: {output}")
+                        continue
+                        
+                except Exception as e:
+                    if idx == 0:
+                        print(f"DEBUG - Model inference error: {e}")
+                        print(f"DEBUG - Trying alternative inference method...")
+                    
+                    try:
+                        # Alternative: use model's predict method if available
+                        if hasattr(model, 'predict'):
+                            results = model.predict({'inputs': image_tensor})
+                        else:
+                            # Try direct forward
+                            with torch.no_grad():
+                                output = model(image_tensor)
+                                if idx == 0:
+                                    print(f"DEBUG - Direct forward output: {output}")
+                            continue
+                    except Exception as e2:
+                        if idx == 0:
+                            print(f"DEBUG - Alternative inference also failed: {e2}")
+                        continue
                 
-                if idx == 0:
-                    print(f"DEBUG - Model results type: {type(results)}")
-                    print(f"DEBUG - Model results length: {len(results) if results else 'None'}")
-                
+                # Validate results
                 if not results or len(results) == 0:
                     if idx == 0:
                         print(f"DEBUG - No results from model")
@@ -395,9 +434,72 @@ def quick_training_check(checkpoint_path: str, num_samples: int = 30):
     
     return train_results, test_results
 
+def test_model_inference(checkpoint_path: str,
+                        config_path: str = "/content/ceph_mmpose_gemini/configs/hrnetv2/hrnetv2_w18_cephalometric_224x224_FIXED_V2.py"):
+    """Simple test of model inference to debug issues."""
+    
+    print("="*50)
+    print("TESTING MODEL INFERENCE")
+    print("="*50)
+    
+    # Initialize scope
+    init_default_scope('mmpose')
+    
+    # Import custom modules
+    try:
+        import custom_cephalometric_dataset
+        import custom_transforms
+        import cephalometric_dataset_info
+        print("✓ Custom modules imported")
+    except ImportError as e:
+        print(f"✗ Custom modules import failed: {e}")
+        return
+    
+    # Load model
+    try:
+        model = init_model(config_path, checkpoint_path, device='cuda:0')
+        print(f"✓ Model loaded")
+        print(f"  Model type: {type(model)}")
+        print(f"  Has test_step: {hasattr(model, 'test_step')}")
+        print(f"  Has predict: {hasattr(model, 'predict')}")
+        print(f"  Has forward: {hasattr(model, 'forward')}")
+    except Exception as e:
+        print(f"✗ Failed to load model: {e}")
+        return
+    
+    # Create dummy input
+    dummy_input = torch.randn(1, 3, 224, 224).cuda()
+    print(f"✓ Created dummy input: {dummy_input.shape}")
+    
+    model.eval()
+    with torch.no_grad():
+        # Test different inference methods
+        print("\n--- Testing test_step ---")
+        try:
+            results = model.test_step({'inputs': dummy_input})
+            print(f"✓ test_step succeeded: {type(results)}")
+            if results:
+                print(f"  Results length: {len(results)}")
+                if hasattr(results[0], 'pred_instances'):
+                    print(f"  Has pred_instances: True")
+                    if hasattr(results[0].pred_instances, 'keypoints'):
+                        print(f"  Keypoints shape: {results[0].pred_instances.keypoints.shape}")
+        except Exception as e:
+            print(f"✗ test_step failed: {e}")
+        
+        print("\n--- Testing direct forward ---")
+        try:
+            output = model(dummy_input)
+            print(f"✓ Forward succeeded: {type(output)}")
+        except Exception as e:
+            print(f"✗ Forward failed: {e}")
+
 if __name__ == "__main__":
     # Example usage
     checkpoint_path = "/content/ceph_mmpose_gemini/work_dirs/hrnetv2_w18_cephalometric_experiment_FIXED_V2/epoch_31.pth"
     
-    # Quick diagnostic
-    train_results, test_results = quick_training_check(checkpoint_path, num_samples=50) 
+    # Test model inference first
+    test_model_inference(checkpoint_path)
+    
+    # Then run full diagnostic
+    # train_results, test_results = quick_training_check(checkpoint_path, num_samples=50) 
