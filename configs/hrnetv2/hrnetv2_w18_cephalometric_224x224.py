@@ -72,7 +72,7 @@ model = dict(
         )
     ),
     test_cfg=dict(
-        flip_test=True,
+        flip_test=False,  # Disabled - cephalometric landmarks are not symmetric
         flip_mode='heatmap',
         shift_heatmap=True, # From AFLW config
     )
