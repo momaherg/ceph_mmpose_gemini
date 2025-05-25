@@ -178,7 +178,7 @@ val_evaluator = dict(
 test_evaluator = None
 
 # CONSERVATIVE TRAINING SCHEDULE
-train_cfg = dict(by_epoch=True, max_epochs=30, val_interval=2)  # REDUCED epochs, MORE frequent validation
+train_cfg = dict(by_epoch=True, max_epochs=20, val_interval=2)  # FURTHER REDUCED epochs for safety
 val_cfg = dict()
 test_cfg = None
 
@@ -201,9 +201,9 @@ param_scheduler = [
     dict(
         type='CosineAnnealingLR',
         begin=0, 
-        end=30,  # Match max_epochs
+        end=20,  # Match reduced max_epochs
         by_epoch=True,
-        T_max=30,
+        T_max=20,
         eta_min=1e-7  # Even lower minimum LR
     )
 ]
@@ -224,15 +224,5 @@ default_hooks = dict(
     visualization=dict(type='PoseVisualizationHook', enable=False)
 )
 
-# EARLY STOPPING CUSTOM HOOK
-custom_hooks = [
-    dict(
-        type='EarlyStoppingHook',
-        monitor='PCK',
-        min_delta=0.001,
-        patience=5,
-        verbose=True,
-        mode='max',
-        check_finite=True
-    )
-] 
+# NO CUSTOM HOOKS - manual monitoring instead
+# Monitor training manually and stop when validation PCK plateaus 
