@@ -6,14 +6,18 @@ from cephalometric_dataset_info import dataset_info as cephalometric_metainfo
 
 # Model settings
 pretrained_model = 'https://download.openmmlab.com/mmpose/face/hrnetv2/hrnetv2_w18_aflw_256x256-f2bbc62b_20210125.pth'
-
-# Input image size
 input_size = (224, 224)
-
-# Number of keypoints
 num_keypoints = 19
 
-# Model definition
+# Codec settings (following AFLW pattern)
+codec = dict(
+    type='MSRAHeatmap', 
+    input_size=input_size, 
+    heatmap_size=(56, 56),  # 224//4 = 56
+    sigma=2
+)
+
+# Model definition - Following AFLW architecture pattern
 model = dict(
     type='TopdownPoseEstimator',
     data_preprocessor=dict(
@@ -54,21 +58,23 @@ model = dict(
             upsample=dict(mode='bilinear', align_corners=False)),
         init_cfg=dict(type='Pretrained', checkpoint=pretrained_model)
     ),
+    # ADD NECK - This is crucial for proper feature processing
+    neck=dict(
+        type='FeatureMapProcessor',
+        concat=True,  # Concatenate multi-scale features
+    ),
     head=dict(
         type='HeatmapHead',
-        in_channels=[18, 36, 72, 144],
-        input_transform='resize_concat',
+        in_channels=270,  # 18+36+72+144 = 270 (concatenated features)
         out_channels=num_keypoints,
+        deconv_out_channels=None,
+        conv_out_channels=(270, ),  # Keep same channels
+        conv_kernel_sizes=(1, ),    # 1x1 conv
         loss=dict(type='KeypointMSELoss', use_target_weight=True),
-        decoder=dict(
-            type='MegviiHeatmap',
-            input_size=input_size,
-            heatmap_size=(input_size[0] // 4, input_size[1] // 4),
-            kernel_size=7,
-        )
+        decoder=codec
     ),
     test_cfg=dict(
-        flip_test=False,
+        flip_test=False,  # Cephalometric landmarks are not symmetric
         flip_mode='heatmap',
         shift_heatmap=True,
     )
@@ -78,67 +84,49 @@ model = dict(
 dataset_type = 'CustomCephalometricDataset'
 data_root = '/content/drive/MyDrive/Lala\'s Masters/'
 
-# Pipelines
-common_pipeline_prefix = [
+# Pipelines - Simplified following AFLW pattern
+train_pipeline = [
     dict(type='LoadImageNumpy'),
     dict(type='GetBBoxCenterScale'),
-]
-
-common_pipeline_suffix = [
-    dict(type='TopdownAffine', input_size=input_size),
-    dict(type='GenerateTarget', 
-         encoder=dict(
-            type='MSRAHeatmap',
-            input_size=input_size, 
-            heatmap_size=(input_size[0] // 4, input_size[1] // 4),
-            sigma=3.0  # INCREASED from 2 to 3 for better target coverage
-        )
+    dict(type='RandomFlip', direction='horizontal', prob=0.0),  # Disabled for cephalometric
+    dict(
+        type='RandomBBoxTransform',
+        shift_prob=0.3,  # Allow some shifting
+        rotate_factor=15,  # Reduced rotation
+        scale_factor=(0.9, 1.1)  # Less aggressive scaling
     ),
-    dict(type='CustomPackPoseInputs', 
+    dict(type='TopdownAffine', input_size=codec['input_size']),
+    dict(type='GenerateTarget', encoder=codec),
+    dict(type='CustomPackPoseInputs',
          meta_keys=(
              'img_id', 'img_path', 'ori_shape', 'img_shape',
              'input_size', 'input_center', 'input_scale',
              'flip', 'flip_direction',
              'num_joints', 'joint_weights',
              'id', 'patient_text_id', 'set', 'class'
-            )
-        )
-]
-
-val_test_pipeline_suffix = [
-    dict(type='TopdownAffine', input_size=input_size),
-    dict(type='CustomPackPoseInputs', 
-         meta_keys=(
-            'img_id', 'img_path', 'ori_shape', 'img_shape',
-            'input_size', 'input_center', 'input_scale',
-            'flip', 'flip_direction',
-            'num_joints', 'joint_weights',
-            'id', 'patient_text_id', 'set', 'class'
-            )
-        )
-]
-
-# REDUCED augmentation to prevent overfitting
-train_pipeline = [
-    *common_pipeline_prefix,
-    dict(type='RandomBBoxTransform',
-         scale_factor=[0.9, 1.1],  # REDUCED from [0.8, 1.2]
-         rotate_factor=10,         # REDUCED from 15
-         shift_factor=0.0),
-    *common_pipeline_suffix
+         ))
 ]
 
 val_pipeline = [
-    *common_pipeline_prefix,
-    *val_test_pipeline_suffix
+    dict(type='LoadImageNumpy'),
+    dict(type='GetBBoxCenterScale'),
+    dict(type='TopdownAffine', input_size=codec['input_size']),
+    dict(type='CustomPackPoseInputs',
+         meta_keys=(
+             'img_id', 'img_path', 'ori_shape', 'img_shape',
+             'input_size', 'input_center', 'input_scale',
+             'flip', 'flip_direction',
+             'num_joints', 'joint_weights',
+             'id', 'patient_text_id', 'set', 'class'
+         ))
 ]
 
 test_pipeline = val_pipeline
 
-# Dataloaders - CRITICAL FIXES
+# Data loaders - Following AFLW pattern with auto-scaling
 train_dataloader = dict(
-    batch_size=8,  # REDUCED from 32 to 8 for stable gradients
-    num_workers=2,  # REDUCED to avoid bottlenecks
+    batch_size=16,  # Reduced for stability
+    num_workers=4,
     persistent_workers=True,
     sampler=dict(type='DefaultSampler', shuffle=True),
     dataset=dict(
@@ -151,14 +139,14 @@ train_dataloader = dict(
     )
 )
 
-# PROPER VALIDATION SETUP
 val_dataloader = dict(
-    batch_size=8,
+    batch_size=16,
     num_workers=2,
     persistent_workers=True,
-    sampler=dict(type='DefaultSampler', shuffle=False),
+    drop_last=False,
+    sampler=dict(type='DefaultSampler', shuffle=False, round_up=False),
     dataset=dict(
-        type='CustomCephalometricDataset',
+        type=dataset_type,
         data_root=data_root,
         ann_file='train_data_pure_old_numpy.json',
         metainfo=cephalometric_metainfo,
@@ -167,62 +155,63 @@ val_dataloader = dict(
     )
 )
 
-test_dataloader = None
+test_dataloader = val_dataloader
 
-# Evaluator
-val_evaluator = dict(
-    type='PCKAccuracy',
-    thr=0.05,
-    norm_item=['bbox', 'torso']
-)
-test_evaluator = None
-
-# CONSERVATIVE TRAINING SCHEDULE
-train_cfg = dict(by_epoch=True, max_epochs=20, val_interval=2)  # FURTHER REDUCED epochs for safety
+# Training schedule
+train_cfg = dict(max_epochs=60, val_interval=5)
 val_cfg = dict()
 test_cfg = None
 
-# AGGRESSIVE LEARNING RATE REDUCTION
+# Optimizer - Following AFLW pattern with Adam and higher LR
 optim_wrapper = dict(optimizer=dict(
-    type='AdamW',
-    lr=2e-5,  # DRASTICALLY REDUCED from 1e-4 to 2e-5
-    weight_decay=0.01  # INCREASED regularization from 0.0001
+    type='Adam',  # Changed from AdamW to Adam
+    lr=5e-4,      # Increased from 1e-4 but lower than AFLW's 2e-3
 ))
 
-# VERY GENTLE SCHEDULER
+# Learning rate scheduler - Back to MultiStepLR like AFLW
 param_scheduler = [
     dict(
-        type='LinearLR',
-        start_factor=0.1,  # HIGHER start factor for more conservative warmup
-        by_epoch=False,
-        begin=0,
-        end=200  # REDUCED warmup iterations
+        type='LinearLR', 
+        begin=0, 
+        end=500, 
+        start_factor=0.001,
+        by_epoch=False  # Warmup
     ),
     dict(
-        type='CosineAnnealingLR',
-        begin=0, 
-        end=20,  # Match reduced max_epochs
-        by_epoch=True,
-        T_max=20,
-        eta_min=1e-7  # Even lower minimum LR
+        type='MultiStepLR',
+        begin=0,
+        end=60,
+        milestones=[30, 50],  # Earlier milestones than AFLW
+        gamma=0.1,
+        by_epoch=True
     )
 ]
 
-# ENHANCED MONITORING HOOKS
+# Auto-scale learning rate based on batch size
+auto_scale_lr = dict(base_batch_size=64)  # Scale based on 64 base batch size
+
+# Evaluators
+val_evaluator = dict(
+    type='NME',  # Changed to NME like AFLW
+    norm_mode='use_norm_item', 
+    norm_item='bbox_size'
+)
+test_evaluator = val_evaluator
+
+# Hooks
 default_hooks = dict(
     timer=dict(type='IterTimerHook'),
-    logger=dict(type='LoggerHook', interval=20),  # More frequent logging
+    logger=dict(type='LoggerHook', interval=50),
     param_scheduler=dict(type='ParamSchedulerHook'),
     checkpoint=dict(
         type='CheckpointHook', 
         interval=1, 
-        save_best='PCK', 
-        rule='greater',
-        max_keep_ckpts=5  # Keep more checkpoints to find best
+        save_best='NME',  # Changed to NME
+        rule='less'       # Lower NME is better
     ),
     sampler_seed=dict(type='DistSamplerSeedHook'),
     visualization=dict(type='PoseVisualizationHook', enable=False)
 )
 
-# NO CUSTOM HOOKS - manual monitoring instead
-# Monitor training manually and stop when validation PCK plateaus 
+# Runtime settings
+random_seed = 42  # Set for reproducibility 
