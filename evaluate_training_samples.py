@@ -130,12 +130,15 @@ def evaluate_on_training_samples(checkpoint_path: str,
         for idx, (_, row) in enumerate(df_sample.iterrows()):
             try:
                 # Load and preprocess image
-                image_path = osp.join(data_root, f"{row['id']}.npy")
-                if not osp.exists(image_path):
-                    print(f"⚠️  Image not found: {image_path}")
+                # Use the Image column directly from the dataframe instead of loading from file
+                if 'Image' not in row:
+                    print(f"⚠️  No 'Image' column found in row")
                     continue
                 
-                image = np.load(image_path)
+                # Extract image from the 'Image' column (it's already a numpy array stored as list)
+                img_array = row['Image']
+                image = np.array(img_array, dtype=np.uint8).reshape((224, 224, 3))
+                
                 if image.shape != (224, 224, 3):
                     print(f"⚠️  Invalid image shape: {image.shape}")
                     continue
@@ -181,7 +184,8 @@ def evaluate_on_training_samples(checkpoint_path: str,
                     valid_predictions += 1
                     
                     if idx < 5 or avg_error > 50:  # Show first 5 and any with high error
-                        print(f"Sample {idx+1:2d}: Avg Error = {avg_error:6.2f} pixels, ID = {row['id']}")
+                        patient_id = row.get('patient_id', row.get('id', f'sample_{idx}'))
+                        print(f"Sample {idx+1:2d}: Avg Error = {avg_error:6.2f} pixels, ID = {patient_id}")
                 
             except Exception as e:
                 print(f"⚠️  Failed to process sample {idx}: {e}")
