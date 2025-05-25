@@ -126,6 +126,17 @@ def evaluate_on_training_samples(checkpoint_path: str,
         print(f"DEBUG - Image type: {type(first_sample['Image'])}")
         if hasattr(first_sample['Image'], 'shape'):
             print(f"DEBUG - Image shape: {first_sample['Image'].shape}")
+        elif first_sample['Image'] is None:
+            print(f"DEBUG - Image is None")
+        else:
+            print(f"DEBUG - Image value: {first_sample['Image']}")
+    
+    # Debug: Check a few more samples to see if any have images
+    print(f"DEBUG - Checking image availability in first 5 samples:")
+    for i in range(min(5, len(df_sample))):
+        sample = df_sample.iloc[i]
+        img_status = "None" if sample['Image'] is None else f"Type: {type(sample['Image'])}"
+        print(f"  Sample {i}: patient_id={sample['patient_id']}, Image={img_status}")
     print("-" * 50)
     
     all_errors = []
