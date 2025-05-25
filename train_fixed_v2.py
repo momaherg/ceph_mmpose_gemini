@@ -9,7 +9,7 @@ import torch
 import warnings
 from mmengine.config import Config
 from mmengine.registry import init_default_scope
-from mmpose.apis import train_model, init_model
+from mmpose.apis import init_model  # Only import what's available
 from mmengine.runner import Runner
 import numpy as np
 
