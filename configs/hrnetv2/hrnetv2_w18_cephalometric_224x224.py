@@ -105,7 +105,7 @@ common_pipeline_suffix = [
             sigma=2 # Sigma for Gaussian heatmap generation
         )
     ),
-    dict(type='PackPoseInputs', 
+    dict(type='CustomPackPoseInputs', 
          meta_keys=(
              'img_id', 'img_path', 'ori_shape', 'img_shape',
              'input_size', 'input_center', 'input_scale',
@@ -118,7 +118,7 @@ common_pipeline_suffix = [
 
 val_test_pipeline_suffix = [
     dict(type='TopdownAffine', input_size=input_size),
-    dict(type='PackPoseInputs', 
+    dict(type='CustomPackPoseInputs', 
          meta_keys=(
             'img_id', 'img_path', 'ori_shape', 'img_shape',
             'input_size', 'input_center', 'input_scale',

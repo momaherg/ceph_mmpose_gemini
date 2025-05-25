@@ -1,7 +1,9 @@
 from mmpose.datasets.transforms.loading import LoadImage
+from mmpose.datasets.transforms.formatting import PackPoseInputs
 from mmpose.registry import TRANSFORMS
 import numpy as np
 from mmengine.registry import init_default_scope
+from mmengine.structures import InstanceData
 
 # Initialize scope to ensure registry is ready
 init_default_scope('mmpose')
@@ -36,6 +38,37 @@ class LoadImageNumpy(LoadImage):
         # otherwise, it can be a placeholder or the 'patient_id'.
         # results['img_path'] = results.get('img_path', str(results.get('img_id', '')))
         return results
+
+print("Registering CustomPackPoseInputs in the TRANSFORMS registry...")
+
+@TRANSFORMS.register_module(force=True)
+class CustomPackPoseInputs(PackPoseInputs):
+    """Custom PackPoseInputs that properly handles bbox_scores for cephalometric dataset."""
+    
+    def transform(self, results: dict) -> dict:
+        """Transform function to pack pose inputs, including bbox_scores."""
+        
+        # Call parent transform first
+        packed_results = super().transform(results)
+        
+        # Ensure bbox_scores are properly added to gt_instances
+        if 'data_samples' in packed_results:
+            data_sample = packed_results['data_samples']
+            
+            # Check if gt_instances exists and bbox_scores is in the original results
+            if hasattr(data_sample, 'gt_instances') and 'bbox_scores' in results:
+                gt_instances = data_sample.gt_instances
+                
+                # Add bbox_scores to gt_instances
+                if isinstance(results['bbox_scores'], np.ndarray):
+                    import torch
+                    gt_instances.bbox_scores = torch.from_numpy(results['bbox_scores']).float()
+                else:
+                    gt_instances.bbox_scores = results['bbox_scores']
+                
+                print(f"Added bbox_scores to gt_instances: {gt_instances.bbox_scores}")
+        
+        return packed_results
 
 # Print confirmation that the module has been loaded and registration attempted
 print(f"LoadImageNumpy registered: {TRANSFORMS.get('LoadImageNumpy') is not None}")
