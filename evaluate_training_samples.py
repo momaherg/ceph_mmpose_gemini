@@ -119,6 +119,15 @@ def evaluate_on_training_samples(checkpoint_path: str,
     print(f"\nEvaluating {len(df_sample)} samples...")
     print("-" * 50)
     
+    # Debug: Check first sample structure
+    first_sample = df_sample.iloc[0]
+    print(f"DEBUG - Available columns: {list(first_sample.index)}")
+    if 'Image' in first_sample:
+        print(f"DEBUG - Image type: {type(first_sample['Image'])}")
+        if hasattr(first_sample['Image'], 'shape'):
+            print(f"DEBUG - Image shape: {first_sample['Image'].shape}")
+    print("-" * 50)
+    
     all_errors = []
     per_landmark_errors = {name: [] for name in landmark_names_in_order}
     valid_predictions = 0
@@ -130,19 +139,23 @@ def evaluate_on_training_samples(checkpoint_path: str,
         for idx, (_, row) in enumerate(df_sample.iterrows()):
             try:
                 # Load and preprocess image
-                if 'Image' in row and pd.notna(row['Image']):
-                    # Image is stored as array in the dataset
-                    image_array = row['Image']
-                    if isinstance(image_array, (list, np.ndarray)):
-                        image = np.array(image_array)
-                        # Reshape from (50176, 3) to (224, 224, 3) if needed
-                        if image.shape == (50176, 3):
-                            image = image.reshape(224, 224, 3)
-                        elif image.shape != (224, 224, 3):
-                            print(f"⚠️  Invalid image shape: {image.shape}")
+                if 'Image' in row and row['Image'] is not None:
+                    try:
+                        # Image is stored as array in the dataset
+                        image_array = row['Image']
+                        if isinstance(image_array, (list, np.ndarray)):
+                            image = np.array(image_array)
+                            # Reshape from (50176, 3) to (224, 224, 3) if needed
+                            if image.shape == (50176, 3):
+                                image = image.reshape(224, 224, 3)
+                            elif image.shape != (224, 224, 3):
+                                print(f"⚠️  Invalid image shape: {image.shape}")
+                                continue
+                        else:
+                            print(f"⚠️  Invalid image data type: {type(image_array)}")
                             continue
-                    else:
-                        print(f"⚠️  Invalid image data type: {type(image_array)}")
+                    except Exception as e:
+                        print(f"⚠️  Error processing image array: {e}")
                         continue
                 else:
                     # Fallback: try loading from .npy file
