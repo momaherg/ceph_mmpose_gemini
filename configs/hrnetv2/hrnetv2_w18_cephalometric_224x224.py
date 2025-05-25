@@ -161,7 +161,21 @@ train_dataloader = dict(
     )
 )
 
-val_dataloader = None # Set to None to disable validation
+val_dataloader = dict(
+    batch_size=16,
+    num_workers=2,
+    persistent_workers=True,
+    sampler=dict(type='DefaultSampler', shuffle=False),
+    dataset=dict(
+        type='CustomCephalometricDataset',
+        data_root=data_root,
+        ann_file='train_data_pure_old_numpy.json',
+        metainfo=cephalometric_metainfo,
+        pipeline=val_pipeline,
+        test_mode=True,
+    )
+)
+
 test_dataloader = None
 
 # Evaluator
@@ -169,14 +183,14 @@ val_evaluator = None # Set to None to disable validation
 test_evaluator = None
 
 # Training schedule
-train_cfg = dict(by_epoch=True, max_epochs=60) # Removed val_interval
+train_cfg = dict(by_epoch=True, max_epochs=60, val_interval=5)
 val_cfg = None 
 test_cfg = None
 
 # Optimizer
 optim_wrapper = dict(optimizer=dict(
     type='AdamW',
-    lr=5e-4, # Common starting LR for AdamW with HRNet
+    lr=2e-4, # Common starting LR for AdamW with HRNet
     weight_decay=0.0001
 ))
 
