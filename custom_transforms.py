@@ -66,7 +66,7 @@ class CustomPackPoseInputs(PackPoseInputs):
                 else:
                     gt_instances.bbox_scores = results['bbox_scores']
                 
-                print(f"Added bbox_scores to gt_instances: {gt_instances.bbox_scores}")
+                # Debug print removed - bbox_scores successfully added
         
         return packed_results
 
