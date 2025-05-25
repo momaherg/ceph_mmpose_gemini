@@ -126,17 +126,6 @@ def evaluate_on_training_samples(checkpoint_path: str,
         print(f"DEBUG - Image type: {type(first_sample['Image'])}")
         if hasattr(first_sample['Image'], 'shape'):
             print(f"DEBUG - Image shape: {first_sample['Image'].shape}")
-        elif first_sample['Image'] is None:
-            print(f"DEBUG - Image is None")
-        else:
-            print(f"DEBUG - Image value: {first_sample['Image']}")
-    
-    # Debug: Check a few more samples to see if any have images
-    print(f"DEBUG - Checking image availability in first 5 samples:")
-    for i in range(min(5, len(df_sample))):
-        sample = df_sample.iloc[i]
-        img_status = "None" if sample['Image'] is None else f"Type: {type(sample['Image'])}"
-        print(f"  Sample {i}: patient_id={sample['patient_id']}, Image={img_status}")
     print("-" * 50)
     
     all_errors = []
@@ -149,16 +138,29 @@ def evaluate_on_training_samples(checkpoint_path: str,
     with torch.no_grad():
         for idx, (_, row) in enumerate(df_sample.iterrows()):
             try:
+                if idx == 0:  # Debug first sample in detail
+                    print(f"DEBUG - Processing sample {idx}")
+                    print(f"DEBUG - Patient ID: {row.get('patient_id', 'N/A')}")
+                
                 # Load and preprocess image
                 if 'Image' in row and row['Image'] is not None:
                     try:
                         # Image is stored as array in the dataset
                         image_array = row['Image']
+                        if idx == 0:
+                            print(f"DEBUG - Image array type: {type(image_array)}")
+                            print(f"DEBUG - Image array length: {len(image_array) if image_array else 'None'}")
+                        
                         if isinstance(image_array, (list, np.ndarray)):
                             image = np.array(image_array)
+                            if idx == 0:
+                                print(f"DEBUG - Converted image shape: {image.shape}")
+                            
                             # Reshape from (50176, 3) to (224, 224, 3) if needed
                             if image.shape == (50176, 3):
                                 image = image.reshape(224, 224, 3)
+                                if idx == 0:
+                                    print(f"DEBUG - Reshaped to: {image.shape}")
                             elif image.shape != (224, 224, 3):
                                 print(f"⚠️  Invalid image shape: {image.shape}")
                                 continue
@@ -181,16 +183,43 @@ def evaluate_on_training_samples(checkpoint_path: str,
                         continue
                 
                 # Prepare input
+                if idx == 0:
+                    print(f"DEBUG - Preparing tensor input...")
+                
                 image_tensor = torch.from_numpy(image).float().permute(2, 0, 1).unsqueeze(0)
                 image_tensor = image_tensor.cuda()
                 
+                if idx == 0:
+                    print(f"DEBUG - Tensor shape: {image_tensor.shape}")
+                    print(f"DEBUG - Tensor device: {image_tensor.device}")
+                
                 # Model inference
+                if idx == 0:
+                    print(f"DEBUG - Running model inference...")
+                
                 results = model.test_step({'inputs': image_tensor})
+                
+                if idx == 0:
+                    print(f"DEBUG - Model results type: {type(results)}")
+                    print(f"DEBUG - Model results length: {len(results) if results else 'None'}")
+                
                 if not results or len(results) == 0:
+                    if idx == 0:
+                        print(f"DEBUG - No results from model")
                     continue
                 
                 # Extract predictions
+                if idx == 0:
+                    print(f"DEBUG - Extracting predictions...")
+                    print(f"DEBUG - Results[0] type: {type(results[0])}")
+                    print(f"DEBUG - Has pred_instances: {hasattr(results[0], 'pred_instances')}")
+                
                 pred_coords = results[0].pred_instances.keypoints[0].cpu().numpy()  # Shape: (19, 2)
+                
+                if idx == 0:
+                    print(f"DEBUG - Prediction coords shape: {pred_coords.shape}")
+                    print(f"DEBUG - First few predictions: {pred_coords[:3]}")
+                
                 prediction_clusters.append(pred_coords.flatten())
                 
                 # Extract ground truth
@@ -229,7 +258,18 @@ def evaluate_on_training_samples(checkpoint_path: str,
     
     if not all_errors:
         print("✗ No valid predictions found!")
-        return {}
+        return {
+            'overall_mre': 0.0,
+            'overall_std': 0.0,
+            'median_error': 0.0,
+            'valid_predictions': 0,
+            'total_samples': len(df_sample),
+            'per_landmark_errors': {name: None for name in landmark_names_in_order},
+            'model_collapse_detected': True,  # If no predictions, assume collapse
+            'sample_type': sample_type,
+            'all_errors': [],
+            'error': 'No valid predictions found'
+        }
     
     # Analyze results
     overall_mre = np.mean(all_errors)
