@@ -198,48 +198,68 @@ def evaluate_on_training_samples(checkpoint_path: str,
                     print(f"DEBUG - Running model inference...")
                 
                 try:
-                    results = model.test_step({'inputs': image_tensor})
+                    # Create proper MMPose input format
+                    from mmpose.structures import PoseDataSample
+                    
+                    # Create data sample
+                    data_sample = PoseDataSample()
+                    
+                    # Create input dict in MMPose format
+                    data_dict = {
+                        'inputs': image_tensor,
+                        'data_samples': [data_sample]
+                    }
+                    
+                    if idx == 0:
+                        print(f"DEBUG - Created data_dict with keys: {data_dict.keys()}")
+                        print(f"DEBUG - Data samples type: {type(data_dict['data_samples'])}")
+                    
+                    # Use the model's test_step with proper format
+                    results = model.test_step(data_dict)
                     
                     if idx == 0:
                         print(f"DEBUG - Model results type: {type(results)}")
                         print(f"DEBUG - Model results: {results}")
                         if results is not None:
                             print(f"DEBUG - Model results length: {len(results) if results else 'None'}")
-                        else:
-                            print(f"DEBUG - Model returned None, trying alternative inference...")
-                            
-                    # If test_step returns None, try alternative inference
-                    if results is None:
-                        if idx == 0:
-                            print(f"DEBUG - Trying model.forward()...")
-                        # Try direct forward pass
-                        with torch.no_grad():
-                            output = model(image_tensor)
-                            if idx == 0:
-                                print(f"DEBUG - Forward output type: {type(output)}")
-                                print(f"DEBUG - Forward output: {output}")
-                        continue
                         
                 except Exception as e:
                     if idx == 0:
-                        print(f"DEBUG - Model inference error: {e}")
-                        print(f"DEBUG - Trying alternative inference method...")
+                        print(f"DEBUG - MMPose format failed: {e}")
+                        print(f"DEBUG - Trying predict method with data_samples...")
                     
                     try:
-                        # Alternative: use model's predict method if available
-                        if hasattr(model, 'predict'):
-                            results = model.predict({'inputs': image_tensor})
-                        else:
-                            # Try direct forward
-                            with torch.no_grad():
-                                output = model(image_tensor)
-                                if idx == 0:
-                                    print(f"DEBUG - Direct forward output: {output}")
-                            continue
+                        # Try predict method with proper format
+                        from mmpose.structures import PoseDataSample
+                        data_sample = PoseDataSample()
+                        
+                        results = model.predict(image_tensor, [data_sample])
+                        
+                        if idx == 0:
+                            print(f"DEBUG - Predict method succeeded: {type(results)}")
+                        
                     except Exception as e2:
                         if idx == 0:
-                            print(f"DEBUG - Alternative inference also failed: {e2}")
-                        continue
+                            print(f"DEBUG - Predict method failed: {e2}")
+                            print(f"DEBUG - Trying inference_model from mmpose.apis...")
+                        
+                        try:
+                            # Try using MMPose's inference API
+                            from mmpose.apis import inference_model
+                            
+                            # Convert tensor back to numpy for inference_model
+                            image_np = image_tensor.squeeze(0).permute(1, 2, 0).cpu().numpy()
+                            image_np = (image_np * 255).astype(np.uint8)
+                            
+                            results = inference_model(model, image_np)
+                            
+                            if idx == 0:
+                                print(f"DEBUG - inference_model succeeded: {type(results)}")
+                            
+                        except Exception as e3:
+                            if idx == 0:
+                                print(f"DEBUG - All inference methods failed. Last error: {e3}")
+                            continue
                 
                 # Validate results
                 if not results or len(results) == 0:
@@ -474,9 +494,15 @@ def test_model_inference(checkpoint_path: str,
     model.eval()
     with torch.no_grad():
         # Test different inference methods
-        print("\n--- Testing test_step ---")
+        print("\n--- Testing test_step with MMPose format ---")
         try:
-            results = model.test_step({'inputs': dummy_input})
+            from mmpose.structures import PoseDataSample
+            data_sample = PoseDataSample()
+            data_dict = {
+                'inputs': dummy_input,
+                'data_samples': [data_sample]
+            }
+            results = model.test_step(data_dict)
             print(f"✓ test_step succeeded: {type(results)}")
             if results:
                 print(f"  Results length: {len(results)}")
@@ -487,6 +513,26 @@ def test_model_inference(checkpoint_path: str,
         except Exception as e:
             print(f"✗ test_step failed: {e}")
         
+        print("\n--- Testing predict method ---")
+        try:
+            from mmpose.structures import PoseDataSample
+            data_sample = PoseDataSample()
+            results = model.predict(dummy_input, [data_sample])
+            print(f"✓ Predict succeeded: {type(results)}")
+        except Exception as e:
+            print(f"✗ Predict failed: {e}")
+        
+        print("\n--- Testing inference_model ---")
+        try:
+            from mmpose.apis import inference_model
+            # Convert tensor to numpy image
+            dummy_np = dummy_input.squeeze(0).permute(1, 2, 0).cpu().numpy()
+            dummy_np = (dummy_np * 255).astype(np.uint8)
+            results = inference_model(model, dummy_np)
+            print(f"✓ inference_model succeeded: {type(results)}")
+        except Exception as e:
+            print(f"✗ inference_model failed: {e}")
+            
         print("\n--- Testing direct forward ---")
         try:
             output = model(dummy_input)
