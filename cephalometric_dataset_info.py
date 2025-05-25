@@ -64,7 +64,7 @@ landmark_column_map = {
     'lower 1 apex_x': 'lower_1_apex', 'lower 1 apex_y': 'lower_1_apex',
     'ANS_x': 'ANS', 'ANS_y': 'ANS',
     'PNS_x': 'PNS', 'PNS_y': 'PNS',
-    'Gonion x': 'Gonion', 'Gonion y': 'Gonion', # Note the space in 'Gonion x'
+    'Gonion _x': 'Gonion', 'Gonion _y': 'Gonion', # Note the space in 'Gonion x'
     'Menton_x': 'Menton', 'Menton_y': 'Menton',
     'ST Nasion_x': 'ST_Nasion', 'ST Nasion_y': 'ST_Nasion',
     'Tip of the nose_x': 'Tip_of_the_nose', 'Tip of the nose_y': 'Tip_of_the_nose',
@@ -84,7 +84,7 @@ original_landmark_cols = [
     'B point_x', 'B point_y', 'upper 1 tip_x', 'upper 1 tip_y',
     'upper 1 apex_x', 'upper 1 apex_y', 'lower 1 tip_x', 'lower 1 tip_y',
     'lower 1 apex_x', 'lower 1 apex_y', 'ANS_x', 'ANS_y', 'PNS_x', 'PNS_y',
-    'Gonion x', 'Gonion y', 'Menton_x', 'Menton_y', 'ST Nasion_x',
+    'Gonion _x', 'Gonion _y', 'Menton_x', 'Menton_y', 'ST Nasion_x',
     'ST Nasion_y', 'Tip of the nose_x', 'Tip of the nose_y', 'Subnasal_x',
     'Subnasal_y', 'Upper lip_x', 'Upper lip_y', 'Lower lip_x',
     'Lower lip_y', 'ST Pogonion_x', 'ST Pogonion_y', 'gnathion_x',
