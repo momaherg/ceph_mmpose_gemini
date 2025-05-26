@@ -106,16 +106,49 @@ def diagnose_pipeline_consistency(config_path: str,
             data_path = osp.join(data_root, ann_file)
             df = pd.read_json(data_path)
             
-            # Find the corresponding raw sample (assuming consistent ordering or using ID)
-            # For this example, let's assume train_dataset.data_list[i]['img_id'] exists
-            sample_id = train_dataset.get_data_info(i).get('img_id')
+            current_train_data_info = train_dataset.get_data_info(i)
+            sample_id = current_train_data_info.get('img_id')
+            
+            print(f"  Attempting to find sample for train_dataset index {i}, img_id: {sample_id} (type: {type(sample_id)})")
+            if 'patient_id' in df.columns:
+                print(f"  DataFrame patient_id column dtype: {df['patient_id'].dtype}")
+            else:
+                print("  ⚠️ DataFrame does not have 'patient_id' column!")
+                continue
+
             if sample_id is None:
-                 print(f"  ⚠️ Could not get sample_id for train_dataset sample {i}")
+                 print(f"    ⚠️ Could not get sample_id for train_dataset sample {i}")
                  continue
             
-            raw_sample_row = df[df['patient_id'] == sample_id].iloc[0]
+            # Ensure consistent type for comparison if patient_id is numeric
+            if pd.api.types.is_numeric_dtype(df['patient_id']):
+                try:
+                    sample_id_numeric = int(sample_id) 
+                    raw_sample_df = df[df['patient_id'] == sample_id_numeric]
+                except ValueError:
+                    print(f"    ⚠️ Could not convert sample_id '{sample_id}' to numeric for matching.")
+                    raw_sample_df = pd.DataFrame() # Empty
+            else: # Assume string comparison
+                raw_sample_df = df[df['patient_id'] == str(sample_id)]
             
-            print(f"  Raw Sample ID: {sample_id}")
+            if raw_sample_df.empty:
+                print(f"    ⚠️ Raw sample with patient_id '{sample_id}' not found in main DataFrame df.")
+                # As a fallback, try to get raw data based on the order if IDs fail.
+                # This assumes the initial order in train_dataset.data_list corresponds to df order.
+                # This is less robust and should only be a fallback.
+                if i < len(df):
+                    print(f"    Trying fallback: using df.iloc[{i}] for raw data.")
+                    raw_sample_row = df.iloc[i]
+                    fallback_patient_id = raw_sample_row.get('patient_id', 'Unknown')
+                    print(f"    Fallback patient_id: {fallback_patient_id}")
+                else:
+                    print(f"    Fallback failed: index {i} is out of bounds for main DataFrame.")
+                    continue
+            else:
+                raw_sample_row = raw_sample_df.iloc[0]
+            
+            retrieved_patient_id = raw_sample_row.get('patient_id', 'Unknown')
+            print(f"  Raw Sample ID (retrieved): {retrieved_patient_id}")
             raw_img_array = raw_sample_row['Image']
             raw_img_np = np.array(raw_img_array, dtype=np.uint8).reshape((224, 224, 3))
             print(f"  Raw Image Shape: {raw_img_np.shape}, Min/Max: {raw_img_np.min()}/{raw_img_np.max()}")
