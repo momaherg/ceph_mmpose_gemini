@@ -13,16 +13,26 @@ from typing import Dict, List, Tuple, Optional
 import warnings
 warnings.filterwarnings('ignore')
 
-# Apply safe torch.load wrapper
-import functools
-_original_torch_load = torch.load # Store original with a different name
+# Fix for PyTorch 2.6+ weights_only issue
+try:
+    from mmengine.config.config import ConfigDict
+    torch.serialization.add_safe_globals([ConfigDict])
+    # print("Added ConfigDict to PyTorch safe globals for diagnose_heatmaps.py")
+except ImportError:
+    # print("ConfigDict not found in diagnose_heatmaps.py")
+    pass
 
-def safe_torch_load(*args, **kwargs):
+# Apply safe torch.load wrapper CORRECTLY
+import functools
+_original_torch_load_heatmap_diag = torch.load # Store original with a unique name for this script
+
+def safe_torch_load_heatmap_diag(*args, **kwargs):
     if 'weights_only' not in kwargs:
         kwargs['weights_only'] = False
-    return _original_torch_load(*args, **kwargs) # Call the original
+    return _original_torch_load_heatmap_diag(*args, **kwargs) # Call the original
 
-torch.load = safe_torch_load
+torch.load = safe_torch_load_heatmap_diag
+# print("Applied torch.load wrapper in diagnose_heatmaps.py")
 
 def diagnose_heatmap_and_loss(config_path: str,
                               checkpoint_path: str, # Can be an early epoch checkpoint
