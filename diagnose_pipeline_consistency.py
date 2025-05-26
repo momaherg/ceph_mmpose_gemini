@@ -215,7 +215,10 @@ def diagnose_pipeline_consistency(config_path: str,
             
         # Comparison (simple check for now)
         if train_inputs.shape == val_inputs.shape:
-            diff = torch.abs(train_inputs - val_inputs).mean()
+            # Ensure inputs are float before calculating mean difference
+            train_inputs_float = train_inputs.float()
+            val_inputs_float = val_inputs.float()
+            diff = torch.abs(train_inputs_float - val_inputs_float).mean()
             print(f"\n  Input Tensor Difference (Mean Abs): {diff:.6f}")
             if diff > 1e-3: # Allow for some floating point differences due to different aug paths
                 print(f"    ⚠️  POTENTIAL ISSUE: Input tensors differ significantly between pipelines!")

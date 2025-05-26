@@ -88,22 +88,26 @@ data_root = '/content/drive/MyDrive/Lala\'s Masters/'
 train_pipeline = [
     dict(type='LoadImageNumpy'),
     dict(type='GetBBoxCenterScale'),
-    dict(type='RandomFlip', direction='horizontal', prob=0.0),  # Disabled for cephalometric
+    dict(type='RandomFlip', direction='horizontal', prob=0.0),
     dict(
         type='RandomBBoxTransform',
-        shift_prob=0.3,  # Allow some shifting
-        rotate_factor=15,  # Reduced rotation
-        scale_factor=(0.9, 1.1)  # Less aggressive scaling
+        shift_prob=0.3,
+        rotate_factor=15,
+        scale_factor=(0.9, 1.1)
     ),
     dict(type='TopdownAffine', input_size=codec['input_size']),
+    dict(
+        type='Normalize',
+        mean=[123.675, 116.28, 103.53],
+        std=[58.395, 57.12, 57.375],
+        to_rgb=False # Model's data_preprocessor handles bgr_to_rgb=True
+    ),
     dict(type='GenerateTarget', encoder=codec),
-    dict(type='CustomPackPoseInputs',
+    dict(type='PackPoseInputs',
          meta_keys=(
              'img_id', 'img_path', 'ori_shape', 'img_shape',
              'input_size', 'input_center', 'input_scale',
-             'flip', 'flip_direction',
              'num_joints', 'joint_weights',
-             'id', 'patient_text_id', 'set', 'class'
          ))
 ]
 
@@ -111,13 +115,17 @@ val_pipeline = [
     dict(type='LoadImageNumpy'),
     dict(type='GetBBoxCenterScale'),
     dict(type='TopdownAffine', input_size=codec['input_size']),
-    dict(type='CustomPackPoseInputs',
+    dict(
+        type='Normalize',
+        mean=[123.675, 116.28, 103.53],
+        std=[58.395, 57.12, 57.375],
+        to_rgb=False # Model's data_preprocessor handles bgr_to_rgb=True
+    ),
+    dict(type='PackPoseInputs',
          meta_keys=(
              'img_id', 'img_path', 'ori_shape', 'img_shape',
              'input_size', 'input_center', 'input_scale',
-             'flip', 'flip_direction',
              'num_joints', 'joint_weights',
-             'id', 'patient_text_id', 'set', 'class'
          ))
 ]
 
