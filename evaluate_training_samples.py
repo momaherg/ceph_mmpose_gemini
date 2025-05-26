@@ -311,7 +311,17 @@ def evaluate_on_training_samples(checkpoint_path: str,
                     print(f"DEBUG - Results[0] type: {type(results[0])}")
                     print(f"DEBUG - Has pred_instances: {hasattr(results[0], 'pred_instances')}")
                 
-                pred_coords = results[0].pred_instances.keypoints[0].cpu().numpy()  # Shape: (19, 2)
+                # pred_coords = results[0].pred_instances.keypoints[0].cpu().numpy()  # Shape: (19, 2)
+                pred_coords = results[0].pred_instances.keypoints
+                # Ensure it's a numpy array and has the correct dimensions
+                if isinstance(pred_coords, torch.Tensor):
+                    pred_coords = pred_coords.cpu().numpy()
+                
+                if pred_coords.shape == (1, 19, 2): # Remove batch dim if present
+                    pred_coords = pred_coords[0]
+                elif pred_coords.shape != (19,2):
+                    print(f"ERROR: Unexpected pred_coords shape: {pred_coords.shape}")
+                    continue
                 
                 if idx == 0:
                     print(f"DEBUG - Prediction coords shape: {pred_coords.shape}")
