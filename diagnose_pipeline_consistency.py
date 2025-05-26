@@ -21,12 +21,12 @@ except ImportError:
 
 # Apply safe torch.load wrapper
 import functools
-original_torch_load = torch.load
+_original_torch_load = torch.load # Store original with a different name
 
 def safe_torch_load(*args, **kwargs):
     if 'weights_only' not in kwargs:
         kwargs['weights_only'] = False
-    return original_torch_load(*args, **kwargs)
+    return _original_torch_load(*args, **kwargs) # Call the original
 
 torch.load = safe_torch_load
 
@@ -70,12 +70,14 @@ def diagnose_pipeline_consistency(config_path: str,
     
     try:
         # Training dataset
-        train_dataset_cfg = cfg.train_dataloader.dataset
+        train_dataset_cfg = cfg.train_dataloader.dataset.copy() # Make a copy to modify
+        train_dataset_cfg.pop('type', None) # Remove 'type' if it exists
         train_dataset = custom_cephalometric_dataset.CustomCephalometricDataset(**train_dataset_cfg)
         print(f"✓ Training dataset loaded: {len(train_dataset)} samples")
         
         # Validation dataset (using same config but with test_mode=True)
-        val_dataset_cfg = cfg.val_dataloader.dataset
+        val_dataset_cfg = cfg.val_dataloader.dataset.copy() # Make a copy to modify
+        val_dataset_cfg.pop('type', None) # Remove 'type' if it exists
         val_dataset = custom_cephalometric_dataset.CustomCephalometricDataset(**val_dataset_cfg)
         print(f"✓ Validation dataset loaded: {len(val_dataset)} samples")
         

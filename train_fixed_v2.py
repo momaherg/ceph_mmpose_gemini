@@ -18,12 +18,12 @@ warnings.filterwarnings('ignore')
 
 # Apply PyTorch safe loading fix
 import functools
-original_torch_load = torch.load
+_original_torch_load = torch.load # Store original with a different name
 
 def safe_torch_load(*args, **kwargs):
     if 'weights_only' not in kwargs:
         kwargs['weights_only'] = False
-    return original_torch_load(*args, **kwargs)
+    return _original_torch_load(*args, **kwargs) # Call the original
 
 torch.load = safe_torch_load
 

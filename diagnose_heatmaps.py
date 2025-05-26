@@ -13,7 +13,16 @@ from typing import Dict, List, Tuple, Optional
 import warnings
 warnings.filterwarnings('ignore')
 
-# Apply PyTorch safe loading fix (if needed, already in other scripts)
+# Apply safe torch.load wrapper
+import functools
+_original_torch_load = torch.load # Store original with a different name
+
+def safe_torch_load(*args, **kwargs):
+    if 'weights_only' not in kwargs:
+        kwargs['weights_only'] = False
+    return _original_torch_load(*args, **kwargs) # Call the original
+
+torch.load = safe_torch_load
 
 def diagnose_heatmap_and_loss(config_path: str,
                               checkpoint_path: str, # Can be an early epoch checkpoint
