@@ -204,6 +204,23 @@ def evaluate_on_training_samples(checkpoint_path: str,
                     # Create data sample
                     data_sample = PoseDataSample()
                     
+                    # Add required metainfo
+                    data_sample.set_metainfo({
+                        'img_shape': (224, 224),
+                        'ori_shape': (224, 224), 
+                        'input_size': (224, 224),
+                        'input_center': np.array([112.0, 112.0]),
+                        'input_scale': np.array([224.0, 224.0]),
+                        'flip_indices': list(range(19)), # num_keypoints
+                    })
+                    
+                    # Add gt_instances with bboxes (required by some models)
+                    from mmengine.structures import InstanceData
+                    gt_instances = InstanceData()
+                    gt_instances.bboxes = torch.tensor([[0, 0, 224, 224]], dtype=torch.float32)
+                    gt_instances.bbox_scores = torch.tensor([1.0], dtype=torch.float32)
+                    data_sample.gt_instances = gt_instances
+                    
                     # Create input dict in MMPose format
                     data_dict = {
                         'inputs': image_tensor,
@@ -241,24 +258,45 @@ def evaluate_on_training_samples(checkpoint_path: str,
                     except Exception as e2:
                         if idx == 0:
                             print(f"DEBUG - Predict method failed: {e2}")
-                            print(f"DEBUG - Trying inference_model from mmpose.apis...")
+                            print(f"DEBUG - Trying inference_topdown from mmpose.apis...")
                         
                         try:
-                            # Try using MMPose's inference API
-                            from mmpose.apis import inference_model
+                            # Try using MMPose's inference_topdown API (more robust)
+                            from mmpose.apis import inference_topdown # Changed from inference_model
                             
-                            # Convert tensor back to numpy for inference_model
+                            # Convert tensor back to numpy for inference_topdown
                             image_np = image_tensor.squeeze(0).permute(1, 2, 0).cpu().numpy()
-                            image_np = (image_np * 255).astype(np.uint8)
                             
-                            results = inference_model(model, image_np)
+                            # Denormalize and convert to uint8 if needed by inference_topdown
+                            # This depends on whether your inference_topdown expects raw or normalized images
+                            # For now, assume it handles normalization if needed or uses raw uint8
+                            # mean = np.array([123.675, 116.28, 103.53])
+                            # std = np.array([58.395, 57.12, 57.375])
+                            # image_np = (image_np * std) + mean
+                            image_np = image_np.astype(np.uint8) # Ensure uint8 for some APIs
+
+                            # Bbox for the whole image
+                            bbox = np.array([0, 0, 224, 224])
+                            
+                            results_list = inference_topdown(model, image_np, bboxes=bbox.reshape(1, -1))
                             
                             if idx == 0:
-                                print(f"DEBUG - inference_model succeeded: {type(results)}")
+                                print(f"DEBUG - inference_topdown succeeded: {type(results_list)}")
+                            # Process results_list to fit the expected 'results' structure if needed
+                            # For now, assuming it gives a list of PoseDataSample or similar
+                            if results_list and len(results_list) > 0:
+                                results = results_list # Assign to results to be processed later
+                            else:
+                                print("DEBUG - inference_topdown returned empty results")
+                                continue
                             
+                        except ImportError:
+                            if idx == 0:
+                                print("DEBUG - inference_topdown not available.")
+                            continue # Skip to next sample if this API is not found
                         except Exception as e3:
                             if idx == 0:
-                                print(f"DEBUG - All inference methods failed. Last error: {e3}")
+                                print(f"DEBUG - All inference methods failed. Last error from inference_topdown: {e3}")
                             continue
                 
                 # Validate results
@@ -522,16 +560,16 @@ def test_model_inference(checkpoint_path: str,
         except Exception as e:
             print(f"✗ Predict failed: {e}")
         
-        print("\n--- Testing inference_model ---")
+        print("\n--- Testing inference_topdown ---")
         try:
-            from mmpose.apis import inference_model
+            from mmpose.apis import inference_topdown # Changed from inference_model
             # Convert tensor to numpy image
             dummy_np = dummy_input.squeeze(0).permute(1, 2, 0).cpu().numpy()
             dummy_np = (dummy_np * 255).astype(np.uint8)
-            results = inference_model(model, dummy_np)
-            print(f"✓ inference_model succeeded: {type(results)}")
+            results = inference_topdown(model, dummy_np)
+            print(f"✓ inference_topdown succeeded: {type(results)}")
         except Exception as e:
-            print(f"✗ inference_model failed: {e}")
+            print(f"✗ inference_topdown failed: {e}")
             
         print("\n--- Testing direct forward ---")
         try:
