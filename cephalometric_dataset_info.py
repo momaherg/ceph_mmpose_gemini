@@ -41,7 +41,12 @@ dataset_info = dict(
     # For 224x224 images, a common starting point (like COCO's person keypoints) is around 0.025 to 0.085
     # We can use a uniform value for now, or try to be slightly more specific if some points are harder.
     # Given all are facial landmarks, variation might not be extreme.
-    sigmas=[0.035] * 19 # A slightly more generous sigma than pure COCO keypoints, adjust as needed.
+    sigmas=[0.035] * 19, # A slightly more generous sigma than pure COCO keypoints, adjust as needed.
+    # Flip indices for horizontal flipping augmentation
+    # Since these are cephalometric landmarks from lateral (side) view,
+    # most landmarks don't have clear left/right pairs, so they map to themselves
+    # You may need to adjust these based on your specific landmarks and how they should behave during flipping
+    flip_indices=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18]
 )
 
 landmark_names_in_order = [

@@ -141,6 +141,7 @@ class CustomCephalometricDataset(BaseDataset):
                 'id': str(row.get('patient_id', index)),
                 'ori_shape': (224, 224),
                 'img_shape': (224, 224),
+                'flip_indices': self.METAINFO['flip_indices'],  # Add flip_indices from METAINFO
                 'patient_text_id': row.get('patient', ''),
                 'set': row.get('set', 'train'),
                 'class': row.get('class', None)
