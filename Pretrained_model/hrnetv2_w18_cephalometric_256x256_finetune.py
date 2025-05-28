@@ -12,7 +12,7 @@ optim_wrapper = dict(
 
 # Dataset settings
 dataset_type = 'CustomCephalometricDataset' # Your custom dataset
-data_root = "data/" # Conventional data root, actual data comes from data_df injected by training script
+data_root = "/content/drive/MyDrive/Lala\'s Masters/" # Conventional data root, actual data comes from data_df injected by training script
 # ann_file_main = 'train_data_pure_old_numpy.json' # The single JSON file
 
 # Codec (should match pretraining, especially input_size for TopdownAffine)
