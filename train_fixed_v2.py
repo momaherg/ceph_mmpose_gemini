@@ -50,7 +50,8 @@ def main():
     
     # Configuration
     config_path = "Pretrained_model/hrnetv2_w18_cephalometric_256x256_finetune.py" # Relative path
-    work_dir = "work_dirs/hrnetv2_w18_cephalometric_finetune_experiment" # Relative path
+    # User might be in Colab, work_dir will be relative to /content/ or current dir
+    work_dir = "work_dirs/hrnetv2_w18_cephalometric_finetune_experiment" 
     
     print(f"Config: {config_path}")
     print(f"Work Dir: {work_dir}")
@@ -63,11 +64,14 @@ def main():
         print(f"✗ Failed to load config: {e}")
         return
     
-    # Set work directory
-    cfg.work_dir = work_dir
+    # Set work directory (make it absolute for robust temp file paths)
+    cfg.work_dir = os.path.abspath(work_dir)
+    # Create work_dir if it doesn't exist, as os.path.join needs it for temp files
+    os.makedirs(cfg.work_dir, exist_ok=True) 
     
-    # ---- START: Load and Inject DataFrames ----
-    data_file_path = "/content/drive/MyDrive/Lala\'s Masters/train_data_pure_old_numpy.json"
+    # ---- START: Load Data, Save to Temp JSON, and Update Config ----
+    # User's path, likely for Colab
+    data_file_path = "/content/drive/MyDrive/Lala's Masters/train_data_pure_old_numpy.json"
     print(f"Loading main data file from: {data_file_path}")
     try:
         main_df = pd.read_json(data_file_path)
@@ -85,18 +89,36 @@ def main():
             print("ERROR: Training or validation DataFrame is empty. Please check the 'set' column in your JSON file.")
             return
 
-        # Inject DataFrames into the config
-        cfg.train_dataloader.dataset.data_df = train_df
-        cfg.val_dataloader.dataset.data_df = val_df
-        cfg.test_dataloader.dataset.data_df = test_df
-        
-        # Since data_df is provided, ensure ann_file is empty or None in dataset configs
-        # The new config already sets ann_file to '', so this is a safeguard.
-        cfg.train_dataloader.dataset.ann_file = ''
-        cfg.val_dataloader.dataset.ann_file = ''
-        cfg.test_dataloader.dataset.ann_file = ''
+        # Define paths for temporary annotation files
+        temp_train_ann_file = os.path.join(cfg.work_dir, 'temp_train_ann.json')
+        temp_val_ann_file = os.path.join(cfg.work_dir, 'temp_val_ann.json')
+        temp_test_ann_file = os.path.join(cfg.work_dir, 'temp_test_ann.json')
 
-        print("✓ DataFrames injected into the configuration.")
+        # Save DataFrames to temporary JSON files
+        train_df.to_json(temp_train_ann_file, orient='records', indent=2) # Using indent for debuggability
+        val_df.to_json(temp_val_ann_file, orient='records', indent=2)
+        if not test_df.empty:
+            test_df.to_json(temp_test_ann_file, orient='records', indent=2)
+        print(f"✓ Temporary annotation files saved to: {cfg.work_dir}")
+
+        # Update config to use these temporary annotation files
+        cfg.train_dataloader.dataset.ann_file = temp_train_ann_file
+        cfg.train_dataloader.dataset.data_df = None 
+        cfg.train_dataloader.dataset.data_root = '' # ann_file is absolute
+
+        cfg.val_dataloader.dataset.ann_file = temp_val_ann_file
+        cfg.val_dataloader.dataset.data_df = None
+        cfg.val_dataloader.dataset.data_root = ''
+
+        if not test_df.empty:
+            cfg.test_dataloader.dataset.ann_file = temp_test_ann_file
+        else: # If test_df is empty, use val_df for test_dataloader to avoid errors if test_dataloader is used
+            print("WARNING: Test DataFrame is empty. Test dataloader will use validation data.")
+            cfg.test_dataloader.dataset.ann_file = temp_val_ann_file
+        cfg.test_dataloader.dataset.data_df = None
+        cfg.test_dataloader.dataset.data_root = ''
+        
+        print("✓ Configuration updated to use temporary annotation files.")
 
     except FileNotFoundError:
         print(f"ERROR: Data file not found at {data_file_path}. Please check the path.")
@@ -106,7 +128,7 @@ def main():
         import traceback
         traceback.print_exc()
         return
-    # ---- END: Load and Inject DataFrames ----
+    # ---- END: Load Data, Save to Temp JSON, and Update Config ----
     
     # Print key training parameters
     print("\n" + "="*50)
@@ -133,8 +155,8 @@ def main():
     print(f"  Head in_channels: {cfg.model.head.in_channels}")
     print(f"  Auto-scale LR: {cfg.get('auto_scale_lr', 'Disabled')}")
     
-    # Create work directory
-    os.makedirs(work_dir, exist_ok=True)
+    # Create work directory - This is now done earlier before temp file creation
+    # os.makedirs(work_dir, exist_ok=True) # Moved up
     
     # Add monitoring hook for model collapse detection
     custom_hooks = []
