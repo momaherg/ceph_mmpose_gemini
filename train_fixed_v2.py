@@ -67,7 +67,7 @@ def main():
     cfg.work_dir = work_dir
     
     # ---- START: Load and Inject DataFrames ----
-    data_file_path = "data/train_data_pure_old_numpy.json"
+    data_file_path = "/content/drive/MyDrive/Lala\'s Masters/train_data_pure_old_numpy.json"
     print(f"Loading main data file from: {data_file_path}")
     try:
         main_df = pd.read_json(data_file_path)
