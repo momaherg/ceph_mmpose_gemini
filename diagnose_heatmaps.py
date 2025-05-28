@@ -66,12 +66,45 @@ def diagnose_heatmap_and_loss(config_path: str,
 
     # Load the specific sample from the dataset
     df = pd.read_json(osp.join(data_root, ann_file))
+    print(f"✓ Full dataset loaded: {len(df)} samples. Columns: {list(df.columns)}")
+    
+    sample_row_df = pd.DataFrame()
     if sample_id_to_debug:
-        sample_row = df[df['patient_id'] == sample_id_to_debug].iloc[0]
-    else:
-        sample_row = df[df['set'] == 'train'].iloc[0] # Default to first training sample
-        sample_id_to_debug = sample_row['patient_id']
-    print(f"✓ Debugging Sample ID: {sample_id_to_debug}")
+        print(f"  Attempting to find specific sample_id_to_debug: '{sample_id_to_debug}' (type: {type(sample_id_to_debug)})")
+        if 'patient_id' in df.columns:
+            print(f"    DataFrame patient_id column dtype: {df['patient_id'].dtype}")
+            # Try matching type
+            if pd.api.types.is_numeric_dtype(df['patient_id']):
+                try:
+                    sample_id_numeric = int(sample_id_to_debug)
+                    sample_row_df = df[df['patient_id'] == sample_id_numeric]
+                except ValueError:
+                    print(f"    ⚠️ Could not convert sample_id_to_debug '{sample_id_to_debug}' to numeric.")
+            else: # String comparison
+                sample_row_df = df[df['patient_id'] == str(sample_id_to_debug)]
+        else:
+            print("    ⚠️ 'patient_id' column not in DataFrame!")
+    
+    if sample_row_df.empty: # If specific ID not found or not provided, get first training sample
+        print(f"  Specific sample '{sample_id_to_debug}' not found or not specified. Getting first 'train' sample.")
+        if 'set' in df.columns:
+            train_samples_df = df[df['set'] == 'train']
+            if not train_samples_df.empty:
+                sample_row_df = train_samples_df.head(1)
+                sample_id_to_debug = sample_row_df.iloc[0]['patient_id']
+                print(f"    Using first 'train' sample. patient_id: {sample_id_to_debug}")
+            else:
+                print("    ⚠️ No samples with 'set' == 'train' found!")
+        else:
+            print("    ⚠️ 'set' column not in DataFrame to filter for train samples!")
+
+    if sample_row_df.empty: # If still no sample, error out
+        print(f"✗ Error: Could not load any sample for debugging (tried specific '{sample_id_to_debug}' and first 'train' sample).")
+        return
+        
+    sample_row = sample_row_df.iloc[0]
+    actual_debug_id = sample_row['patient_id'] # Get the ID from the actually selected row
+    print(f"✓ Debugging with Sample ID: {actual_debug_id} (Original request was: '{sample_id_to_debug}')")
 
     # 1. PREPARE DATA FOR A SINGLE SAMPLE (SIMULATE DATALOADER OUTPUT)
     print("\n1. DATA PREPARATION & PIPELINE")
@@ -127,7 +160,7 @@ def diagnose_heatmap_and_loss(config_path: str,
     plt.figure(figsize=(10, 5))
     plt.subplot(1, 2, 1)
     plt.imshow(raw_img_np)
-    plt.title(f"Raw Image (ID: {sample_id_to_debug})")
+    plt.title(f"Raw Image (ID: {actual_debug_id})")
     selected_kp_idx = 0 # e.g., Sella
     for k_idx_plot in range(min(3, target_heatmaps.shape[0])): # Plot first 3 valid heatmaps
         if target_weights[k_idx_plot] > 0:
@@ -137,8 +170,8 @@ def diagnose_heatmap_and_loss(config_path: str,
     plt.imshow(target_heatmaps[selected_kp_idx].numpy(), cmap='viridis')
     plt.title(f"Target Heatmap for '{landmark_names_in_order[selected_kp_idx]}' (Channel {selected_kp_idx})")
     plt.colorbar()
-    plt.savefig(f"debug_target_heatmap_sample_{sample_id_to_debug}.png")
-    print(f"✓ Saved target heatmap visualization to debug_target_heatmap_sample_{sample_id_to_debug}.png")
+    plt.savefig(f"debug_target_heatmap_sample_{actual_debug_id}.png")
+    print(f"✓ Saved target heatmap visualization to debug_target_heatmap_sample_{actual_debug_id}.png")
     plt.close()
 
     # 2. FORWARD PASS & PREDICTED HEATMAPS
@@ -160,8 +193,8 @@ def diagnose_heatmap_and_loss(config_path: str,
     plt.imshow(predicted_heatmaps[0, selected_kp_idx].detach().numpy(), cmap='viridis') # batch 0, channel for selected_kp_idx
     plt.title(f"Predicted Heatmap for '{landmark_names_in_order[selected_kp_idx]}'")
     plt.colorbar()
-    plt.savefig(f"debug_predicted_heatmap_sample_{sample_id_to_debug}.png")
-    print(f"✓ Saved predicted heatmap visualization to debug_predicted_heatmap_sample_{sample_id_to_debug}.png")
+    plt.savefig(f"debug_predicted_heatmap_sample_{actual_debug_id}.png")
+    print(f"✓ Saved predicted heatmap visualization to debug_predicted_heatmap_sample_{actual_debug_id}.png")
     plt.close()
 
     # 3. LOSS CALCULATION

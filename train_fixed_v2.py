@@ -12,6 +12,7 @@ from mmengine.registry import init_default_scope
 from mmpose.apis import init_model  # Only import what's available
 from mmengine.runner import Runner
 import numpy as np
+import pandas as pd # Import pandas
 
 # Suppress warnings
 warnings.filterwarnings('ignore')
@@ -48,8 +49,8 @@ def main():
         return
     
     # Configuration
-    config_path = "/content/ceph_mmpose_gemini/configs/hrnetv2/hrnetv2_w18_cephalometric_224x224_FIXED_V2.py"
-    work_dir = "/content/ceph_mmpose_gemini/work_dirs/hrnetv2_w18_cephalometric_experiment_FIXED_V2"
+    config_path = "Pretrained_model/hrnetv2_w18_cephalometric_256x256_finetune.py" # Relative path
+    work_dir = "work_dirs/hrnetv2_w18_cephalometric_finetune_experiment" # Relative path
     
     print(f"Config: {config_path}")
     print(f"Work Dir: {work_dir}")
@@ -64,6 +65,48 @@ def main():
     
     # Set work directory
     cfg.work_dir = work_dir
+    
+    # ---- START: Load and Inject DataFrames ----
+    data_file_path = "data/train_data_pure_old_numpy.json"
+    print(f"Loading main data file from: {data_file_path}")
+    try:
+        main_df = pd.read_json(data_file_path)
+        print(f"Main DataFrame loaded. Shape: {main_df.shape}")
+
+        train_df = main_df[main_df['set'] == 'train'].reset_index(drop=True)
+        val_df = main_df[main_df['set'] == 'dev'].reset_index(drop=True) # Assuming 'dev' for validation
+        test_df = main_df[main_df['set'] == 'test'].reset_index(drop=True)
+
+        print(f"Train DataFrame shape: {train_df.shape}")
+        print(f"Validation DataFrame shape: {val_df.shape}")
+        print(f"Test DataFrame shape: {test_df.shape}")
+
+        if train_df.empty or val_df.empty:
+            print("ERROR: Training or validation DataFrame is empty. Please check the 'set' column in your JSON file.")
+            return
+
+        # Inject DataFrames into the config
+        cfg.train_dataloader.dataset.data_df = train_df
+        cfg.val_dataloader.dataset.data_df = val_df
+        cfg.test_dataloader.dataset.data_df = test_df
+        
+        # Since data_df is provided, ensure ann_file is empty or None in dataset configs
+        # The new config already sets ann_file to '', so this is a safeguard.
+        cfg.train_dataloader.dataset.ann_file = ''
+        cfg.val_dataloader.dataset.ann_file = ''
+        cfg.test_dataloader.dataset.ann_file = ''
+
+        print("✓ DataFrames injected into the configuration.")
+
+    except FileNotFoundError:
+        print(f"ERROR: Data file not found at {data_file_path}. Please check the path.")
+        return
+    except Exception as e:
+        print(f"ERROR: Failed to load or process data: {e}")
+        import traceback
+        traceback.print_exc()
+        return
+    # ---- END: Load and Inject DataFrames ----
     
     # Print key training parameters
     print("\n" + "="*50)
