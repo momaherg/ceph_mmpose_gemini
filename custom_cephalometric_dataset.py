@@ -15,6 +15,7 @@ class CustomCephalometricDataset(BaseDataset):
             Defaults to None.
         pipeline (list): Processing pipeline.
         filter_cfg (dict, optional): Config for filtering data. Defaults to None.
+        data_mode (str, optional): Data mode. Defaults to 'topdown'.
         **kwargs: Other arguments passed to BaseDataset.
     """
     METAINFO: dict = dataset_info
@@ -24,6 +25,7 @@ class CustomCephalometricDataset(BaseDataset):
                  data_df: pd.DataFrame = None, 
                  pipeline=(), 
                  filter_cfg=None,
+                 data_mode='topdown',  # Explicitly accept data_mode
                  **kwargs):
         
         if data_df is None and not ann_file:
@@ -34,6 +36,10 @@ class CustomCephalometricDataset(BaseDataset):
             pass # Allow BaseDataset to initialize with ann_file='', it will call load_data_list
 
         self.data_df = data_df
+        self.data_mode = data_mode  # Store data_mode for potential future use
+
+        # Filter out data_mode from kwargs since BaseDataset doesn't accept it
+        filtered_kwargs = {k: v for k, v in kwargs.items() if k != 'data_mode'}
 
         # Pass pipeline and other relevant args to BaseDataset.
         # BaseDataset will set self.ann_file. If 'ann_file' is empty, it will try to call
@@ -41,7 +47,7 @@ class CustomCephalometricDataset(BaseDataset):
         super().__init__(ann_file=ann_file, # Pass the original ann_file string here
                          pipeline=pipeline, 
                          filter_cfg=filter_cfg, 
-                         **kwargs)
+                         **filtered_kwargs)
 
     def load_data_list(self) -> list:
         """Load annotations.

@@ -75,6 +75,7 @@ train_dataloader = dict(
         # data_root=data_root, # Base path for ann_file if it's relative
         # ann_file=ann_file_main, # Path to the JSON file with all data
         # data_df=None, # This would be replaced by the actual train_df by the training script
+        data_mode='topdown',
         pipeline=train_pipeline,
         # The CustomCephalometricDataset's METAINFO will be used.
         # If your CustomCephalometricDataset doesn't filter internally based on 'set' from ann_file,
@@ -97,6 +98,7 @@ val_dataloader = dict(
         # data_root=data_root,
         # ann_file=ann_file_main,
         # data_df=None, # This would be replaced by the actual val_df by the training script
+        data_mode='topdown',
         pipeline=val_pipeline,
         ann_file='',
         test_mode=True # Crucial for validation
