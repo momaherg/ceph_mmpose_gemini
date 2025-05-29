@@ -30,14 +30,6 @@ model = dict(
     # data_preprocessor mean/std are from ImageNet, generally fine for transfer.
 )
 
-# Import custom transforms
-# Ensure your custom_transforms.py is in a location accessible by Python's import system
-# For example, if train_fixed_v2.py and custom_transforms.py are in the same directory,
-# and you run from that directory, this should work.
-# If custom_transforms.py is elsewhere, you might need to adjust PYTHONPATH or use relative imports if it's a package.
-# For mmpose, often custom modules are placed in a package structure recognized by the framework.
-# Assuming it's discoverable for now:
-from custom_transforms import AddInputMeta # Import the new transform
 
 # Pipelines - Remove LoadImage, ensure TopdownAffine targets 256x256
 train_pipeline = [
@@ -50,16 +42,14 @@ train_pipeline = [
         rotate_factor=60,
         scale_factor=(0.75, 1.25)),
     dict(type='TopdownAffine', input_size=codec['input_size']), # Use 256x256
-    dict(type='AddInputMeta', input_size_from_config=codec['input_size']), # Add the new transform
     dict(type='GenerateTarget', encoder=codec),
-    dict(type='PackPoseInputs', meta_keys=('id', 'img_id', 'img_path', 'ori_shape', 'img_shape', 'bbox', 'flip_indices', 'patient_text_id', 'set', 'class', 'input_center', 'input_scale', 'input_size'))
+    dict(type='PackPoseInputs', meta_keys=('id', 'img_id', 'img_path', 'ori_shape', 'img_shape', 'bbox', 'flip_indices', 'center', 'scale', 'input_center', 'input_scale', 'input_size', 'patient_text_id', 'set', 'class'))
 ]
 val_pipeline = [
     # dict(type='LoadImage'), # REMOVED
     dict(type='GetBBoxCenterScale'),
     dict(type='TopdownAffine', input_size=codec['input_size']), # Use 256x256
-    dict(type='AddInputMeta', input_size_from_config=codec['input_size']), # Add the new transform
-    dict(type='PackPoseInputs', meta_keys=('id', 'img_id', 'img_path', 'ori_shape', 'img_shape', 'bbox', 'flip_indices', 'patient_text_id', 'set', 'class', 'input_center', 'input_scale', 'input_size'))
+    dict(type='PackPoseInputs', meta_keys=('id', 'img_id', 'img_path', 'ori_shape', 'img_shape', 'bbox', 'flip_indices', 'center', 'scale', 'input_center', 'input_scale', 'input_size', 'patient_text_id', 'set', 'class'))
 ]
 test_pipeline = val_pipeline # Test pipeline often same as validation
 
