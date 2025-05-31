@@ -28,6 +28,11 @@ model = dict(
     # The rest of the model (backbone, neck, data_preprocessor, test_cfg)
     # can be inherited or slightly adjusted if needed.
     # data_preprocessor mean/std are from ImageNet, generally fine for transfer.
+    head_loss=dict(
+        type='KeypointMSELoss',
+        use_target_weight=True,
+        loss_weight=[2.0 if i in [0,10] else 1.0 for i in range(19)]
+    )
 )
 
 
@@ -41,6 +46,10 @@ train_pipeline = [
         shift_prob=0, # AFLW config had this at 0
         rotate_factor=60,
         scale_factor=(0.75, 1.25)),
+    dict(type='ColorJitter', brightness=0.2,
+                                 contrast=0.2, saturation=0.2, hue=0.1),
+    dict(type='RandomRotation', degree=15),
+    dict(type='RandomBlur', kernel_size=3, prob=0.3),
     dict(type='TopdownAffine', input_size=codec['input_size']), # Use 256x256
     dict(type='GenerateTarget', encoder=codec),
     dict(type='CustomPackPoseInputs', meta_keys=('id', 'img_id', 'img_path', 'ori_shape', 'img_shape', 'bbox', 'bbox_scores', 'flip_indices', 'center', 'scale', 'input_center', 'input_scale', 'input_size', 'patient_text_id', 'set', 'class'))
