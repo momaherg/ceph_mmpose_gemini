@@ -44,7 +44,6 @@ train_pipeline = [
     dict(type='TopdownAffine', input_size=codec['input_size']), # Use 256x256
     dict(type='GenerateTarget', encoder=codec),
     dict(type='PackPoseInputs', 
-         instance_keys=('bbox', 'bbox_scores', 'keypoints', 'keypoints_visible'), # Explicitly define instance keys
          meta_keys=('id', 'img_id', 'img_path', 'ori_shape', 'img_shape', 'flip_indices', 'center', 'scale', 'input_center', 'input_scale', 'input_size', 'patient_text_id', 'set', 'class'))
 ]
 val_pipeline = [
@@ -52,7 +51,6 @@ val_pipeline = [
     dict(type='GetBBoxCenterScale'),
     dict(type='TopdownAffine', input_size=codec['input_size']), # Use 256x256
     dict(type='PackPoseInputs', 
-         instance_keys=('bbox', 'bbox_scores', 'keypoints', 'keypoints_visible'), # Explicitly define instance keys
          meta_keys=('id', 'img_id', 'img_path', 'ori_shape', 'img_shape', 'flip_indices', 'center', 'scale', 'input_center', 'input_scale', 'input_size', 'patient_text_id', 'set', 'class'))
 ]
 test_pipeline = val_pipeline # Test pipeline often same as validation
