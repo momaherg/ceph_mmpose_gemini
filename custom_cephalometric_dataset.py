@@ -127,15 +127,16 @@ class CustomCephalometricDataset(BaseDataset):
             # Ensure bbox has the right shape for a single instance: (1, 4) instead of (4,)
             bbox = np.array([[0, 0, 224, 224]], dtype=np.float32)  # Note the extra brackets to make it (1, 4)
             
-            # Add bbox_scores back - required by MMPose topdown pose estimator during validation
-            bbox_scores = np.array([1.0], dtype=np.float32)  # High confidence since we use the full image
+            # Add bbox_scores (confidence scores for bounding boxes)
+            bbox_scores = np.array([1.0], dtype=np.float32)  # Re-adding: High confidence since we use the full image
+            # Removing bbox_scores as it's causing issues during validation and is not strictly necessary
 
             data_info = {
                 'img': img_np,
                 'img_path': str(row.get('patient_id', f'index_{index}')),
                 'img_id': str(row.get('patient_id', index)),
                 'bbox': bbox,
-                'bbox_scores': bbox_scores,  # Required by topdown pose estimator
+                'bbox_scores': bbox_scores,  # Re-added: Expected by model logic in add_pred_to_datasample
                 'keypoints': keypoints.reshape(1, num_keypoints, 2),  # Reshape to (1, K, 2) for single instance
                 'keypoints_visible': keypoints_visible.reshape(1, num_keypoints),  # Reshape to (1, K) for single instance
                 'id': str(row.get('patient_id', index)),
