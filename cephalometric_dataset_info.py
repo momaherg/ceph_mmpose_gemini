@@ -46,7 +46,22 @@ dataset_info = dict(
     # Since these are cephalometric landmarks from lateral (side) view,
     # most landmarks don't have clear left/right pairs, so they map to themselves
     # You may need to adjust these based on your specific landmarks and how they should behave during flipping
-    flip_indices=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18]
+    flip_indices=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18],
+    # Add keypoint_id2name and keypoint_name2id for robustness
+    keypoint_id2name = {
+        0: 'sella', 1: 'nasion', 2: 'A_point', 3: 'B_point',
+        4: 'upper_1_tip', 5: 'upper_1_apex', 6: 'lower_1_tip', 7: 'lower_1_apex',
+        8: 'ANS', 9: 'PNS', 10: 'Gonion', 11: 'Menton',
+        12: 'ST_Nasion', 13: 'Tip_of_the_nose', 14: 'Subnasal',
+        15: 'Upper_lip', 16: 'Lower_lip', 17: 'ST_Pogonion', 18: 'gnathion'
+    },
+    keypoint_name2id = {
+        'sella': 0, 'nasion': 1, 'A_point': 2, 'B_point': 3,
+        'upper_1_tip': 4, 'upper_1_apex': 5, 'lower_1_tip': 6, 'lower_1_apex': 7,
+        'ANS': 8, 'PNS': 9, 'Gonion': 10, 'Menton': 11,
+        'ST_Nasion': 12, 'Tip_of_the_nose': 13, 'Subnasal': 14,
+        'Upper_lip': 15, 'Lower_lip': 16, 'ST_Pogonion': 17, 'gnathion': 18
+    }
 )
 
 landmark_names_in_order = [
