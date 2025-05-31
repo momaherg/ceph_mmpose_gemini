@@ -25,9 +25,7 @@ codec = dict(
     type='UDPHeatmap',  # UDP (Unbiased Data Processing) for better coordinate accuracy
     input_size=(256, 256), # Crucial: Model expects 256x256 input
     heatmap_size=(64, 64),
-    sigma=2,
-    use_udp=True,  # Enable unbiased data processing
-    target_type='GaussianHeatmap'
+    sigma=2
 )
 
 # Model head output channels should match number of keypoints (19 for your dataset)
@@ -39,8 +37,7 @@ model = dict(
     # QUICK WIN 3: Enhanced test config for test-time augmentation
     test_cfg=dict(
         flip_test=True,  # Enable horizontal flip test-time augmentation
-        flip_mode='heatmap',  # Use heatmap-based flipping
-        shift_heatmap=True  # Enable sub-pixel shifting for better accuracy
+        flip_mode='heatmap'  # Use heatmap-based flipping
     )
 )
 
