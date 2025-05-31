@@ -106,7 +106,7 @@ val_dataloader = dict(
 test_dataloader = val_dataloader # Often, test and val dataloaders are configured similarly
 
 # Evaluators
-val_evaluator = dict(type='NME', norm_mode='keypoint_distance', keypoint_indices=[0, 1])
+val_evaluator = dict(type='NME', norm_mode='keypoint_distance', keypoint_indices=[0, 1]) # Use Sella and Nasion for normalization
 test_evaluator = val_evaluator
 
 # You might want to adjust learning rate for fine-tuning
