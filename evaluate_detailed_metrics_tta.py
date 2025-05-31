@@ -51,6 +51,10 @@ def inference_with_tta(model, img_array, bbox_data, tta_configs=None):
     
     all_predictions = []
     
+    # Import here to access flip_indices
+    import cephalometric_dataset_info
+    flip_indices = cephalometric_dataset_info.dataset_info['flip_indices']
+    
     for config in tta_configs:
         # Apply TTA transforms
         test_img = img_array.copy()
@@ -82,8 +86,7 @@ def inference_with_tta(model, img_array, bbox_data, tta_configs=None):
             if config['flip']:
                 # Flip keypoints back
                 pred_kpts[:, 0] = test_img.shape[1] - pred_kpts[:, 0]
-                # Apply flip_indices if available
-                flip_indices = getattr(model.cfg.dataset_info, 'flip_indices', list(range(19)))
+                # Apply flip_indices for landmark correspondences
                 pred_kpts = pred_kpts[flip_indices]
             
             if config['scale'] != 1.0:
