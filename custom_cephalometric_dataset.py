@@ -127,7 +127,7 @@ class CustomCephalometricDataset(BaseDataset):
             # Ensure bbox has the right shape for a single instance: (1, 4) instead of (4,)
             bbox = np.array([[0, 0, 224, 224]], dtype=np.float32)  # Note the extra brackets to make it (1, 4)
             
-            # Add bbox_scores (confidence scores for bounding boxes) with shape (1,) to match single instance
+            # Add bbox_scores (confidence scores for bounding boxes)
             bbox_scores = np.array([1.0], dtype=np.float32)  # High confidence since we use the full image
 
             data_info = {
@@ -135,7 +135,7 @@ class CustomCephalometricDataset(BaseDataset):
                 'img_path': str(row.get('patient_id', f'index_{index}')),
                 'img_id': str(row.get('patient_id', index)),
                 'bbox': bbox,
-                'bbox_scores': bbox_scores,  # Shape (1,) for single instance
+                'bbox_scores': bbox_scores,  # Add bbox scores back so validation works
                 'keypoints': keypoints.reshape(1, num_keypoints, 2),  # Reshape to (1, K, 2) for single instance
                 'keypoints_visible': keypoints_visible.reshape(1, num_keypoints),  # Reshape to (1, K) for single instance
                 'id': str(row.get('patient_id', index)),
