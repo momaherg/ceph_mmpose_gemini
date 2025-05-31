@@ -34,7 +34,28 @@ dataset_info = dict(
         18: dict(name='gnathion', id=18, color=[102, 0, 204], type='face', swap=''),
     },
     skeleton_info={}, # No skeleton defined for now, can be added later if needed for visualization
-    joint_weights=[1.] * 19, # Start with equal weights
+    # Updated joint weights based on MRE analysis - higher weights for difficult landmarks
+    joint_weights=[
+        2.0,  # 0: sella (high error ~8px, needs more weight)
+        1.0,  # 1: nasion (good ~2.6px)
+        1.0,  # 2: A_point (good ~2.8px)
+        1.0,  # 3: B_point (moderate ~3.5px)
+        1.0,  # 4: upper_1_tip (moderate ~3.7px)
+        1.0,  # 5: upper_1_apex (moderate ~3.1px)
+        1.0,  # 6: lower_1_tip (moderate ~3.4px)
+        1.0,  # 7: lower_1_apex (moderate ~3.9px)
+        1.0,  # 8: ANS (moderate ~3.2px)
+        1.5,  # 9: PNS (high error ~4.6px, needs more weight)
+        2.0,  # 10: Gonion (high error ~8.3px, needs more weight)
+        1.0,  # 11: Menton (moderate ~3.7px)
+        1.0,  # 12: ST_Nasion (good ~2.1px)
+        1.0,  # 13: Tip_of_the_nose (excellent ~1.4px)
+        1.0,  # 14: Subnasal (excellent ~1.8px)
+        1.0,  # 15: Upper_lip (excellent ~2.2px)
+        1.0,  # 16: Lower_lip (excellent ~2.1px)
+        1.0,  # 17: ST_Pogonion (good ~2.9px)
+        1.0   # 18: gnathion (moderate ~3.3px)
+    ],
     # Sigmas are crucial for OKS calculation. These are initial guesses and might need tuning.
     # Smaller sigmas mean higher precision is penalized more.
     # Values are typically related to the scale/difficulty of localizing each point.
