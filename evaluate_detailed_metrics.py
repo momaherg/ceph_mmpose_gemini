@@ -189,26 +189,8 @@ def main():
     model = init_model(config_path, checkpoint_path, device='cuda:0' if torch.cuda.is_available() else 'cpu')
     print("Model loaded successfully")
     
-    # Load test data - try multiple possible locations
-    possible_data_paths = [
-        "data/train_data_pure_old_numpy.json",  # Local data directory
-        "train_data_pure_old_numpy.json",  # Current directory
-        "/content/drive/MyDrive/Lala's Masters/train_data_pure_old_numpy.json"  # Google Colab path (fallback)
-    ]
-    
-    data_file_path = None
-    for path in possible_data_paths:
-        if os.path.exists(path):
-            data_file_path = path
-            break
-    
-    if data_file_path is None:
-        print("ERROR: Could not find data file. Please ensure one of these files exists:")
-        for path in possible_data_paths:
-            print(f"  - {path}")
-        return
-    
-    print(f"Using data file: {data_file_path}")
+    # Load test data
+    data_file_path = "/content/drive/MyDrive/Lala's Masters/train_data_pure_old_numpy.json"
     main_df = pd.read_json(data_file_path)
     test_df = main_df[main_df['set'] == 'test'].reset_index(drop=True)
     

@@ -23,21 +23,26 @@ data_root = "/content/drive/MyDrive/Lala\'s Masters/" # Conventional data root, 
 # ann_file_main = 'train_data_pure_old_numpy.json' # The single JSON file
 
 # Codec - UPGRADED: Higher resolution for better precision
-codec = dict(type='MegviiHeatmap',     # UDP implementation in MMPose
-             input_size=(384,384),
-             heatmap_size=(96,96),
-             sigma=3)
+codec = dict(
+    type='MSRAHeatmap',
+    input_size=(384, 384), # UPGRADED: Was (256, 256) - Higher resolution for finer details
+    heatmap_size=(96, 96),  # UPGRADED: Was (64, 64) - Larger heatmaps for sub-pixel precision
+    sigma=3)
 
 # Model head with Adaptive Wing Loss for robust landmark detection
 model = dict(
     head=dict(
-        type='SimCCHead',
-        in_channels=270,        # 18+36+72+144 concat
-        out_channels=19,
-        input_size=(384,384),
-        in_featuremap_size=(96,96),  # Add missing parameter - should match heatmap_size
-        simcc_split_ratio=2.0,  # 192 bins per axis
-        loss=dict(type='KLDiscretLoss', use_target_weight=True)
+        out_channels=19, # Ensure this matches your dataset's keypoint count
+        loss=[
+            dict(  # main loss
+                type='AdaptiveWingLoss',
+                alpha=2.1,  omega=24., epsilon=1., theta=0.5,
+                use_target_weight=False, loss_weight=1.0),
+            dict(  # extra OHKM term on hard joints
+                type='KeypointOHKMMSELoss',
+                ohkm_ratio=0.25,        # top-25 % joints
+                use_target_weight=True, loss_weight=0.3)   # small extra push
+        ]
     )
     # The rest of the model (backbone, neck, data_preprocessor, test_cfg)
     # can be inherited or slightly adjusted if needed.
