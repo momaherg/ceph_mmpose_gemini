@@ -35,6 +35,7 @@ model = dict(
         in_channels=270,        # 18+36+72+144 concat
         out_channels=19,
         input_size=(384,384),
+        in_featuremap_size=(96,96),  # Add missing parameter - should match heatmap_size
         simcc_split_ratio=2.0,  # 192 bins per axis
         loss=dict(type='KLDiscretLoss', use_target_weight=True)
     )
