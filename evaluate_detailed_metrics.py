@@ -15,6 +15,7 @@ from mmpose.apis import init_model, inference_topdown
 import glob
 import matplotlib.pyplot as plt
 import seaborn as sns
+import argparse
 
 # Suppress warnings
 warnings.filterwarnings('ignore')
@@ -154,6 +155,14 @@ def plot_error_distribution(all_errors, landmark_stats, save_path=None):
 def main():
     """Main evaluation function."""
     
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description='Evaluate cephalometric landmark detection model')
+    parser.add_argument('--checkpoint', type=str, help='Path to specific checkpoint to evaluate')
+    parser.add_argument('--work-dir', type=str, help='Work directory (used for finding checkpoint if not specified)')
+    parser.add_argument('--config', type=str, default="Pretrained_model/hrnetv2_w18_cephalometric_256x256_finetune.py",
+                        help='Path to config file')
+    args = parser.parse_args()
+    
     print("="*80)
     print("DETAILED CEPHALOMETRIC MODEL EVALUATION")
     print("="*80)
@@ -167,23 +176,39 @@ def main():
     import cephalometric_dataset_info
     
     # Configuration
-    config_path = "Pretrained_model/hrnetv2_w18_cephalometric_256x256_finetune.py"
-    work_dir = "work_dirs/hrnetv2_w18_cephalometric_384x384_adaptive_wing_loss_v4"  # New work dir for this experiment
+    config_path = args.config
     
-    # Find the best checkpoint
-    checkpoint_pattern = os.path.join(work_dir, "best_NME_epoch_*.pth")
-    checkpoints = glob.glob(checkpoint_pattern)
-    
-    if not checkpoints:
-        checkpoint_pattern = os.path.join(work_dir, "epoch_*.pth")
+    # Determine checkpoint path
+    if args.checkpoint:
+        checkpoint_path = args.checkpoint
+        print(f"Using specified checkpoint: {checkpoint_path}")
+        # Extract work_dir from checkpoint path if not provided
+        if not args.work_dir:
+            work_dir = os.path.dirname(checkpoint_path)
+        else:
+            work_dir = args.work_dir
+    else:
+        # Use work_dir to find best checkpoint
+        if not args.work_dir:
+            work_dir = "work_dirs/hrnetv2_w18_cephalometric_384x384_adaptive_wing_loss_v4"
+            print(f"No work_dir specified, using default: {work_dir}")
+        else:
+            work_dir = args.work_dir
+            
+        # Find the best checkpoint
+        checkpoint_pattern = os.path.join(work_dir, "best_NME_epoch_*.pth")
         checkpoints = glob.glob(checkpoint_pattern)
-    
-    if not checkpoints:
-        print("ERROR: No checkpoints found")
-        return
-    
-    checkpoint_path = max(checkpoints, key=os.path.getctime)
-    print(f"Using checkpoint: {checkpoint_path}")
+        
+        if not checkpoints:
+            checkpoint_pattern = os.path.join(work_dir, "epoch_*.pth")
+            checkpoints = glob.glob(checkpoint_pattern)
+        
+        if not checkpoints:
+            print("ERROR: No checkpoints found")
+            return
+        
+        checkpoint_path = max(checkpoints, key=os.path.getctime)
+        print(f"Using latest checkpoint: {checkpoint_path}")
     
     # Initialize model
     model = init_model(config_path, checkpoint_path, device='cuda:0' if torch.cuda.is_available() else 'cpu')
