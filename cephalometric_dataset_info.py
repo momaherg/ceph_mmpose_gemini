@@ -36,7 +36,7 @@ dataset_info = dict(
     skeleton_info={}, # No skeleton defined for now, can be added later if needed for visualization
     # Updated joint weights based on MRE analysis - higher weights for difficult landmarks
     joint_weights=[
-        3.0,  # 0: sella (high error ~8px→5.4px, increasing to 3.0x for further improvement)
+        2.0,  # 0: sella (high error ~8px, needs more weight)
         1.0,  # 1: nasion (good ~2.6px)
         1.0,  # 2: A_point (good ~2.8px)
         1.0,  # 3: B_point (moderate ~3.5px)
@@ -45,8 +45,8 @@ dataset_info = dict(
         1.0,  # 6: lower_1_tip (moderate ~3.4px)
         1.0,  # 7: lower_1_apex (moderate ~3.9px)
         1.0,  # 8: ANS (moderate ~3.2px)
-        1.5,  # 9: PNS (high error ~4.6px→3.6px, keeping at 1.5x)
-        3.0,  # 10: Gonion (high error ~8.3px→4.9px, increasing to 3.0x for further improvement)
+        1.5,  # 9: PNS (high error ~4.6px, needs more weight)
+        2.0,  # 10: Gonion (high error ~8.3px, needs more weight)
         1.0,  # 11: Menton (moderate ~3.7px)
         1.0,  # 12: ST_Nasion (good ~2.1px)
         1.0,  # 13: Tip_of_the_nose (excellent ~1.4px)

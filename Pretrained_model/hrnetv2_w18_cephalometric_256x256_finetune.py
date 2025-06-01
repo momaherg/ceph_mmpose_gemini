@@ -21,25 +21,29 @@ dataset_type = 'CustomCephalometricDataset' # Your custom dataset
 data_root = "/content/drive/MyDrive/Lala\'s Masters/" # Conventional data root, actual data comes from data_df injected by training script
 # ann_file_main = 'train_data_pure_old_numpy.json' # The single JSON file
 
-# Codec (should match pretraining, especially input_size for TopdownAffine)
+# Codec - UPGRADED: Higher resolution for better precision
 codec = dict(
     type='MSRAHeatmap',
-    input_size=(256, 256), # Crucial: Model expects 256x256 input
-    heatmap_size=(64, 64),
+    input_size=(384, 384), # UPGRADED: Was (256, 256) - Higher resolution for finer details
+    heatmap_size=(96, 96),  # UPGRADED: Was (64, 64) - Larger heatmaps for sub-pixel precision
     sigma=2)
 
-# Model head output channels should match number of keypoints (19 for your dataset)
+# Model head with Online Hard Keypoint Mining loss
 model = dict(
     head=dict(
         out_channels=19, # Ensure this matches your dataset's keypoint count
-        loss=dict(type='KeypointMSELoss', use_target_weight=True)
+        loss=dict(
+            type='OHKMMSELoss', # UPGRADED: Was KeypointMSELoss - Focus on hardest keypoints
+            use_target_weight=True, # Works with joint_weights for Sella/Gonion emphasis
+            ohkm_ratio=0.25 # Train on top 25% hardest keypoints in each batch
+        )
     )
     # The rest of the model (backbone, neck, data_preprocessor, test_cfg)
     # can be inherited or slightly adjusted if needed.
     # data_preprocessor mean/std are from ImageNet, generally fine for transfer.
 )
 
-# Enhanced pipelines with stronger augmentation
+# Enhanced pipelines with stronger augmentation and higher resolution
 train_pipeline = [
     dict(type='LoadImageNumpy'), # Load from numpy array
     dict(type='GetBBoxCenterScale'),
@@ -49,19 +53,19 @@ train_pipeline = [
         shift_prob=0,
         rotate_factor=30, # Increased rotation for better generalization
         scale_factor=(0.7, 1.3)), # Wider scale range
-    dict(type='TopdownAffine', input_size=codec['input_size']), # Use 256x256
+    dict(type='TopdownAffine', input_size=codec['input_size']), # Now uses 384x384
     dict(type='GenerateTarget', encoder=codec),
     dict(type='CustomPackPoseInputs', meta_keys=('id', 'img_id', 'img_path', 'ori_shape', 'img_shape', 'bbox', 'bbox_scores', 'flip_indices', 'center', 'scale', 'input_center', 'input_scale', 'input_size', 'patient_text_id', 'set', 'class'))
 ]
 val_pipeline = [
     dict(type='LoadImageNumpy'),
     dict(type='GetBBoxCenterScale'),
-    dict(type='TopdownAffine', input_size=codec['input_size']), # Use 256x256
+    dict(type='TopdownAffine', input_size=codec['input_size']), # Now uses 384x384
     dict(type='CustomPackPoseInputs', meta_keys=('id', 'img_id', 'img_path', 'ori_shape', 'img_shape', 'bbox', 'bbox_scores', 'flip_indices', 'center', 'scale', 'input_center', 'input_scale', 'input_size', 'patient_text_id', 'set', 'class'))
 ]
 test_pipeline = val_pipeline # Test pipeline often same as validation
 
-# DataLoaders
+# DataLoaders - REDUCED batch size for higher resolution
 # The CustomCephalometricDataset needs to be able to split the data from the single JSON
 # or the training script needs to prepare and pass pandas DataFrames (train_df, val_df, test_df)
 # to each dataloader's dataset config using the `data_df` argument.
@@ -74,7 +78,7 @@ test_pipeline = val_pipeline # Test pipeline often same as validation
 # (ann_file and data_root might become '' or None if data_df is primary)
 
 train_dataloader = dict(
-    batch_size=32, # Adjust as per your GPU memory, original was 64
+    batch_size=20, # REDUCED: Was 32 - Lower for 384x384 resolution to manage GPU memory
     num_workers=2,
     persistent_workers=True,
     sampler=dict(type='DefaultSampler', shuffle=True),
@@ -96,7 +100,7 @@ train_dataloader = dict(
     ))
 
 val_dataloader = dict(
-    batch_size=32, # Adjust as per your GPU memory
+    batch_size=20, # REDUCED: Was 32 - Lower for 384x384 resolution to manage GPU memory
     num_workers=2,
     persistent_workers=True,
     drop_last=False,

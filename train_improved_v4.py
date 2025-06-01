@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 """
-Quick Wins Training Script for Cephalometric Landmark Detection
-Implements three quick improvements:
-1. Increased joint weights (3.0x for Sella/Gonion)
-2. UDP heatmap refinement for better coordinate accuracy
-3. Test-time augmentation ensemble
+Improved Training Script for Cephalometric Landmark Detection - V4
+MAJOR UPGRADES: 384x384 resolution + Online Hard Keypoint Mining Loss
 """
 
 import os
@@ -49,30 +46,30 @@ def plot_training_progress(work_dir):
                 fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
                 
                 ax1.plot(train_loss)
-                ax1.set_title('Training Loss (Quick Wins)')
+                ax1.set_title('Training Loss')
                 ax1.set_xlabel('Iteration')
                 ax1.set_ylabel('Loss')
                 ax1.grid(True)
                 
                 ax2.plot(val_nme)
-                ax2.set_title('Validation NME (Quick Wins)')
+                ax2.set_title('Validation NME')
                 ax2.set_xlabel('Epoch')
                 ax2.set_ylabel('NME')
                 ax2.grid(True)
                 
                 plt.tight_layout()
-                plt.savefig(os.path.join(work_dir, 'training_progress_quickwins.png'), dpi=150)
+                plt.savefig(os.path.join(work_dir, 'training_progress.png'), dpi=150)
                 plt.close()
-                print(f"Training progress plot saved to {work_dir}/training_progress_quickwins.png")
+                print(f"Training progress plot saved to {work_dir}/training_progress.png")
     except Exception as e:
         print(f"Could not plot training progress: {e}")
 
 def main():
-    """Main quick wins training function."""
+    """Main improved training function with resolution and loss upgrades."""
     
     print("="*80)
-    print("QUICK WINS CEPHALOMETRIC TRAINING")
-    print("Implementing: UDP + TTA + Enhanced Joint Weights")
+    print("IMPROVED CEPHALOMETRIC TRAINING - V4")
+    print("🚀 MAJOR UPGRADES: 384×384 Resolution + Hard Keypoint Mining")
     print("="*80)
     
     # Initialize MMPose scope
@@ -89,8 +86,8 @@ def main():
         return
     
     # Configuration
-    config_path = "Pretrained_model/hrnetv2_w18_cephalometric_256x256_quickwins.py"
-    work_dir = "work_dirs/hrnetv2_w18_cephalometric_quickwins"
+    config_path = "Pretrained_model/hrnetv2_w18_cephalometric_256x256_finetune.py"
+    work_dir = "work_dirs/hrnetv2_w18_cephalometric_384x384_ohkm_v4"  # New work dir for this experiment
     
     print(f"Config: {config_path}")
     print(f"Work Dir: {work_dir}")
@@ -98,7 +95,7 @@ def main():
     # Load config
     try:
         cfg = Config.fromfile(config_path)
-        print("✓ Quick wins configuration loaded successfully")
+        print("✓ Configuration loaded successfully")
     except Exception as e:
         print(f"✗ Failed to load config: {e}")
         return
@@ -161,66 +158,92 @@ def main():
         traceback.print_exc()
         return
     
-    # Print quick wins details
+    # Print major upgrade information
+    print("\n" + "="*70)
+    print("🚀 MAJOR UPGRADES IN THIS VERSION")
+    print("="*70)
+    print(f"📐 Resolution Upgrade:")
+    print(f"   • Input size: 256×256 → 384×384 (+50% resolution)")
+    print(f"   • Heatmap size: 64×64 → 96×96 (+50% heatmap precision)")
+    print(f"   • Expected: 10-20% MRE reduction from sub-pixel precision")
+    
+    print(f"\n🎯 Loss Function Upgrade:")
+    print(f"   • Loss: KeypointMSELoss → OHKMMSELoss")
+    print(f"   • Focus: Top 25% hardest keypoints per batch")
+    print(f"   • Expected: Better handling of Sella/Gonion difficult cases")
+    
+    print(f"\n📊 Memory Management:")
+    print(f"   • Batch size: 32 → 20 (reduced for 384×384)")
+    print(f"   • Training will be slightly slower but more precise")
+    
+    # Print enhanced training parameters
     print("\n" + "="*60)
-    print("QUICK WINS IMPLEMENTATION DETAILS")
+    print("ENHANCED TRAINING PARAMETERS")
     print("="*60)
+    print(f"Optimizer: {cfg.optim_wrapper.optimizer.type}")
+    print(f"Learning Rate: {cfg.optim_wrapper.optimizer.lr}")
+    print(f"Batch Size: {cfg.train_dataloader.batch_size}")
+    print(f"Max Epochs: {cfg.train_cfg.max_epochs}")
+    print(f"Val Interval: {cfg.train_cfg.val_interval}")
     
-    print("QUICK WIN 1: Enhanced Joint Weights")
+    # Print scheduler info
+    print(f"Learning Rate Schedule:")
+    for i, scheduler in enumerate(cfg.param_scheduler):
+        print(f"  {i+1}. {scheduler['type']}")
+        if scheduler['type'] == 'LinearLR':
+            print(f"     Warm-up: {scheduler['end']} iterations")
+        elif scheduler['type'] == 'CosineAnnealingLR':
+            print(f"     T_max: {scheduler['T_max']}, eta_min: {scheduler['eta_min']}")
+    
+    # Print joint weights for problematic landmarks
     joint_weights = cephalometric_dataset_info.dataset_info['joint_weights']
+    print(f"\nLandmark Weights (targeting difficult landmarks):")
     landmark_names = cephalometric_dataset_info.landmark_names_in_order
-    print(f"  - Sella weight: {joint_weights[0]}x (previous: 2.0x)")
-    print(f"  - Gonion weight: {joint_weights[10]}x (previous: 2.0x)")
-    print(f"  - PNS weight: {joint_weights[9]}x (unchanged)")
+    for i, (name, weight) in enumerate(zip(landmark_names, joint_weights)):
+        if weight > 1.0:
+            print(f"  {i:2d}. {name:<20} : {weight}x (enhanced)")
     
-    print("\nQUICK WIN 2: UDP Heatmap Refinement")
-    print(f"  - Codec: {cfg.codec.type}")
-    print(f"  - UDP enabled: {cfg.codec.get('use_udp', False)}")
-    print(f"  - Expected improvement: Better sub-pixel coordinate accuracy")
-    
-    print("\nQUICK WIN 3: Test-Time Augmentation")
-    print(f"  - Flip test: {cfg.model.test_cfg.get('flip_test', False)}")
-    print(f"  - Shift heatmap: {cfg.model.test_cfg.get('shift_heatmap', False)}")
-    print(f"  - Expected improvement: Ensemble averaging for better predictions")
-    
-    print(f"\nTraining Parameters:")
-    print(f"  - Optimizer: {cfg.optim_wrapper.optimizer.type}")
-    print(f"  - Learning Rate: {cfg.optim_wrapper.optimizer.lr}")
-    print(f"  - Max Epochs: {cfg.train_cfg.max_epochs}")
-    print(f"  - Batch Size: {cfg.train_dataloader.batch_size}")
+    print(f"\nAugmentation:")
+    print(f"  • Rotation: ±30°")
+    print(f"  • Scale range: 0.7-1.3")
+    print(f"  • Horizontal flipping")
     
     # Build runner and start training
     try:
-        print("\n" + "="*60)
-        print("STARTING QUICK WINS TRAINING")
-        print("="*60)
+        print("\n" + "="*70)
+        print("🚀 STARTING UPGRADED TRAINING")
+        print("="*70)
         
         runner = Runner.from_cfg(cfg)
         
-        print("Expected improvements with quick wins:")
-        print("  - Sella error: 5.4px → target <4.5px (3.0x weight)")
-        print("  - Gonion error: 4.9px → target <4.0px (3.0x weight)")
-        print("  - Overall MRE: 2.7px → target <2.3px (UDP + TTA)")
-        print("  - Better coordinate precision with UDP codec")
-        print("  - Ensemble averaging with test-time augmentation")
+        # Enhanced monitoring message
+        print("🎯 Training with major upgrades in progress...")
+        print("📊 Monitor metrics for improvements:")
+        print("🔹 Target Overall MRE: 2.7px → <2.5px")
+        print("🔹 Target Sella error: 5.4px → <4.5px")
+        print("🔹 Target Gonion error: 4.9px → <4.0px")
+        print("🔹 Training: 60 epochs with validation every 2 epochs")
+        print("🔹 The model will adapt your existing fine-tuned weights to higher resolution")
+        
+        print("\n⏱️  Starting training... (will take longer due to 384×384 resolution)")
         
         runner.train()
         
-        print("\n✓ Quick wins training completed successfully!")
+        print("\n🎉 Enhanced training completed successfully!")
         
         # Plot training progress
         plot_training_progress(cfg.work_dir)
         
     except Exception as e:
-        print(f"\n✗ Training failed: {e}")
+        print(f"\n💥 Training failed: {e}")
         import traceback
         traceback.print_exc()
         return
     
     # Final model validation
-    print("\n" + "="*60)
-    print("QUICK WINS MODEL VALIDATION")
-    print("="*60)
+    print("\n" + "="*70)
+    print("🏆 FINAL UPGRADED MODEL VALIDATION")
+    print("="*70)
     
     try:
         import glob
@@ -229,20 +252,22 @@ def main():
         
         if checkpoints:
             latest_checkpoint = max(checkpoints, key=os.path.getctime)
-            print(f"Best checkpoint: {latest_checkpoint}")
+            print(f"🏅 Best checkpoint: {latest_checkpoint}")
             
-            print("\n✓ Quick wins training completed! Next steps:")
-            print(f"1. Run evaluation with test-time augmentation:")
-            print(f"   python evaluate_detailed_metrics_tta.py")
-            print(f"2. Compare with previous results:")
-            print(f"   - Previous Overall MRE: 2.706 ± 1.949 pixels")
-            print(f"   - Previous Sella error: 5.420 pixels") 
-            print(f"   - Previous Gonion error: 4.851 pixels")
-            print(f"   - Target Overall MRE: <2.3 pixels")
-            print(f"3. Expected improvements:")
-            print(f"   - ~15-20% further MRE reduction")
-            print(f"   - Better landmark localization precision")
-            print(f"   - More robust predictions via ensemble")
+            # Evaluation suggestions
+            print("\n🎯 Training completed! Next steps:")
+            print(f"1. 📊 Run detailed evaluation (update work_dir in script):")
+            print(f"   python evaluate_detailed_metrics.py")
+            print(f"2. 📈 Compare with V3 results:")
+            print(f"   - V3 Overall MRE: 2.706 ± 1.949 pixels")
+            print(f"   - V3 Sella error: 5.420 pixels")
+            print(f"   - V3 Gonion error: 4.851 pixels")
+            print(f"3. 🎨 Visualize improvements:")
+            print(f"   python visualize_predictions.py")
+            print(f"4. 🔍 Expected improvements:")
+            print(f"   - Resolution boost: 10-20% error reduction")
+            print(f"   - OHKM loss: Better handling of difficult landmarks")
+            print(f"   - Combined: Target <2.5px overall MRE")
             
         else:
             print("⚠️  No best checkpoint found")
