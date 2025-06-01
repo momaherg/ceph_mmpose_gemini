@@ -169,7 +169,7 @@ def main():
     
     print(f"\n🎯 Loss Function Upgrade:")
     print(f"   • Loss: KeypointMSELoss → KeypointOHKMMSELoss")
-    print(f"   • Focus: Top 25% hardest keypoints per batch")
+    print(f"   • Focus: Top 5 hardest keypoints per batch (25% of batch_size)")
     print(f"   • Expected: Better handling of Sella/Gonion difficult cases")
     
     print(f"\n📊 Memory Management:")

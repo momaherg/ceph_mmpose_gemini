@@ -35,7 +35,7 @@ model = dict(
         loss=dict(
             type='KeypointOHKMMSELoss', # FIXED: Correct name in MMPose registry
             use_target_weight=True, # Works with joint_weights for Sella/Gonion emphasis
-            ohkm_ratio=0.25 # Train on top 25% hardest keypoints in each batch
+            topk=5 # Train on top 5 hardest keypoints per batch (25% of batch_size=20)
         )
     )
     # The rest of the model (backbone, neck, data_preprocessor, test_cfg)
