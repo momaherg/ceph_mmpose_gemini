@@ -7,7 +7,7 @@ train_cfg = dict(by_epoch=True, max_epochs=60, val_interval=2) # Longer training
 # Improved optimizer settings with cosine annealing
 optim_wrapper = dict(
     optimizer=dict(type='Adam', lr=3e-4), # Higher starting LR for cosine schedule
-    # clip_grad=None
+    clip_grad=dict(max_norm=10, norm_type=2) # ADDED: Gradient clipping to prevent explosion
 )
 
 # Learning rate scheduler with warm-up and cosine annealing  
