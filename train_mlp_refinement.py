@@ -397,7 +397,8 @@ def main():
         'batch_size': 16,  
         'num_epochs': 50,
         'learning_rate': 1e-3,
-        'device': 'cuda:0' if torch.cuda.is_available() else 'cpu'
+        'device': 'cuda:0' if torch.cuda.is_available() else 'cpu',
+        'force_cpu_hrnet': True  # Force CPU for HRNetV2 inference to avoid CUDA issues
     }
     
     print(f"📁 Data file: {config['data_file']}")
@@ -445,7 +446,8 @@ def main():
         input_size=config['input_size'],
         batch_size=config['batch_size'],
         cache_predictions=True,
-        num_workers=0  # Reduced for stability
+        num_workers=0,  # Reduced for stability
+        force_cpu=config['force_cpu_hrnet']  # Force CPU inference to avoid CUDA errors
     )
     
     # Analyze HRNetV2 baseline

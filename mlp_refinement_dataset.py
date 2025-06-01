@@ -57,40 +57,80 @@ class HRNetPredictionExtractor:
         Returns:
             Predicted landmarks (19, 2) as numpy array
         """
-        # Resize image to manageable size for HRNetV2 inference
-        # HRNetV2 was trained on 384x384, so resize to that
-        from PIL import Image as PILImage
-        
-        original_h, original_w = image.shape[:2]
-        target_size = 384
-        
-        # Resize image using PIL for better quality
-        pil_image = PILImage.fromarray(image)
-        resized_image = pil_image.resize((target_size, target_size))
-        resized_image_np = np.array(resized_image)
-        
-        # Prepare data for inference
-        data_sample = {
-            'bbox': np.array([[0, 0, target_size, target_size]], dtype=np.float32),
-            'bbox_scores': np.array([1.0], dtype=np.float32)
-        }
-        
-        # Run inference on resized image
-        results = inference_topdown(self.model, resized_image_np, bboxes=data_sample['bbox'], bbox_format='xyxy')
-        
-        if results and len(results) > 0:
-            predictions = results[0].pred_instances.keypoints[0]  # Shape: (19, 2)
-            predictions_np = predictions.cpu().numpy()
+        try:
+            # Resize image to manageable size for HRNetV2 inference
+            # HRNetV2 was trained on 384x384, so resize to that
+            from PIL import Image as PILImage
             
-            # Scale predictions back to original image size
-            scale_x = original_w / target_size
-            scale_y = original_h / target_size
-            predictions_np[:, 0] *= scale_x
-            predictions_np[:, 1] *= scale_y
+            original_h, original_w = image.shape[:2]
+            target_size = 384
             
-            return predictions_np
-        else:
-            # Return zero predictions if inference fails
+            # Resize image using PIL for better quality
+            pil_image = PILImage.fromarray(image)
+            resized_image = pil_image.resize((target_size, target_size))
+            resized_image_np = np.array(resized_image)
+            
+            # Prepare data for inference
+            data_sample = {
+                'bbox': np.array([[0, 0, target_size, target_size]], dtype=np.float32),
+                'bbox_scores': np.array([1.0], dtype=np.float32)
+            }
+            
+            # Try GPU inference first
+            try:
+                # Run inference on resized image
+                results = inference_topdown(self.model, resized_image_np, bboxes=data_sample['bbox'], bbox_format='xyxy')
+                
+                if results and len(results) > 0:
+                    predictions = results[0].pred_instances.keypoints[0]  # Shape: (19, 2)
+                    predictions_np = predictions.cpu().numpy()
+                    
+                    # Scale predictions back to original image size
+                    scale_x = original_w / target_size
+                    scale_y = original_h / target_size
+                    predictions_np[:, 0] *= scale_x
+                    predictions_np[:, 1] *= scale_y
+                    
+                    return predictions_np
+                else:
+                    raise RuntimeError("No predictions returned from model")
+                    
+            except Exception as gpu_error:
+                print(f"GPU inference failed: {gpu_error}")
+                print("Trying CPU inference...")
+                
+                # Switch to CPU mode for this model if GPU fails
+                if self.device != 'cpu':
+                    # Move model to CPU
+                    self.model = self.model.cpu()
+                    self.device = 'cpu'
+                    
+                    # Clear GPU cache
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                    
+                    # Retry inference on CPU
+                    results = inference_topdown(self.model, resized_image_np, bboxes=data_sample['bbox'], bbox_format='xyxy')
+                    
+                    if results and len(results) > 0:
+                        predictions = results[0].pred_instances.keypoints[0]  # Shape: (19, 2)
+                        predictions_np = predictions.cpu().numpy()
+                        
+                        # Scale predictions back to original image size
+                        scale_x = original_w / target_size
+                        scale_y = original_h / target_size
+                        predictions_np[:, 0] *= scale_x
+                        predictions_np[:, 1] *= scale_y
+                        
+                        return predictions_np
+                    else:
+                        raise RuntimeError("No predictions returned from CPU model")
+                else:
+                    raise gpu_error
+                    
+        except Exception as e:
+            print(f"Complete inference failure: {e}")
+            # Return zero predictions if all inference attempts fail
             return np.zeros((19, 2), dtype=np.float32)
 
 
@@ -110,7 +150,8 @@ class MLPRefinementDataset(Dataset):
                  hrnet_checkpoint_path: str,
                  input_size: int = 384,
                  cache_predictions: bool = True,
-                 device: str = 'cuda:0'):
+                 device: str = 'cuda:0',
+                 force_cpu: bool = False):
         """
         Args:
             data_df: DataFrame with image data and landmarks
@@ -119,10 +160,16 @@ class MLPRefinementDataset(Dataset):
             input_size: Input image size for MLP network
             cache_predictions: Whether to cache HRNetV2 predictions
             device: Device for HRNetV2 inference
+            force_cpu: Force CPU inference to avoid CUDA issues
         """
         self.data_df = data_df.reset_index(drop=True)
         self.input_size = input_size
         self.cache_predictions = cache_predictions
+        
+        # Override device if force_cpu is True
+        if force_cpu:
+            device = 'cpu'
+            print("Forcing CPU inference to avoid CUDA issues")
         
         # HRNetV2 prediction extractor
         self.hrnet_extractor = HRNetPredictionExtractor(
@@ -268,7 +315,8 @@ def create_dataloaders(train_df: pd.DataFrame,
                       input_size: int = 384,
                       batch_size: int = 16,
                       num_workers: int = 0,
-                      cache_predictions: bool = True) -> Tuple[DataLoader, DataLoader]:
+                      cache_predictions: bool = True,
+                      force_cpu: bool = False) -> Tuple[DataLoader, DataLoader]:
     """
     Create train and validation dataloaders for MLP refinement training.
     
@@ -281,6 +329,7 @@ def create_dataloaders(train_df: pd.DataFrame,
         batch_size: Batch size
         num_workers: Number of data loading workers
         cache_predictions: Whether to cache HRNetV2 predictions
+        force_cpu: Force CPU inference to avoid CUDA issues
         
     Returns:
         Tuple of (train_dataloader, val_dataloader)
@@ -288,12 +337,12 @@ def create_dataloaders(train_df: pd.DataFrame,
     # Create datasets
     train_dataset = MLPRefinementDataset(
         train_df, hrnet_config_path, hrnet_checkpoint_path,
-        input_size=input_size, cache_predictions=cache_predictions
+        input_size=input_size, cache_predictions=cache_predictions, force_cpu=force_cpu
     )
     
     val_dataset = MLPRefinementDataset(
         val_df, hrnet_config_path, hrnet_checkpoint_path,
-        input_size=input_size, cache_predictions=cache_predictions
+        input_size=input_size, cache_predictions=cache_predictions, force_cpu=force_cpu
     )
     
     # Create dataloaders
