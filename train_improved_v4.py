@@ -87,7 +87,7 @@ def main():
     
     # Configuration
     config_path = "Pretrained_model/hrnetv2_w18_cephalometric_256x256_finetune.py"
-    work_dir = "work_dirs/hrnetv2_w18_cephalometric_384x384_ohkm_v4"  # New work dir for this experiment
+    work_dir = "work_dirs/hrnetv2_w18_cephalometric_384x384_adaptive_wing_loss_v4"  # New work dir for this experiment
     
     print(f"Config: {config_path}")
     print(f"Work Dir: {work_dir}")
@@ -168,9 +168,9 @@ def main():
     print(f"   • Expected: 10-20% MRE reduction from sub-pixel precision")
     
     print(f"\n🎯 Loss Function Upgrade:")
-    print(f"   • Loss: KeypointMSELoss → KeypointOHKMMSELoss")
-    print(f"   • Focus: Top 5 hardest keypoints per batch (25% of batch_size)")
-    print(f"   • Expected: Better handling of Sella/Gonion difficult cases")
+    print(f"   • Loss: KeypointMSELoss → AdaptiveWingLoss")
+    print(f"   • Focus: Robust heatmap regression with adaptive behavior")
+    print(f"   • Expected: Better handling of difficult landmarks (Sella/Gonion) and outliers")
     
     print(f"\n📊 Memory Management:")
     print(f"   • Batch size: 32 → 20 (reduced for 384×384)")

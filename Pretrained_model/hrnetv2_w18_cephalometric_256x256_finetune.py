@@ -28,14 +28,18 @@ codec = dict(
     heatmap_size=(96, 96),  # UPGRADED: Was (64, 64) - Larger heatmaps for sub-pixel precision
     sigma=2)
 
-# Model head with Online Hard Keypoint Mining loss
+# Model head with Adaptive Wing Loss for robust landmark detection
 model = dict(
     head=dict(
         out_channels=19, # Ensure this matches your dataset's keypoint count
         loss=dict(
-            type='KeypointOHKMMSELoss', # FIXED: Correct name in MMPose registry
+            type='AdaptiveWingLoss', # UPGRADED: Robust loss for face/cephalometric alignment
+            alpha=2.1,              # Controls loss shape in different regions
+            omega=14.0,             # Boundary between linear and wing regions  
+            epsilon=1.0,            # Small value to avoid singularity
+            theta=0.5,              # Threshold for adaptive behavior
             use_target_weight=True, # Works with joint_weights for Sella/Gonion emphasis
-            topk=5 # Train on top 5 hardest keypoints per batch (25% of batch_size=20)
+            loss_weight=1.0         # Overall loss scaling factor
         )
     )
     # The rest of the model (backbone, neck, data_preprocessor, test_cfg)
