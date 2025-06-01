@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-Training Script for Cephalometric Landmark Detection - V5
-EXPERIMENT: Original 256×256 resolution + OHKM Loss (to test if gains are from resolution)
+Training Script for Experiment A: AdaptiveWingOHKMHybridLoss
+This experiment combines AdaptiveWingLoss with Online Hard Keypoint Mining
+to improve accuracy on difficult landmarks while maintaining overall performance.
 """
 
 import os
@@ -65,11 +66,13 @@ def plot_training_progress(work_dir):
         print(f"Could not plot training progress: {e}")
 
 def main():
-    """Main training function with original resolution and OHKM loss."""
+    """Main training function for Experiment A."""
     
     print("="*80)
-    print("CEPHALOMETRIC TRAINING - V5 (RESOLUTION EXPERIMENT)")
-    print("🔬 TESTING: Original 256×256 Resolution + OHKM Loss")
+    print("🧪 EXPERIMENT A: AdaptiveWingLoss + OHKM Hybrid")
+    print("="*80)
+    print("📊 Goal: Combine robustness of AdaptiveWing with hard example mining")
+    print("🎯 Target: Reduce MRE below 2.3 pixels, especially for Sella/Gonion")
     print("="*80)
     
     # Initialize MMPose scope
@@ -80,14 +83,15 @@ def main():
         import custom_cephalometric_dataset
         import custom_transforms
         import cephalometric_dataset_info
+        import custom_losses  # Import our custom losses
         print("✓ Custom modules imported successfully")
     except ImportError as e:
         print(f"✗ Failed to import custom modules: {e}")
         return
     
     # Configuration
-    config_path = "Pretrained_model/hrnetv2_w18_cephalometric_256x256_finetune.py"
-    work_dir = "work_dirs/hrnetv2_w18_cephalometric_256x256_ohkm_v5"  # New work dir for this experiment
+    config_path = "configs/experiment_a_adaptive_wing_ohkm_hybrid.py"
+    work_dir = "work_dirs/experiment_a_adaptive_wing_ohkm_hybrid"
     
     print(f"Config: {config_path}")
     print(f"Work Dir: {work_dir}")
@@ -103,6 +107,17 @@ def main():
     # Set work directory
     cfg.work_dir = os.path.abspath(work_dir)
     os.makedirs(cfg.work_dir, exist_ok=True)
+    
+    # Update load_from path if we have a checkpoint from V4
+    import glob
+    v4_checkpoints = glob.glob("work_dirs/hrnetv2_w18_cephalometric_384x384_adaptive_wing_loss_v4/best_NME_epoch_*.pth")
+    if v4_checkpoints:
+        latest_v4 = max(v4_checkpoints, key=os.path.getctime)
+        cfg.load_from = latest_v4
+        print(f"📥 Loading from V4 checkpoint: {latest_v4}")
+    else:
+        print("⚠️  No V4 checkpoint found, starting from scratch")
+        cfg.load_from = None
     
     # Load and prepare data
     data_file_path = "/content/drive/MyDrive/Lala's Masters/train_data_pure_old_numpy.json"
@@ -158,30 +173,29 @@ def main():
         traceback.print_exc()
         return
     
-    # Print experiment information
+    # Print experiment details
     print("\n" + "="*70)
-    print("🔬 EXPERIMENT: ISOLATING RESOLUTION EFFECT")
+    print("🔬 EXPERIMENT A: TECHNICAL DETAILS")
     print("="*70)
-    print(f"📐 Resolution Configuration:")
-    print(f"   • Input size: 256×256 (ORIGINAL)")
-    print(f"   • Heatmap size: 64×64 (ORIGINAL)")
-    print(f"   • Hypothesis: Testing if gains are from resolution vs. other improvements")
+    print(f"📐 Resolution: 384×384 (maintained from V4)")
+    print(f"🎯 Loss Function: AdaptiveWingOHKMHybridLoss")
+    print(f"   • Base: AdaptiveWingLoss (robust to outliers)")
+    print(f"   • Enhancement: Online Hard Keypoint Mining")
+    print(f"   • Top-k: 8 hardest keypoints per sample")
+    print(f"   • Hard weight: 2.0x for difficult landmarks")
+    print(f"   • Expected benefit: Better focus on Sella/Gonion")
     
-    print(f"\n🎯 Loss Function:")
-    print(f"   • Loss: KeypointOHKMMSELoss")
-    print(f"   • Focus: Top 5 hardest keypoints per batch")
-    print(f"   • Joint weights: Applied to Sella/Gonion (2.0x), PNS (1.5x)")
+    print(f"\n📊 Hypothesis:")
+    print(f"   • OHKM will identify and upweight difficult landmarks")
+    print(f"   • AdaptiveWing provides stable gradients")
+    print(f"   • Combined: Targeted improvement without regression")
     
-    print(f"\n📊 Batch Configuration:")
-    print(f"   • Batch size: 32 (original size allows larger batch)")
-    print(f"   • Expected: Faster training with more stable gradients")
+    print(f"\n🎯 Success Metrics:")
+    print(f"   • Overall MRE: <2.3 pixels (from 2.348)")
+    print(f"   • Sella error: <4.2 pixels (from 4.674)")
+    print(f"   • Gonion error: <3.8 pixels (from 4.281)")
     
-    print(f"\n🔄 Comparison with Previous Experiments:")
-    print(f"   • V3 (256×256, MSE Loss): 2.706 ± 1.949 px MRE")
-    print(f"   • V4 (384×384, OHKM Loss): Expected <2.5 px MRE")
-    print(f"   • V5 (256×256, OHKM Loss): Will show if OHKM alone improves results")
-    
-    # Print enhanced training parameters
+    # Print training parameters
     print("\n" + "="*60)
     print("TRAINING PARAMETERS")
     print("="*60)
@@ -191,49 +205,25 @@ def main():
     print(f"Max Epochs: {cfg.train_cfg.max_epochs}")
     print(f"Val Interval: {cfg.train_cfg.val_interval}")
     
-    # Print scheduler info
-    print(f"Learning Rate Schedule:")
-    for i, scheduler in enumerate(cfg.param_scheduler):
-        print(f"  {i+1}. {scheduler['type']}")
-        if scheduler['type'] == 'LinearLR':
-            print(f"     Warm-up: {scheduler['end']} iterations")
-        elif scheduler['type'] == 'CosineAnnealingLR':
-            print(f"     T_max: {scheduler['T_max']}, eta_min: {scheduler['eta_min']}")
-    
-    # Print joint weights for problematic landmarks
-    joint_weights = cephalometric_dataset_info.dataset_info['joint_weights']
-    print(f"\nLandmark Weights (targeting difficult landmarks):")
-    landmark_names = cephalometric_dataset_info.landmark_names_in_order
-    for i, (name, weight) in enumerate(zip(landmark_names, joint_weights)):
-        if weight > 1.0:
-            print(f"  {i:2d}. {name:<20} : {weight}x (enhanced)")
-    
-    print(f"\nAugmentation (same as V3/V4):")
-    print(f"  • Rotation: ±30°")
-    print(f"  • Scale range: 0.7-1.3")
-    print(f"  • Horizontal flipping")
-    
     # Build runner and start training
     try:
         print("\n" + "="*70)
-        print("🚀 STARTING EXPERIMENT TRAINING")
+        print("🚀 STARTING EXPERIMENT A")
         print("="*70)
         
         runner = Runner.from_cfg(cfg)
         
-        # Enhanced monitoring message
-        print("🎯 Training with original resolution + OHKM loss...")
-        print("📊 Expected outcomes:")
-        print("🔹 If MRE improves vs V3: OHKM loss is effective")
-        print("🔹 If MRE similar to V3: Resolution is the key factor")
-        print("🔹 Target: Compare with V3's 2.706 px MRE")
-        print("🔹 Training: 60 epochs with validation every 2 epochs")
+        print("🔬 Experiment A training in progress...")
+        print("📊 Monitor for:")
+        print("   • Stable loss convergence")
+        print("   • Focus on hard keypoints")
+        print("   • Improved accuracy on difficult landmarks")
         
-        print("\n⏱️  Starting training... (should be faster with 256×256 resolution)")
+        print("\n⏱️  Starting training...")
         
         runner.train()
         
-        print("\n🎉 Experiment training completed successfully!")
+        print("\n🎉 Experiment A training completed successfully!")
         
         # Plot training progress
         plot_training_progress(cfg.work_dir)
@@ -244,13 +234,12 @@ def main():
         traceback.print_exc()
         return
     
-    # Final model validation
+    # Final notes
     print("\n" + "="*70)
-    print("🏆 EXPERIMENT RESULTS")
+    print("📊 EXPERIMENT A COMPLETED")
     print("="*70)
     
     try:
-        import glob
         best_checkpoint = os.path.join(cfg.work_dir, "best_NME_epoch_*.pth")
         checkpoints = glob.glob(best_checkpoint)
         
@@ -258,21 +247,15 @@ def main():
             latest_checkpoint = max(checkpoints, key=os.path.getctime)
             print(f"🏅 Best checkpoint: {latest_checkpoint}")
             
-            # Evaluation suggestions
-            print("\n📊 Experiment completed! Analysis steps:")
-            print(f"1. 📈 Run detailed evaluation:")
-            print(f"   python evaluate_detailed_metrics.py --checkpoint {latest_checkpoint}")
-            print(f"\n2. 🔬 Compare results:")
-            print(f"   - V3 (256×256, MSE): 2.706 ± 1.949 px")
-            print(f"   - V5 (256×256, OHKM): Current experiment")
-            print(f"   - Difference shows OHKM contribution")
-            print(f"\n3. 📊 Key comparisons:")
-            print(f"   - Sella: V3=5.420 px vs V5=?")
-            print(f"   - Gonion: V3=4.851 px vs V5=?")
-            print(f"   - If V5 improves these, OHKM is working")
-            print(f"\n4. 🎯 Resolution vs Loss Function:")
-            print(f"   - If V5 ≈ V3: Resolution is primary factor")
-            print(f"   - If V5 << V3: OHKM loss is significant")
+            print("\n🎯 Next steps:")
+            print(f"1. 📊 Run detailed evaluation:")
+            print(f"   python evaluate_experiment.py --experiment A")
+            print(f"2. 📈 Compare with baseline:")
+            print(f"   - V4 AdaptiveWing: 2.348 px MRE")
+            print(f"   - Target: <2.3 px with OHKM enhancement")
+            print(f"3. 🔍 Analyze per-landmark improvements:")
+            print(f"   - Check if Sella/Gonion errors reduced")
+            print(f"   - Verify no regression on easy landmarks")
             
         else:
             print("⚠️  No best checkpoint found")
