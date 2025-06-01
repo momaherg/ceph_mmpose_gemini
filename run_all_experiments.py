@@ -204,8 +204,8 @@ def main():
         print(f"   Outputting to: {current_work_dir}")
         print(f"   Using config: {temp_config_file}")
         try:
-            # Run from the directory of the temp script to handle relative paths if any in train script
-            process = subprocess.Popen(["python", os.path.basename(temp_train_script)], cwd=os.path.dirname(temp_train_script), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+            # Run from the main project directory so custom modules can be imported
+            process = subprocess.Popen(["python", os.path.abspath(temp_train_script)], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
             while True:
                 output = process.stdout.readline()
                 if output == '' and process.poll() is not None:
