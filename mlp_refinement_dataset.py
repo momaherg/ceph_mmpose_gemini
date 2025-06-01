@@ -33,17 +33,18 @@ class HRNetPredictionExtractor:
     
     def __init__(self, config_path: str, checkpoint_path: str, device: str = 'cuda:0'):
         self.device = device
+        self.original_device = device  # Remember the original device preference
         try:
             self.model = init_model(config_path, checkpoint_path, device=device)
-            print(f"HRNetV2 model loaded from {checkpoint_path}")
+            print(f"HRNetV2 model loaded from {checkpoint_path} on {device}")
         except Exception as e:
-            print(f"Error loading HRNetV2 model: {e}")
-            # Try CPU if CUDA fails
+            print(f"Error loading HRNetV2 model on {device}: {e}")
+            # Try CPU if original device fails
             if device != 'cpu':
                 print("Trying CPU device...")
                 self.device = 'cpu'
                 self.model = init_model(config_path, checkpoint_path, device='cpu')
-                print(f"HRNetV2 model loaded from {checkpoint_path} (CPU)")
+                print(f"HRNetV2 model loaded from {checkpoint_path} on CPU")
             else:
                 raise e
     
@@ -101,12 +102,13 @@ class HRNetPredictionExtractor:
                     raise RuntimeError("No predictions returned from model")
                     
             except Exception as gpu_error:
-                print(f"GPU inference failed: {gpu_error}")
-                print("Trying CPU inference...")
+                # Check if this is a CUDA-related error
+                error_str = str(gpu_error).lower()
+                is_cuda_error = any(keyword in error_str for keyword in ['cuda', 'gpu', 'device', 'out of memory'])
                 
-                # Switch to CPU mode for this model if GPU fails
-                if self.device != 'cpu':
-                    # Move model to CPU
+                if is_cuda_error and self.device != 'cpu':
+                    print(f"CUDA error detected, switching to CPU: {gpu_error}")
+                    # Move model to CPU permanently for this session
                     self.model = self.model.cpu()
                     self.device = 'cpu'
                     
@@ -139,6 +141,7 @@ class HRNetPredictionExtractor:
                     else:
                         raise RuntimeError("No predictions returned from CPU model")
                 else:
+                    # Non-CUDA error, re-raise
                     raise gpu_error
                     
         except Exception as e:
@@ -207,9 +210,12 @@ class MLPRefinementDataset(Dataset):
         successful_extractions = 0
         failed_extractions = 0
         
+        print(f"Starting prediction extraction using HRNetV2 on {self.hrnet_extractor.device}")
+        
         for idx in range(total_samples):
             if idx % 25 == 0:  # More frequent progress updates
-                print(f"Extracting predictions: {idx}/{total_samples} "
+                device_info = f"[{self.hrnet_extractor.device.upper()}]"
+                print(f"Extracting predictions: {idx}/{total_samples} {device_info} "
                       f"(Success: {successful_extractions}, Failed: {failed_extractions})")
             
             try:
@@ -243,7 +249,8 @@ class MLPRefinementDataset(Dataset):
                 self.prediction_cache[idx] = np.zeros((19, 2), dtype=np.float32)
                 failed_extractions += 1
         
-        print(f"Prediction extraction completed:")
+        final_device = self.hrnet_extractor.device
+        print(f"Prediction extraction completed on {final_device.upper()}:")
         print(f"  Total samples: {total_samples}")
         print(f"  Successful: {successful_extractions}")
         print(f"  Failed: {failed_extractions}")

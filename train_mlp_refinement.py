@@ -398,7 +398,7 @@ def main():
         'num_epochs': 50,
         'learning_rate': 1e-3,
         'device': 'cuda:0' if torch.cuda.is_available() else 'cpu',
-        'force_cpu_hrnet': True  # Force CPU for HRNetV2 inference to avoid CUDA issues
+        'force_cpu_hrnet': False  # Re-enable GPU for HRNetV2 now that image issues are fixed
     }
     
     print(f"📁 Data file: {config['data_file']}")
