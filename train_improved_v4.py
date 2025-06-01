@@ -14,6 +14,7 @@ from mmengine.runner import Runner
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+import glob
 
 # Suppress warnings
 warnings.filterwarnings('ignore')
@@ -214,7 +215,36 @@ def main():
         print("🚀 STARTING UPGRADED TRAINING")
         print("="*70)
         
+        # Determine checkpoint to resume from
+        resume_checkpoint_path = None
+        # Try to find the best checkpoint before the NaN, e.g., epoch 18 if current work_dir is the same
+        # For simplicity, let's try to find the overall best NME checkpoint if available.
+        # A more robust way would be to track the last known good epoch before a NaN.
+        best_checkpoint_pattern = os.path.join(cfg.work_dir, "best_NME_epoch_*.pth")
+        available_checkpoints = sorted(glob.glob(best_checkpoint_pattern), key=os.path.getctime, reverse=True)
+        
+        load_from_path = cfg.load_from # Original pretrained model
+        resume_training = False
+
+        if available_checkpoints: # If there are existing "best" checkpoints in this work_dir
+            # Potentially resume from the latest best one. 
+            # This logic might need refinement if you want to specifically avoid epochs that led to NaN
+            # For now, if a best_NME exists, we assume it's a good point to resume from.
+            # If grad_norm was NaN, this best checkpoint might be just before the crash.
+            print(f"Found existing best checkpoints: {available_checkpoints}")
+            # Let's assume epoch 18 was the last good one. If it exists, use it.
+            # This part is a bit manual, ideally, you'd track the exact last good checkpoint.
+            # For now, we'll prioritize resuming if any best_NME exists.
+            potential_resume_path = available_checkpoints[0] # Latest best checkpoint
+            print(f"Attempting to resume from: {potential_resume_path}")
+            load_from_path = potential_resume_path
+            resume_training = True
+            cfg.train_cfg.resume = True # This tells the runner to handle epoch counting etc.
+            cfg.load_from = load_from_path # This tells the runner which weights to load.
+
         runner = Runner.from_cfg(cfg)
+        # The runner should pick up load_from and cfg.train_cfg.resume
+        # If using an explicit resume path: runner = Runner.from_cfg(cfg, resume=True, load_from=specific_checkpoint_path)
         
         # Enhanced monitoring message
         print("🎯 Training with major upgrades in progress...")
@@ -246,10 +276,6 @@ def main():
     print("="*70)
     
     try:
-        import glob
-        best_checkpoint = os.path.join(cfg.work_dir, "best_NME_epoch_*.pth")
-        checkpoints = glob.glob(best_checkpoint)
-        
         if checkpoints:
             latest_checkpoint = max(checkpoints, key=os.path.getctime)
             print(f"🏅 Best checkpoint: {latest_checkpoint}")
