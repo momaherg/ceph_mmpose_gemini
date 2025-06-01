@@ -27,20 +27,19 @@ codec = dict(
     type='MSRAHeatmap',
     input_size=(384, 384), # UPGRADED: Was (256, 256) - Higher resolution for finer details
     heatmap_size=(96, 96),  # UPGRADED: Was (64, 64) - Larger heatmaps for sub-pixel precision
-    sigma=2)
+    sigma=3)
 
 # Model head with Adaptive Wing Loss for robust landmark detection
 model = dict(
     head=dict(
         out_channels=19, # Ensure this matches your dataset's keypoint count
         loss=dict(
-            type='AdaptiveWingLoss', # UPGRADED: Robust loss for face/cephalometric alignment
-            alpha=2.1,              # Controls loss shape in different regions
-            omega=14.0,             # Boundary between linear and wing regions  
-            epsilon=1.0,            # Small value to avoid singularity
-            theta=0.5,              # Threshold for adaptive behavior
-            use_target_weight=True, # Works with joint_weights for Sella/Gonion emphasis
-            loss_weight=1.0         # Overall loss scaling factor
+            type='AdaptiveWingLoss',
+            alpha=2.1,
+            omega=24.0,   # ~1.5× heat-map σ*8
+            epsilon=1.0,
+            theta=0.5,
+            use_target_weight=False   # see point 3
         )
     )
     # The rest of the model (backbone, neck, data_preprocessor, test_cfg)
