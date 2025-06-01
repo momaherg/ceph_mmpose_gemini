@@ -40,7 +40,7 @@ model = dict(
                 use_target_weight=False, loss_weight=1.0),
             dict(  # extra OHKM term on hard joints
                 type='KeypointOHKMMSELoss',
-                ohkm_ratio=0.25,        # top-25 % joints
+                topk=6,        # top-25 % joints
                 use_target_weight=True, loss_weight=0.3)   # small extra push
         ]
     )
