@@ -168,7 +168,7 @@ def main():
     
     # Configuration
     config_path = "Pretrained_model/hrnetv2_w18_cephalometric_256x256_finetune.py"
-    work_dir = "work_dirs/hrnetv2_w18_cephalometric_384x384_ohkm_v4"
+    work_dir = "work_dirs/hrnetv2_w18_cephalometric_384x384_adaptive_wing_loss_v4"  # New work dir for this experiment
     
     # Find the best checkpoint
     checkpoint_pattern = os.path.join(work_dir, "best_NME_epoch_*.pth")
