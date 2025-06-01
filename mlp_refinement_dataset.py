@@ -190,9 +190,14 @@ class MLPRefinementDataset(Dataset):
     
     def _extract_all_predictions(self):
         """Pre-extract all HRNetV2 predictions and cache them."""
-        for idx in range(len(self.data_df)):
-            if idx % 50 == 0:
-                print(f"Extracting predictions: {idx}/{len(self.data_df)}")
+        total_samples = len(self.data_df)
+        successful_extractions = 0
+        failed_extractions = 0
+        
+        for idx in range(total_samples):
+            if idx % 25 == 0:  # More frequent progress updates
+                print(f"Extracting predictions: {idx}/{total_samples} "
+                      f"(Success: {successful_extractions}, Failed: {failed_extractions})")
             
             try:
                 # Get image
@@ -205,15 +210,32 @@ class MLPRefinementDataset(Dataset):
                 # Extract prediction
                 prediction = self.hrnet_extractor.extract_predictions(image)
                 
+                # Check if prediction is valid (not all zeros)
+                if np.all(prediction == 0):
+                    print(f"  Warning: Sample {idx} returned zero predictions")
+                    failed_extractions += 1
+                else:
+                    successful_extractions += 1
+                
                 # Cache prediction
                 self.prediction_cache[idx] = prediction
+                
+                # Memory management: clear GPU cache periodically
+                if torch.cuda.is_available() and idx % 100 == 0:
+                    torch.cuda.empty_cache()
                 
             except Exception as e:
                 print(f"Error processing sample {idx}: {e}")
                 # Cache zero predictions for failed samples
                 self.prediction_cache[idx] = np.zeros((19, 2), dtype=np.float32)
+                failed_extractions += 1
         
-        print(f"Cached {len(self.prediction_cache)} predictions")
+        print(f"Prediction extraction completed:")
+        print(f"  Total samples: {total_samples}")
+        print(f"  Successful: {successful_extractions}")
+        print(f"  Failed: {failed_extractions}")
+        print(f"  Success rate: {successful_extractions/total_samples*100:.1f}%")
+        print(f"  Cached {len(self.prediction_cache)} predictions")
     
     def _get_image(self, idx: int) -> np.ndarray:
         """Get image at index."""
