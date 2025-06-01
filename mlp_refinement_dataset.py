@@ -33,8 +33,19 @@ class HRNetPredictionExtractor:
     
     def __init__(self, config_path: str, checkpoint_path: str, device: str = 'cuda:0'):
         self.device = device
-        self.model = init_model(config_path, checkpoint_path, device=device)
-        print(f"HRNetV2 model loaded from {checkpoint_path}")
+        try:
+            self.model = init_model(config_path, checkpoint_path, device=device)
+            print(f"HRNetV2 model loaded from {checkpoint_path}")
+        except Exception as e:
+            print(f"Error loading HRNetV2 model: {e}")
+            # Try CPU if CUDA fails
+            if device != 'cpu':
+                print("Trying CPU device...")
+                self.device = 'cpu'
+                self.model = init_model(config_path, checkpoint_path, device='cpu')
+                print(f"HRNetV2 model loaded from {checkpoint_path} (CPU)")
+            else:
+                raise e
     
     def extract_predictions(self, image: np.ndarray) -> np.ndarray:
         """
@@ -46,18 +57,38 @@ class HRNetPredictionExtractor:
         Returns:
             Predicted landmarks (19, 2) as numpy array
         """
+        # Resize image to manageable size for HRNetV2 inference
+        # HRNetV2 was trained on 384x384, so resize to that
+        from PIL import Image as PILImage
+        
+        original_h, original_w = image.shape[:2]
+        target_size = 384
+        
+        # Resize image using PIL for better quality
+        pil_image = PILImage.fromarray(image)
+        resized_image = pil_image.resize((target_size, target_size))
+        resized_image_np = np.array(resized_image)
+        
         # Prepare data for inference
         data_sample = {
-            'bbox': np.array([[0, 0, image.shape[1], image.shape[0]]], dtype=np.float32),
+            'bbox': np.array([[0, 0, target_size, target_size]], dtype=np.float32),
             'bbox_scores': np.array([1.0], dtype=np.float32)
         }
         
-        # Run inference
-        results = inference_topdown(self.model, image, bboxes=data_sample['bbox'], bbox_format='xyxy')
+        # Run inference on resized image
+        results = inference_topdown(self.model, resized_image_np, bboxes=data_sample['bbox'], bbox_format='xyxy')
         
         if results and len(results) > 0:
             predictions = results[0].pred_instances.keypoints[0]  # Shape: (19, 2)
-            return predictions.cpu().numpy()
+            predictions_np = predictions.cpu().numpy()
+            
+            # Scale predictions back to original image size
+            scale_x = original_w / target_size
+            scale_y = original_h / target_size
+            predictions_np[:, 0] *= scale_x
+            predictions_np[:, 1] *= scale_y
+            
+            return predictions_np
         else:
             # Return zero predictions if inference fails
             return np.zeros((19, 2), dtype=np.float32)
@@ -116,14 +147,24 @@ class MLPRefinementDataset(Dataset):
             if idx % 50 == 0:
                 print(f"Extracting predictions: {idx}/{len(self.data_df)}")
             
-            # Get image
-            image = self._get_image(idx)
-            
-            # Extract prediction
-            prediction = self.hrnet_extractor.extract_predictions(image)
-            
-            # Cache prediction
-            self.prediction_cache[idx] = prediction
+            try:
+                # Get image
+                image = self._get_image(idx)
+                
+                # Debug: Print image info for first few samples
+                if idx < 3:
+                    print(f"  Sample {idx}: Image shape {image.shape}, dtype {image.dtype}")
+                
+                # Extract prediction
+                prediction = self.hrnet_extractor.extract_predictions(image)
+                
+                # Cache prediction
+                self.prediction_cache[idx] = prediction
+                
+            except Exception as e:
+                print(f"Error processing sample {idx}: {e}")
+                # Cache zero predictions for failed samples
+                self.prediction_cache[idx] = np.zeros((19, 2), dtype=np.float32)
         
         print(f"Cached {len(self.prediction_cache)} predictions")
     
@@ -226,7 +267,7 @@ def create_dataloaders(train_df: pd.DataFrame,
                       hrnet_checkpoint_path: str,
                       input_size: int = 384,
                       batch_size: int = 16,
-                      num_workers: int = 4,
+                      num_workers: int = 0,
                       cache_predictions: bool = True) -> Tuple[DataLoader, DataLoader]:
     """
     Create train and validation dataloaders for MLP refinement training.

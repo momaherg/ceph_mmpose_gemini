@@ -394,7 +394,7 @@ def main():
         'hrnet_checkpoint_pattern': "work_dirs/hrnetv2_w18_cephalometric_384x384_adaptive_wing_loss_v4/epoch_60.pth",
         'work_dir': "work_dirs/mlp_refinement_v1",
         'input_size': 384,
-        'batch_size': 16,
+        'batch_size': 16,  
         'num_epochs': 50,
         'learning_rate': 1e-3,
         'device': 'cuda:0' if torch.cuda.is_available() else 'cpu'
@@ -404,13 +404,28 @@ def main():
     print(f"🏗️  Work dir: {config['work_dir']}")
     print(f"🖥️  Device: {config['device']}")
     
-    # Find HRNetV2 checkpoint
-    checkpoints = glob.glob(config['hrnet_checkpoint_pattern'])
-    if not checkpoints:
-        print("❌ No HRNetV2 checkpoint found!")
+    # Check if data file exists
+    if not os.path.exists(config['data_file']):
+        print(f"❌ Data file not found: {config['data_file']}")
+        print("Please check the data file path.")
         return
     
-    hrnet_checkpoint = max(checkpoints, key=os.path.getctime)
+    # Find HRNetV2 checkpoint
+    if config['hrnet_checkpoint_pattern'].endswith('.pth'):
+        # Direct path to checkpoint
+        if os.path.exists(config['hrnet_checkpoint_pattern']):
+            hrnet_checkpoint = config['hrnet_checkpoint_pattern']
+        else:
+            print(f"❌ HRNetV2 checkpoint not found: {config['hrnet_checkpoint_pattern']}")
+            return
+    else:
+        # Pattern-based search
+        checkpoints = glob.glob(config['hrnet_checkpoint_pattern'])
+        if not checkpoints:
+            print("❌ No HRNetV2 checkpoint found!")
+            return
+        hrnet_checkpoint = max(checkpoints, key=os.path.getctime)
+    
     print(f"🔗 HRNetV2 checkpoint: {hrnet_checkpoint}")
     
     # Load data
@@ -429,7 +444,8 @@ def main():
         config['hrnet_config'], hrnet_checkpoint,
         input_size=config['input_size'],
         batch_size=config['batch_size'],
-        cache_predictions=True
+        cache_predictions=True,
+        num_workers=0  # Reduced for stability
     )
     
     # Analyze HRNetV2 baseline
