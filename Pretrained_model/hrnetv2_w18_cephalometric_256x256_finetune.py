@@ -41,7 +41,7 @@ model = dict(
             dict(  # extra OHKM term on hard joints
                 type='KeypointOHKMMSELoss',
                 topk=6,        # top-25 % joints
-                use_target_weight=True, loss_weight=0.3)   # small extra push
+                use_target_weight=False, loss_weight=0.3)   # small extra push
         ]
     )
     # The rest of the model (backbone, neck, data_preprocessor, test_cfg)
