@@ -168,7 +168,7 @@ def main():
     print(f"   • Expected: 10-20% MRE reduction from sub-pixel precision")
     
     print(f"\n🎯 Loss Function Upgrade:")
-    print(f"   • Loss: KeypointMSELoss → OHKMMSELoss")
+    print(f"   • Loss: KeypointMSELoss → KeypointOHKMMSELoss")
     print(f"   • Focus: Top 25% hardest keypoints per batch")
     print(f"   • Expected: Better handling of Sella/Gonion difficult cases")
     

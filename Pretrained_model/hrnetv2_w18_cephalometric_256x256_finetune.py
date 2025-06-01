@@ -33,7 +33,7 @@ model = dict(
     head=dict(
         out_channels=19, # Ensure this matches your dataset's keypoint count
         loss=dict(
-            type='OHKMMSELoss', # UPGRADED: Was KeypointMSELoss - Focus on hardest keypoints
+            type='KeypointOHKMMSELoss', # FIXED: Correct name in MMPose registry
             use_target_weight=True, # Works with joint_weights for Sella/Gonion emphasis
             ohkm_ratio=0.25 # Train on top 25% hardest keypoints in each batch
         )
