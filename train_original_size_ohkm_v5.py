@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
 Training Script for Cephalometric Landmark Detection - V5
-Testing if improvements come from resolution or other optimizations
-Using ORIGINAL 256x256 resolution with all other improvements
+EXPERIMENT: Original 256×256 resolution + OHKM Loss (to test if gains are from resolution)
 """
 
 import os
@@ -66,11 +65,11 @@ def plot_training_progress(work_dir):
         print(f"Could not plot training progress: {e}")
 
 def main():
-    """Main training function for 256x256 experiment."""
+    """Main training function with original resolution and OHKM loss."""
     
     print("="*80)
-    print("CEPHALOMETRIC TRAINING - V5 (ORIGINAL SIZE EXPERIMENT)")
-    print("🔬 Testing: 256×256 resolution with all other improvements")
+    print("CEPHALOMETRIC TRAINING - V5 (RESOLUTION EXPERIMENT)")
+    print("🔬 TESTING: Original 256×256 Resolution + OHKM Loss")
     print("="*80)
     
     # Initialize MMPose scope
@@ -87,8 +86,8 @@ def main():
         return
     
     # Configuration
-    config_path = "Pretrained_model/hrnetv2_w18_cephalometric_256x256_finetune_v5_original_size.py"
-    work_dir = "work_dirs/hrnetv2_w18_cephalometric_256x256_v5_baseline"
+    config_path = "Pretrained_model/hrnetv2_w18_cephalometric_256x256_finetune.py"
+    work_dir = "work_dirs/hrnetv2_w18_cephalometric_256x256_ohkm_v5"  # New work dir for this experiment
     
     print(f"Config: {config_path}")
     print(f"Work Dir: {work_dir}")
@@ -161,22 +160,26 @@ def main():
     
     # Print experiment information
     print("\n" + "="*70)
-    print("🔬 EXPERIMENT: ISOLATING RESOLUTION IMPACT")
+    print("🔬 EXPERIMENT: ISOLATING RESOLUTION EFFECT")
     print("="*70)
-    print(f"📐 Resolution:")
+    print(f"📐 Resolution Configuration:")
     print(f"   • Input size: 256×256 (ORIGINAL)")
     print(f"   • Heatmap size: 64×64 (ORIGINAL)")
-    print(f"   • This isolates the effect of other improvements")
+    print(f"   • Hypothesis: Testing if gains are from resolution vs. other improvements")
     
     print(f"\n🎯 Loss Function:")
-    print(f"   • Loss: KeypointMSELoss (standard)")
-    print(f"   • Joint weights: Applied for Sella/Gonion emphasis")
+    print(f"   • Loss: KeypointOHKMMSELoss")
+    print(f"   • Focus: Top 5 hardest keypoints per batch")
+    print(f"   • Joint weights: Applied to Sella/Gonion (2.0x), PNS (1.5x)")
     
-    print(f"\n📊 Other Improvements Retained:")
-    print(f"   • Enhanced augmentation (rotation ±30°, scale 0.7-1.3)")
-    print(f"   • Cosine annealing LR schedule")
-    print(f"   • Extended training (60 epochs)")
-    print(f"   • Validation every 2 epochs")
+    print(f"\n📊 Batch Configuration:")
+    print(f"   • Batch size: 32 (original size allows larger batch)")
+    print(f"   • Expected: Faster training with more stable gradients")
+    
+    print(f"\n🔄 Comparison with Previous Experiments:")
+    print(f"   • V3 (256×256, MSE Loss): 2.706 ± 1.949 px MRE")
+    print(f"   • V4 (384×384, OHKM Loss): Expected <2.5 px MRE")
+    print(f"   • V5 (256×256, OHKM Loss): Will show if OHKM alone improves results")
     
     # Print enhanced training parameters
     print("\n" + "="*60)
@@ -205,24 +208,32 @@ def main():
         if weight > 1.0:
             print(f"  {i:2d}. {name:<20} : {weight}x (enhanced)")
     
+    print(f"\nAugmentation (same as V3/V4):")
+    print(f"  • Rotation: ±30°")
+    print(f"  • Scale range: 0.7-1.3")
+    print(f"  • Horizontal flipping")
+    
     # Build runner and start training
     try:
         print("\n" + "="*70)
-        print("🚀 STARTING EXPERIMENT")
+        print("🚀 STARTING EXPERIMENT TRAINING")
         print("="*70)
         
         runner = Runner.from_cfg(cfg)
         
-        # Experiment comparison targets
-        print("📊 Comparison Targets:")
-        print("🔹 V3 Results (256×256 + improvements): 2.706px MRE")
-        print("🔹 V4 Results (384×384 + improvements): Expected <2.5px")
-        print("🔹 This experiment: Will show impact of resolution vs other improvements")
-        print("\n⏱️  Starting training...")
+        # Enhanced monitoring message
+        print("🎯 Training with original resolution + OHKM loss...")
+        print("📊 Expected outcomes:")
+        print("🔹 If MRE improves vs V3: OHKM loss is effective")
+        print("🔹 If MRE similar to V3: Resolution is the key factor")
+        print("🔹 Target: Compare with V3's 2.706 px MRE")
+        print("🔹 Training: 60 epochs with validation every 2 epochs")
+        
+        print("\n⏱️  Starting training... (should be faster with 256×256 resolution)")
         
         runner.train()
         
-        print("\n🎉 Training completed successfully!")
+        print("\n🎉 Experiment training completed successfully!")
         
         # Plot training progress
         plot_training_progress(cfg.work_dir)
@@ -233,9 +244,9 @@ def main():
         traceback.print_exc()
         return
     
-    # Final notes
+    # Final model validation
     print("\n" + "="*70)
-    print("🏆 EXPERIMENT COMPLETE")
+    print("🏆 EXPERIMENT RESULTS")
     print("="*70)
     
     try:
@@ -247,15 +258,21 @@ def main():
             latest_checkpoint = max(checkpoints, key=os.path.getctime)
             print(f"🏅 Best checkpoint: {latest_checkpoint}")
             
-            print("\n🎯 Next steps:")
-            print(f"1. 📊 Run evaluation:")
+            # Evaluation suggestions
+            print("\n📊 Experiment completed! Analysis steps:")
+            print(f"1. 📈 Run detailed evaluation:")
             print(f"   python evaluate_detailed_metrics.py --checkpoint {latest_checkpoint}")
-            print(f"2. 📈 Compare results:")
-            print(f"   - If MRE ≈ 2.7px: Resolution is NOT the main factor")
-            print(f"   - If MRE > 3.0px: Resolution IS important")
-            print(f"3. 🔍 Analysis:")
-            print(f"   - Compare per-landmark errors with V3 and V4")
-            print(f"   - Check if Sella/Gonion improvements persist")
+            print(f"\n2. 🔬 Compare results:")
+            print(f"   - V3 (256×256, MSE): 2.706 ± 1.949 px")
+            print(f"   - V5 (256×256, OHKM): Current experiment")
+            print(f"   - Difference shows OHKM contribution")
+            print(f"\n3. 📊 Key comparisons:")
+            print(f"   - Sella: V3=5.420 px vs V5=?")
+            print(f"   - Gonion: V3=4.851 px vs V5=?")
+            print(f"   - If V5 improves these, OHKM is working")
+            print(f"\n4. 🎯 Resolution vs Loss Function:")
+            print(f"   - If V5 ≈ V3: Resolution is primary factor")
+            print(f"   - If V5 << V3: OHKM loss is significant")
             
         else:
             print("⚠️  No best checkpoint found")

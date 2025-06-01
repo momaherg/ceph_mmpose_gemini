@@ -7,8 +7,7 @@ train_cfg = dict(by_epoch=True, max_epochs=60, val_interval=2) # Longer training
 # Improved optimizer settings with cosine annealing
 optim_wrapper = dict(
     optimizer=dict(type='Adam', lr=3e-4), # Higher starting LR for cosine schedule
-    clip_grad=dict(max_norm=5.,  # see next section
-                   norm_type=2)
+    clip_grad=dict(max_norm=10., norm_type=2)  # Gradient clipping for stability
 )
 
 # Learning rate scheduler with warm-up and cosine annealing  
@@ -22,24 +21,21 @@ dataset_type = 'CustomCephalometricDataset' # Your custom dataset
 data_root = "/content/drive/MyDrive/Lala\'s Masters/" # Conventional data root, actual data comes from data_df injected by training script
 # ann_file_main = 'train_data_pure_old_numpy.json' # The single JSON file
 
-# Codec - UPGRADED: Higher resolution for better precision
+# Codec - ORIGINAL RESOLUTION for comparison
 codec = dict(
     type='MSRAHeatmap',
-    input_size=(384, 384), # UPGRADED: Was (256, 256) - Higher resolution for finer details
-    heatmap_size=(96, 96),  # UPGRADED: Was (64, 64) - Larger heatmaps for sub-pixel precision
-    sigma=3)
+    input_size=(256, 256), # ORIGINAL: Back to 256×256 to test if resolution matters
+    heatmap_size=(64, 64),  # ORIGINAL: Back to 64×64 heatmaps
+    sigma=2)
 
-# Model head with Adaptive Wing Loss for robust landmark detection
+# Model head with Online Hard Keypoint Mining loss
 model = dict(
     head=dict(
         out_channels=19, # Ensure this matches your dataset's keypoint count
         loss=dict(
-            type='AdaptiveWingLoss',
-            alpha=2.1,
-            omega=24.0,   # ~1.5× heat-map σ*8
-            epsilon=1.0,
-            theta=0.5,
-            use_target_weight=False   # see point 3
+            type='KeypointOHKMMSELoss', # BACK TO OHKM: Focus on hardest keypoints
+            use_target_weight=True, # Works with joint_weights for Sella/Gonion emphasis
+            topk=5 # Train on top 5 hardest keypoints per batch (25% of batch_size=20)
         )
     )
     # The rest of the model (backbone, neck, data_preprocessor, test_cfg)
@@ -47,7 +43,7 @@ model = dict(
     # data_preprocessor mean/std are from ImageNet, generally fine for transfer.
 )
 
-# Enhanced pipelines with stronger augmentation and higher resolution
+# Enhanced pipelines with stronger augmentation and original resolution
 train_pipeline = [
     dict(type='LoadImageNumpy'), # Load from numpy array
     dict(type='GetBBoxCenterScale'),
@@ -57,19 +53,19 @@ train_pipeline = [
         shift_prob=0,
         rotate_factor=30, # Increased rotation for better generalization
         scale_factor=(0.7, 1.3)), # Wider scale range
-    dict(type='TopdownAffine', input_size=codec['input_size']), # Now uses 384x384
+    dict(type='TopdownAffine', input_size=codec['input_size']), # Now uses 256x256
     dict(type='GenerateTarget', encoder=codec),
     dict(type='CustomPackPoseInputs', meta_keys=('id', 'img_id', 'img_path', 'ori_shape', 'img_shape', 'bbox', 'bbox_scores', 'flip_indices', 'center', 'scale', 'input_center', 'input_scale', 'input_size', 'patient_text_id', 'set', 'class'))
 ]
 val_pipeline = [
     dict(type='LoadImageNumpy'),
     dict(type='GetBBoxCenterScale'),
-    dict(type='TopdownAffine', input_size=codec['input_size']), # Now uses 384x384
+    dict(type='TopdownAffine', input_size=codec['input_size']), # Now uses 256x256
     dict(type='CustomPackPoseInputs', meta_keys=('id', 'img_id', 'img_path', 'ori_shape', 'img_shape', 'bbox', 'bbox_scores', 'flip_indices', 'center', 'scale', 'input_center', 'input_scale', 'input_size', 'patient_text_id', 'set', 'class'))
 ]
 test_pipeline = val_pipeline # Test pipeline often same as validation
 
-# DataLoaders - REDUCED batch size for higher resolution
+# DataLoaders - RESTORED batch size for smaller resolution
 # The CustomCephalometricDataset needs to be able to split the data from the single JSON
 # or the training script needs to prepare and pass pandas DataFrames (train_df, val_df, test_df)
 # to each dataloader's dataset config using the `data_df` argument.
@@ -82,7 +78,7 @@ test_pipeline = val_pipeline # Test pipeline often same as validation
 # (ann_file and data_root might become '' or None if data_df is primary)
 
 train_dataloader = dict(
-    batch_size=20, # REDUCED: Was 32 - Lower for 384x384 resolution to manage GPU memory
+    batch_size=32, # RESTORED: Back to 32 - Higher batch size OK for 256x256 resolution
     num_workers=2,
     persistent_workers=True,
     sampler=dict(type='DefaultSampler', shuffle=True),
@@ -104,7 +100,7 @@ train_dataloader = dict(
     ))
 
 val_dataloader = dict(
-    batch_size=20, # REDUCED: Was 32 - Lower for 384x384 resolution to manage GPU memory
+    batch_size=32, # RESTORED: Back to 32 - Higher batch size OK for 256x256 resolution
     num_workers=2,
     persistent_workers=True,
     drop_last=False,
