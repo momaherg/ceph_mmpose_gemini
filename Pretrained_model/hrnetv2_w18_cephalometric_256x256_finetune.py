@@ -33,16 +33,11 @@ codec = dict(
 model = dict(
     head=dict(
         out_channels=19, # Ensure this matches your dataset's keypoint count
-        loss=[
-            dict(  # main loss
+        loss=dict(  # main loss
                 type='AdaptiveWingLoss',
                 alpha=2.1,  omega=24., epsilon=1., theta=0.5,
-                use_target_weight=False, loss_weight=1.0),
-            dict(  # extra OHKM term on hard joints
-                type='KeypointOHKMMSELoss',
-                topk=6,        # top-25 % joints
-                use_target_weight=False, loss_weight=0.3)   # small extra push
-        ]
+                use_target_weight=False, loss_weight=1.0)
+            
     )
     # The rest of the model (backbone, neck, data_preprocessor, test_cfg)
     # can be inherited or slightly adjusted if needed.
