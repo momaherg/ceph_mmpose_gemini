@@ -70,28 +70,33 @@ class HRNetPredictionExtractor:
             resized_image = pil_image.resize((target_size, target_size))
             resized_image_np = np.array(resized_image)
             
-            # Prepare data for inference
-            data_sample = {
-                'bbox': np.array([[0, 0, target_size, target_size]], dtype=np.float32),
-                'bbox_scores': np.array([1.0], dtype=np.float32)
-            }
+            # Prepare data for inference with proper format
+            bbox = np.array([0, 0, target_size, target_size], dtype=np.float32)
             
             # Try GPU inference first
             try:
-                # Run inference on resized image
-                results = inference_topdown(self.model, resized_image_np, bboxes=data_sample['bbox'], bbox_format='xyxy')
+                # Run inference on resized image with simplified input
+                results = inference_topdown(
+                    self.model, 
+                    resized_image_np, 
+                    bboxes=bbox.reshape(1, -1),  # Ensure proper shape (1, 4)
+                    bbox_format='xyxy'
+                )
                 
-                if results and len(results) > 0:
-                    predictions = results[0].pred_instances.keypoints[0]  # Shape: (19, 2)
-                    predictions_np = predictions.cpu().numpy()
-                    
-                    # Scale predictions back to original image size
-                    scale_x = original_w / target_size
-                    scale_y = original_h / target_size
-                    predictions_np[:, 0] *= scale_x
-                    predictions_np[:, 1] *= scale_y
-                    
-                    return predictions_np
+                if results and len(results) > 0 and hasattr(results[0], 'pred_instances'):
+                    if hasattr(results[0].pred_instances, 'keypoints') and len(results[0].pred_instances.keypoints) > 0:
+                        predictions = results[0].pred_instances.keypoints[0]  # Shape: (19, 2)
+                        predictions_np = predictions.cpu().numpy() if hasattr(predictions, 'cpu') else predictions
+                        
+                        # Scale predictions back to original image size
+                        scale_x = original_w / target_size
+                        scale_y = original_h / target_size
+                        predictions_np[:, 0] *= scale_x
+                        predictions_np[:, 1] *= scale_y
+                        
+                        return predictions_np
+                    else:
+                        raise RuntimeError("No keypoints found in predictions")
                 else:
                     raise RuntimeError("No predictions returned from model")
                     
@@ -110,19 +115,27 @@ class HRNetPredictionExtractor:
                         torch.cuda.empty_cache()
                     
                     # Retry inference on CPU
-                    results = inference_topdown(self.model, resized_image_np, bboxes=data_sample['bbox'], bbox_format='xyxy')
+                    results = inference_topdown(
+                        self.model, 
+                        resized_image_np, 
+                        bboxes=bbox.reshape(1, -1),  # Ensure proper shape (1, 4)
+                        bbox_format='xyxy'
+                    )
                     
-                    if results and len(results) > 0:
-                        predictions = results[0].pred_instances.keypoints[0]  # Shape: (19, 2)
-                        predictions_np = predictions.cpu().numpy()
-                        
-                        # Scale predictions back to original image size
-                        scale_x = original_w / target_size
-                        scale_y = original_h / target_size
-                        predictions_np[:, 0] *= scale_x
-                        predictions_np[:, 1] *= scale_y
-                        
-                        return predictions_np
+                    if results and len(results) > 0 and hasattr(results[0], 'pred_instances'):
+                        if hasattr(results[0].pred_instances, 'keypoints') and len(results[0].pred_instances.keypoints) > 0:
+                            predictions = results[0].pred_instances.keypoints[0]  # Shape: (19, 2)
+                            predictions_np = predictions.cpu().numpy() if hasattr(predictions, 'cpu') else predictions
+                            
+                            # Scale predictions back to original image size
+                            scale_x = original_w / target_size
+                            scale_y = original_h / target_size
+                            predictions_np[:, 0] *= scale_x
+                            predictions_np[:, 1] *= scale_y
+                            
+                            return predictions_np
+                        else:
+                            raise RuntimeError("No keypoints found in CPU predictions")
                     else:
                         raise RuntimeError("No predictions returned from CPU model")
                 else:
@@ -244,10 +257,49 @@ class MLPRefinementDataset(Dataset):
         # Get image from the row (assuming it's stored as 'Image')
         if 'Image' in row:
             image = np.array(row['Image'], dtype=np.uint8)
+            
+            # Check if image is flattened
             if len(image.shape) == 1:
-                # Reshape if flattened
-                original_size = int(np.sqrt(len(image) // 3))
-                image = image.reshape((original_size, original_size, 3))
+                # Try different common image sizes
+                common_sizes = [224, 256, 384, 512, 640]
+                image_reshaped = None
+                
+                for size in common_sizes:
+                    expected_length = size * size * 3
+                    if len(image) == expected_length:
+                        try:
+                            image_reshaped = image.reshape((size, size, 3))
+                            break
+                        except ValueError:
+                            continue
+                
+                if image_reshaped is None:
+                    # If no common size works, try to find the largest square that fits
+                    max_pixels = len(image) // 3
+                    size = int(np.sqrt(max_pixels))
+                    
+                    # Find the largest valid size
+                    while size > 0:
+                        if size * size * 3 <= len(image):
+                            try:
+                                image_reshaped = image[:size * size * 3].reshape((size, size, 3))
+                                print(f"Sample {idx}: Reshaped to {size}x{size} from flattened array of length {len(image)}")
+                                break
+                            except ValueError:
+                                size -= 1
+                        else:
+                            size -= 1
+                
+                if image_reshaped is None:
+                    # Last resort: create a default image
+                    print(f"Warning: Could not reshape image {idx} with length {len(image)}, using default 224x224")
+                    image_reshaped = np.zeros((224, 224, 3), dtype=np.uint8)
+                
+                image = image_reshaped
+                
+            elif len(image.shape) == 2:
+                # If image is 2D, assume it's grayscale and convert to RGB
+                image = np.stack([image, image, image], axis=-1)
         else:
             raise ValueError(f"No 'Image' column found in data")
         
