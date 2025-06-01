@@ -1,0 +1,10 @@
+.DS_Store
+.vscode
+.idea
+.pytest_cache
+.coverage
+.coverage.*
+.coverage.*
+*DS_Store
+data/train_data_pure.pkl
+Pretrained_model/hrnetv2_w18_aflw_256x256-f2bbc62b_20210125.pth
