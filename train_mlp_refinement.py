@@ -391,7 +391,7 @@ def main():
     config = {
         'data_file': "/content/drive/MyDrive/Lala's Masters/train_data_pure_old_numpy.json",
         'hrnet_config': "Pretrained_model/hrnetv2_w18_cephalometric_256x256_finetune.py",
-        'hrnet_checkpoint_pattern': "work_dirs/hrnetv2_w18_cephalometric_384x384_adaptive_wing_loss_v4/epoch_60.pth",
+        'hrnet_checkpoint_pattern': "work_dirs/hrnetv2_w18_cephalometric_384x384_adaptive_wing_loss_v4/epoch_54.pth",
         'work_dir': "work_dirs/mlp_refinement_v1",
         'input_size': 384,
         'batch_size': 16,  
