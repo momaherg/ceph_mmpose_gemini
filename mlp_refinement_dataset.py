@@ -144,6 +144,19 @@ class HRNetPredictionExtractor:
                     # Non-CUDA error, re-raise
                     raise gpu_error
                     
+            # Attempt to move model back to GPU if it was previously switched to CPU
+            if self.device == 'cpu' and self.original_device != 'cpu' and torch.cuda.is_available():
+                try:
+                    self.model = self.model.to(self.original_device)
+                    self.device = self.original_device
+                    # Warm-up dummy forward to confirm the model works on GPU again
+                    with torch.no_grad():
+                        _ = self.model.forward_dummy(torch.randn(1, 3, 64, 64).to(self.original_device)) if hasattr(self.model, 'forward_dummy') else None
+                    print("Successfully moved HRNetV2 model back to GPU")
+                except Exception as move_err:
+                    # If moving back fails, keep using CPU
+                    print(f"Failed to move model back to GPU: {move_err}. Continuing on CPU.")
+                    
         except Exception as e:
             print(f"Complete inference failure: {e}")
             # Return zero predictions if all inference attempts fail

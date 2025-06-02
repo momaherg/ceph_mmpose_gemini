@@ -43,7 +43,7 @@ def test_dataset_loading():
     config = {
         'data_file': "/content/drive/MyDrive/Lala's Masters/train_data_pure_old_numpy.json",
         'hrnet_config': "Pretrained_model/hrnetv2_w18_cephalometric_256x256_finetune.py",
-        'hrnet_checkpoint': "work_dirs/hrnetv2_w18_cephalometric_384x384_adaptive_wing_loss_v4/epoch_54.pth",
+        'hrnet_checkpoint': "work_dirs/hrnetv2_w18_cephalometric_384x384_adaptive_wing_loss_v4/epoch_5.pth",
         'input_size': 384,
     }
     
