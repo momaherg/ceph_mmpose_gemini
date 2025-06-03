@@ -29,6 +29,22 @@ def safe_torch_load(*args, **kwargs):
     return _original_torch_load(*args, **kwargs)
 torch.load = safe_torch_load
 
+def load_model_from_checkpoint(checkpoint_path, device='cuda:0'):
+    """Load model using the config stored in the checkpoint."""
+    checkpoint = torch.load(checkpoint_path, map_location='cpu')
+    
+    # Get config from checkpoint meta
+    if 'meta' in checkpoint and 'config' in checkpoint['meta']:
+        cfg = Config(checkpoint['meta']['config'])
+    else:
+        # Fallback to external config if meta config not available
+        config_path = "Pretrained_model/hrnetv2_w18_cephalometric_256x256_finetune.py"
+        cfg = Config.fromfile(config_path)
+    
+    # Initialize model
+    model = init_model(cfg, checkpoint_path, device=device)
+    return model
+
 def compute_mre_simple(pred_keypoints_list, gt_keypoints_list):
     """Compute simple MRE statistics for quick comparison."""
     all_errors = []
@@ -232,8 +248,8 @@ def main():
     print("="*60)
     
     # Load model using checkpoint's internal config (preserves original test_cfg)
-    model_baseline = init_model(None, checkpoint_path, 
-                               device='cuda:0' if torch.cuda.is_available() else 'cpu')
+    model_baseline = load_model_from_checkpoint(checkpoint_path, 
+                                               device='cuda:0' if torch.cuda.is_available() else 'cpu')
     
     # Print the config being used
     print(f"Baseline test_cfg: {model_baseline.cfg.model.get('test_cfg', 'None')}")
@@ -280,8 +296,8 @@ def main():
     print("="*60)
     
     # Load model and enable DARK
-    model_dark = init_model(None, checkpoint_path,
-                           device='cuda:0' if torch.cuda.is_available() else 'cpu')
+    model_dark = load_model_from_checkpoint(checkpoint_path,
+                                           device='cuda:0' if torch.cuda.is_available() else 'cpu')
     
     # Properly enable DARK while preserving other settings
     if hasattr(model_dark.cfg.model, 'test_cfg') and model_dark.cfg.model.test_cfg is not None:
@@ -326,8 +342,8 @@ def main():
     print("="*60)
     
     # Load model and enable DARK + flip test
-    model_flip = init_model(None, checkpoint_path,
-                           device='cuda:0' if torch.cuda.is_available() else 'cpu')
+    model_flip = load_model_from_checkpoint(checkpoint_path,
+                                           device='cuda:0' if torch.cuda.is_available() else 'cpu')
     
     if hasattr(model_flip.cfg.model, 'test_cfg') and model_flip.cfg.model.test_cfg is not None:
         model_flip.cfg.model.test_cfg.use_dark = True
