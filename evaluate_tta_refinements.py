@@ -292,7 +292,7 @@ def main():
     cfg = Config.fromfile(config_path)
     
     # Find the best checkpoint
-    checkpoint_pattern = os.path.join(work_dir, "epoch_54.pth")
+    checkpoint_pattern = os.path.join(work_dir, "best_NME_epoch_*.pth")
     checkpoints = glob.glob(checkpoint_pattern)
     
     if not checkpoints:
