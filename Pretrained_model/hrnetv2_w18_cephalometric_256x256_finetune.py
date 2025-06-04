@@ -33,11 +33,19 @@ codec = dict(
 model = dict(
     head=dict(
         out_channels=19, # Ensure this matches your dataset's keypoint count
-        loss=dict(  # main loss
+        loss=[
+            dict(  # main loss
                 type='AdaptiveWingLoss',
                 alpha=2.1,  omega=24., epsilon=1., theta=0.5,
-                use_target_weight=False, loss_weight=1.0)
-            
+                use_target_weight=False, # Kept as per original config
+                loss_weight=1.0),
+            dict( # OHKM loss for specific difficult keypoints
+                type='KeypointOHKMMSELoss',
+                topk=4,
+                loss_weight=0.3, # Weight for this specific loss component
+                # select_indices=[0, 9, 10, 4] # Sella, PNS, Gonion, upper_1_tip
+            )
+        ]
     )
     # The rest of the model (backbone, neck, data_preprocessor, test_cfg)
     # can be inherited or slightly adjusted if needed.
