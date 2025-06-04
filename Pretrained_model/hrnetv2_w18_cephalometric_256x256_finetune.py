@@ -2,7 +2,7 @@ _base_ = ['./td-hm_hrnetv2-w18_8xb64-60e_aflw-256x256.py'] # Inherit from origin
 
 # Fine-tuning specific
 load_from = 'Pretrained_model/hrnetv2_w18_aflw_256x256-f2bbc62b_20210125.pth'
-train_cfg = dict(by_epoch=True, max_epochs=60, val_interval=2) # Longer training with less frequent validation
+train_cfg = dict(by_epoch=True, max_epochs=100, val_interval=2) # Extended training: 60 -> 100 epochs
 
 # Improved optimizer settings with cosine annealing
 optim_wrapper = dict(
@@ -14,7 +14,7 @@ optim_wrapper = dict(
 # Learning rate scheduler with warm-up and cosine annealing  
 param_scheduler = [
     dict(type='LinearLR', begin=0, end=500, start_factor=1e-3, by_epoch=False),  # Warm-up
-    dict(type='CosineAnnealingLR', T_max=60, eta_min=1e-6, by_epoch=True)  # Cosine annealing
+    dict(type='CosineAnnealingLR', T_max=100, eta_min=1e-6, by_epoch=True)  # Cosine annealing - updated T_max to match max_epochs
 ]
 
 # Dataset settings

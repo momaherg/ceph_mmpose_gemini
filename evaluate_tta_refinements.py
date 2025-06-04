@@ -53,6 +53,44 @@ def compute_mre_simple(pred_keypoints_list, gt_keypoints_list):
         'p95': np.percentile(all_errors, 95)
     }
 
+def compute_per_landmark_mre(pred_keypoints_list, gt_keypoints_list, landmark_names):
+    """Compute MRE for each landmark separately."""
+    per_landmark_errors = {name: [] for name in landmark_names}
+    
+    for pred_kpts, gt_kpts in zip(pred_keypoints_list, gt_keypoints_list):
+        for i, name in enumerate(landmark_names):
+            if gt_kpts[i, 0] > 0 and gt_kpts[i, 1] > 0:  # Valid landmark
+                error = np.sqrt(np.sum((pred_kpts[i] - gt_kpts[i])**2))
+                per_landmark_errors[name].append(error)
+    
+    # Compute statistics
+    per_landmark_stats = {}
+    for name in landmark_names:
+        errors = np.array(per_landmark_errors[name])
+        if len(errors) > 0:
+            per_landmark_stats[name] = {
+                'mre': np.mean(errors),
+                'std': np.std(errors),
+                'median': np.median(errors),
+                'count': len(errors)
+            }
+        else:
+            per_landmark_stats[name] = {'mre': 0, 'std': 0, 'median': 0, 'count': 0}
+    
+    return per_landmark_stats
+
+def print_per_landmark_stats(per_landmark_stats, landmark_names, title="PER-LANDMARK STATISTICS"):
+    """Print per-landmark statistics in a formatted table."""
+    print("\n" + "="*60)
+    print(title)
+    print("="*60)
+    print(f"{'Index':<6} {'Landmark':<20} {'MRE':<10} {'Std':<10} {'Median':<10}")
+    print("-" * 60)
+    
+    for i, name in enumerate(landmark_names):
+        stats = per_landmark_stats[name]
+        print(f"{i:<6} {name:<20} {stats['mre']:<10.3f} {stats['std']:<10.3f} {stats['median']:<10.3f}")
+
 def rotate_image_and_keypoints(image, keypoints, angle, center=None):
     """Rotate image and keypoints around center."""
     h, w = image.shape[:2]
@@ -334,6 +372,10 @@ def main():
     print(f"\nBASELINE MRE: {baseline_metrics['mre']:.3f} ± {baseline_metrics['std']:.3f} pixels")
     print(f"Median: {baseline_metrics['median']:.3f}, P90: {baseline_metrics['p90']:.3f}, P95: {baseline_metrics['p95']:.3f}")
     
+    # Compute and print per-landmark statistics for baseline
+    baseline_per_landmark = compute_per_landmark_mre(results_baseline['pred'], results_baseline['gt'], landmark_names)
+    print_per_landmark_stats(baseline_per_landmark, landmark_names, "BASELINE PER-LANDMARK STATISTICS")
+    
     # =======================
     # STEP 2: SIMPLE FLIP TEST
     # =======================
@@ -377,6 +419,10 @@ def main():
     improvement_flip = (baseline_metrics['mre'] - flip_metrics['mre']) / baseline_metrics['mre'] * 100
     print(f"Improvement over baseline: {improvement_flip:.1f}%")
     
+    # Compute and print per-landmark statistics for flip test
+    flip_per_landmark = compute_per_landmark_mre(results_flip['pred'], results_flip['gt'], landmark_names)
+    print_per_landmark_stats(flip_per_landmark, landmark_names, "FLIP TEST PER-LANDMARK STATISTICS")
+    
     # =======================
     # STEP 3: MEDIUM TTA
     # =======================
@@ -408,6 +454,10 @@ def main():
     print(f"Median: {medium_metrics['median']:.3f}, P90: {medium_metrics['p90']:.3f}, P95: {medium_metrics['p95']:.3f}")
     improvement_medium = (baseline_metrics['mre'] - medium_metrics['mre']) / baseline_metrics['mre'] * 100
     print(f"Improvement over baseline: {improvement_medium:.1f}%")
+    
+    # Compute and print per-landmark statistics for medium TTA
+    medium_per_landmark = compute_per_landmark_mre(results_medium_tta['pred'], results_medium_tta['gt'], landmark_names)
+    print_per_landmark_stats(medium_per_landmark, landmark_names, "MEDIUM TTA PER-LANDMARK STATISTICS")
     
     # =======================
     # STEP 4: HEAVY TTA
@@ -441,6 +491,10 @@ def main():
     improvement_heavy = (baseline_metrics['mre'] - heavy_metrics['mre']) / baseline_metrics['mre'] * 100
     print(f"Improvement over baseline: {improvement_heavy:.1f}%")
     
+    # Compute and print per-landmark statistics for heavy TTA
+    heavy_per_landmark = compute_per_landmark_mre(results_heavy_tta['pred'], results_heavy_tta['gt'], landmark_names)
+    print_per_landmark_stats(heavy_per_landmark, landmark_names, "HEAVY TTA PER-LANDMARK STATISTICS")
+    
     # =======================
     # SUMMARY
     # =======================
@@ -458,6 +512,7 @@ def main():
     output_dir = os.path.join(work_dir, "tta_refinements")
     os.makedirs(output_dir, exist_ok=True)
     
+    # Save overall summary
     summary_df = pd.DataFrame([
         {'method': 'Baseline', 'mre': baseline_metrics['mre'], 'std': baseline_metrics['std'], 
          'median': baseline_metrics['median'], 'p90': baseline_metrics['p90'], 'p95': baseline_metrics['p95'],
@@ -475,7 +530,28 @@ def main():
     
     summary_path = os.path.join(output_dir, "tta_summary.csv")
     summary_df.to_csv(summary_path, index=False)
-    print(f"\nResults saved to: {summary_path}")
+    print(f"\nOverall results saved to: {summary_path}")
+    
+    # Save per-landmark comparison
+    per_landmark_comparison = []
+    for i, name in enumerate(landmark_names):
+        row = {
+            'landmark_index': i,
+            'landmark_name': name,
+            'baseline_mre': baseline_per_landmark[name]['mre'],
+            'flip_mre': flip_per_landmark[name]['mre'],
+            'medium_tta_mre': medium_per_landmark[name]['mre'],
+            'heavy_tta_mre': heavy_per_landmark[name]['mre'],
+            'baseline_to_flip_improvement': (baseline_per_landmark[name]['mre'] - flip_per_landmark[name]['mre']) / baseline_per_landmark[name]['mre'] * 100 if baseline_per_landmark[name]['mre'] > 0 else 0,
+            'baseline_to_medium_improvement': (baseline_per_landmark[name]['mre'] - medium_per_landmark[name]['mre']) / baseline_per_landmark[name]['mre'] * 100 if baseline_per_landmark[name]['mre'] > 0 else 0,
+            'baseline_to_heavy_improvement': (baseline_per_landmark[name]['mre'] - heavy_per_landmark[name]['mre']) / baseline_per_landmark[name]['mre'] * 100 if baseline_per_landmark[name]['mre'] > 0 else 0
+        }
+        per_landmark_comparison.append(row)
+    
+    per_landmark_df = pd.DataFrame(per_landmark_comparison)
+    per_landmark_path = os.path.join(output_dir, "per_landmark_tta_comparison.csv")
+    per_landmark_df.to_csv(per_landmark_path, index=False)
+    print(f"Per-landmark comparison saved to: {per_landmark_path}")
     
     # Plot improvement graph
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
@@ -516,6 +592,27 @@ def main():
     plot_path = os.path.join(output_dir, "tta_analysis.png")
     plt.savefig(plot_path, dpi=150)
     print(f"Plot saved to: {plot_path}")
+    
+    # Print problematic landmarks analysis
+    print("\n" + "="*80)
+    print("PROBLEMATIC LANDMARKS ANALYSIS (Sella, Gonion, PNS)")
+    print("="*80)
+    problematic_indices = [0, 10, 9]  # Sella, Gonion, PNS
+    problematic_names = ['sella', 'Gonion', 'PNS']
+    
+    print(f"{'Landmark':<15} {'Baseline':<12} {'Flip':<12} {'Medium TTA':<12} {'Heavy TTA':<12} {'Best Improvement':<20}")
+    print("-" * 85)
+    
+    for idx, name in zip(problematic_indices, problematic_names):
+        landmark = landmark_names[idx]
+        baseline_mre = baseline_per_landmark[landmark]['mre']
+        flip_mre = flip_per_landmark[landmark]['mre']
+        medium_mre = medium_per_landmark[landmark]['mre']
+        heavy_mre = heavy_per_landmark[landmark]['mre']
+        
+        best_improvement = (baseline_mre - heavy_mre) / baseline_mre * 100 if baseline_mre > 0 else 0
+        
+        print(f"{name:<15} {baseline_mre:<12.3f} {flip_mre:<12.3f} {medium_mre:<12.3f} {heavy_mre:<12.3f} {best_improvement:<20.1f}%")
     
     print("\n✅ Test-time augmentation evaluation complete!")
     print(f"🎯 Best MRE: {heavy_metrics['mre']:.3f} pixels (Heavy TTA)")
