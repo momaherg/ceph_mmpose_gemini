@@ -258,7 +258,7 @@ def main():
     checkpoints = glob.glob(checkpoint_pattern)
     
     if not checkpoints:
-        checkpoint_pattern = os.path.join(work_dir, "epoch_*.pth")
+        checkpoint_pattern = os.path.join(work_dir, "epoch_54.pth")
         checkpoints = glob.glob(checkpoint_pattern)
     
     if not checkpoints:
