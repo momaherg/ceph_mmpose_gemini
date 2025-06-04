@@ -1,3 +1,4 @@
+import torch
 import torch.nn as nn
 from mmengine.model import BaseModule
 from mmpose.registry import MODELS # Using MODELS from mmpose.registry
@@ -6,8 +7,9 @@ import warnings # Import warnings module
 @MODELS.register_module()
 class CombinedHeatmapLoss(BaseModule):
     def __init__(self, 
-                 adaptive_wing_cfg, 
-                 ohkm_cfg, 
+                 adaptive_wing_cfg,
+                 ohkm_cfg,
+                 ohkm_target_indices: list[int] | None = None, # Indices for OHKM to target
                  ohkm_loss_weight=0.3,
                  init_cfg=None,
                  **kwargs): # Add **kwargs to catch unexpected arguments
@@ -35,6 +37,7 @@ class CombinedHeatmapLoss(BaseModule):
         
         self.adaptive_wing_loss = MODELS.build(adaptive_wing_cfg)
         self.ohkm_loss = MODELS.build(ohkm_cfg)
+        self.ohkm_target_indices = ohkm_target_indices
         self.ohkm_loss_weight = ohkm_loss_weight
         # The adaptive_wing_loss is assumed to have an effective weight of 1.0 
         # relative to the weighted ohkm_loss. Its own internal 'loss_weight' 
@@ -51,7 +54,26 @@ class CombinedHeatmapLoss(BaseModule):
             torch.Tensor: The combined loss value.
         """
         loss_aw = self.adaptive_wing_loss(pred_heatmaps, gt_heatmaps, keypoint_weights)
-        loss_ohkm = self.ohkm_loss(pred_heatmaps, gt_heatmaps, keypoint_weights)
+
+        keypoint_weights_for_ohkm = keypoint_weights.clone()
+        if self.ohkm_target_indices is not None and keypoint_weights_for_ohkm.ndim == 2:
+            # Create a mask for all keypoints, initially False (don't zero out)
+            # Mask shape will be (num_keypoints,)
+            num_keypoints = keypoint_weights_for_ohkm.size(1)
+            indices_to_zero_out_mask = torch.ones(num_keypoints, dtype=torch.bool, device=keypoint_weights_for_ohkm.device)
+            if self.ohkm_target_indices: # Ensure list is not empty
+                indices_to_zero_out_mask[self.ohkm_target_indices] = False # These should NOT be zeroed out
+            
+            # Apply mask: zero out weights for keypoints not in ohkm_target_indices
+            # The mask is True for columns to zero out
+            keypoint_weights_for_ohkm[:, indices_to_zero_out_mask] = 0.0
+        elif self.ohkm_target_indices is not None:
+             warnings.warn(
+                f"ohkm_target_indices is configured but keypoint_weights has an unexpected dimension: {keypoint_weights_for_ohkm.ndim}. "
+                "Expected 2D (batch_size, num_keypoints). Skipping OHKM target filtering for this batch."
+            )
+
+        loss_ohkm = self.ohkm_loss(pred_heatmaps, gt_heatmaps, keypoint_weights_for_ohkm)
         
         # Ensure the individual losses are scalar tensors before combining.
         # Typically, loss functions in mmpose return a scalar tensor.
