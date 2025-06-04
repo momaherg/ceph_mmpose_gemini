@@ -36,7 +36,7 @@ model = dict(
         loss=dict(  # main loss
                 type='AdaptiveWingLoss',
                 alpha=2.1,  omega=24., epsilon=1., theta=0.5,
-                use_target_weight=True, loss_weight=1.0)
+                use_target_weight=False, loss_weight=1.0)
             
     )
     # The rest of the model (backbone, neck, data_preprocessor, test_cfg)
