@@ -283,7 +283,6 @@ def main():
     import custom_cephalometric_dataset
     import custom_transforms
     import cephalometric_dataset_info
-    import custom_losses
     
     # Configuration
     config_path = "Pretrained_model/hrnetv2_w18_cephalometric_256x256_finetune.py"

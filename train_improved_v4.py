@@ -80,7 +80,6 @@ def main():
         import custom_cephalometric_dataset
         import custom_transforms
         import cephalometric_dataset_info
-        import custom_losses
         print("✓ Custom modules imported successfully")
     except ImportError as e:
         print(f"✗ Failed to import custom modules: {e}")

@@ -33,22 +33,11 @@ codec = dict(
 model = dict(
     head=dict(
         out_channels=19, # Ensure this matches your dataset's keypoint count
-        loss=dict(
-            type='CombinedHeatmapLoss', # Use the custom combined loss
-            adaptive_wing_cfg=dict(
+        loss=dict(  # main loss
                 type='AdaptiveWingLoss',
-                alpha=2.1, omega=24., epsilon=1., theta=0.5,
-                use_target_weight=False,
-                loss_weight=1.0 
-            ),
-            ohkm_cfg=dict(
-                type='KeypointOHKMMSELoss',
-                topk=4,
-                loss_weight=1.0 # Internal weight for OHKMLoss component (actual scaling by CombinedHeatmapLoss.ohkm_loss_weight)
-            ),
-            ohkm_target_indices=[0, 9, 10, 4], # Moved here: Sella, PNS, Gonion, upper_1_tip
-            ohkm_loss_weight=0.3 # Weight for the OHKM component in the sum
-        )
+                alpha=2.1,  omega=24., epsilon=1., theta=0.5,
+                use_target_weight=False, loss_weight=1.0)
+            
     )
     # The rest of the model (backbone, neck, data_preprocessor, test_cfg)
     # can be inherited or slightly adjusted if needed.
