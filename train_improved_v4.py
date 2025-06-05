@@ -70,9 +70,36 @@ class KeypointMixUp(MixImageTransform):
     """
 
     def __init__(self, prob=0.5, lam_beta=1.0):
-        super().__init__()
-        self.prob = prob
+        # The `pre_transform` argument is not needed here because BaseDataset
+        # from mmengine will set it dynamically. We still call super()
+        # to ensure parent class initialization logic is run.
+        super().__init__(prob=prob)
         self.lam_beta = lam_beta
+
+    def _get_mix_results(self):
+        """Get results of another image and apply pre-processing."""
+        # The `get_dataset` method is injected by the `Compose` class in
+        # mmengine. It allows this transform to access the dataset it belongs to.
+        assert hasattr(self, 'get_dataset'), (
+            'The `get_dataset` method is not injected. Please make sure '
+            'this transform is used in a `mmengine.dataset.BaseDataset`.')
+        dataset = self.get_dataset()
+
+        # The `pre_transform` attribute is a `Compose` object that contains
+        # all transforms before this one in the pipeline. It is set by
+        # `BaseDataset` during initialization.
+        assert hasattr(self, 'pre_transform'), (
+            'The `pre_transform` attribute is not set. Please make sure '
+            'this transform is used in a `mmengine.dataset.BaseDataset`.')
+
+        # Get a random index for the sample to mix with.
+        idx = np.random.randint(len(dataset))
+        
+        # Get the data information for the random sample.
+        mix_data_info = dataset.get_data_info(idx)
+
+        # Apply the pre-processing transforms to the random sample.
+        return self.pre_transform(mix_data_info)
 
     def transform(self, results):
         """
