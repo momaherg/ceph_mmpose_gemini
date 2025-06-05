@@ -6,7 +6,7 @@ train_cfg = dict(by_epoch=True, max_epochs=100, val_interval=2) # Extended train
 
 # Improved optimizer settings with cosine annealing
 optim_wrapper = dict(
-    optimizer=dict(type='Adam', lr=3e-4), # Higher starting LR for cosine schedule
+    optimizer=dict(type='Adam', lr=1e-4), # REDUCED from 3e-4 to prevent NaN with FocalHeatmapLoss
     clip_grad=dict(max_norm=5.,  # see next section
                    norm_type=2)
 )
@@ -37,7 +37,7 @@ model = dict(
             type='FocalHeatmapLoss',
             alpha=2,  # Typical value for Focal Loss
             beta=4,   # Typical value for Focal Loss
-            use_target_weight=False, # Crucial for emphasizing difficult landmarks via joint_weights
+            use_target_weight=True, # CRUCIAL: Use joint_weights for difficult landmarks
             loss_weight=1.0
             # skip_empty_channel will use its default (False)
         )
