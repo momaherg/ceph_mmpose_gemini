@@ -6,7 +6,7 @@ train_cfg = dict(by_epoch=True, max_epochs=100, val_interval=2) # Extended train
 
 # Improved optimizer settings with cosine annealing
 optim_wrapper = dict(
-    optimizer=dict(type='Adam', lr=1e-4), # REDUCED from 3e-4 to prevent NaN with FocalHeatmapLoss
+    optimizer=dict(type='Adam', lr=3e-4), # Higher starting LR for cosine schedule
     clip_grad=dict(max_norm=5.,  # see next section
                    norm_type=2)
 )
@@ -34,12 +34,20 @@ model = dict(
     head=dict(
         out_channels=19, # Ensure this matches your dataset's keypoint count
         loss=dict(
-            type='FocalHeatmapLoss',
-            alpha=2,  # Typical value for Focal Loss
-            beta=4,   # Typical value for Focal Loss
-            use_target_weight=True, # CRUCIAL: Use joint_weights for difficult landmarks
-            loss_weight=1.0
-            # skip_empty_channel will use its default (False)
+            type='CombinedHeatmapLoss', # Use the custom combined loss
+            adaptive_wing_cfg=dict(
+                type='AdaptiveWingLoss',
+                alpha=2.1, omega=24., epsilon=1., theta=0.5,
+                use_target_weight=False,
+                loss_weight=1.0 
+            ),
+            ohkm_cfg=dict(
+                type='KeypointOHKMMSELoss',
+                topk=4,
+                loss_weight=1.0 # Internal weight for OHKMLoss component (actual scaling by CombinedHeatmapLoss.ohkm_loss_weight)
+            ),
+            ohkm_target_indices=[0, 9, 10, 4], # Moved here: Sella, PNS, Gonion, upper_1_tip
+            ohkm_loss_weight=0.3 # Weight for the OHKM component in the sum
         )
     )
     # The rest of the model (backbone, neck, data_preprocessor, test_cfg)
