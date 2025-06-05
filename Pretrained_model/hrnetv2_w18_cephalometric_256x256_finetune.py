@@ -37,7 +37,7 @@ model = dict(
             type='FocalHeatmapLoss',
             alpha=2,  # Typical value for Focal Loss
             beta=4,   # Typical value for Focal Loss
-            use_target_weight=True, # Crucial for emphasizing difficult landmarks via joint_weights
+            use_target_weight=False, # Crucial for emphasizing difficult landmarks via joint_weights
             loss_weight=1.0
             # skip_empty_channel will use its default (False)
         )
