@@ -17,7 +17,7 @@ import matplotlib.pyplot as plt
 
 # Custom transform imports
 from mmpose.registry import TRANSFORMS
-from mmpose.datasets.transforms.mix_image import MixImageTransform
+from mmpose.datasets.transforms.mix_img_transforms import MixImageTransform
 import cv2
 
 # Suppress warnings
