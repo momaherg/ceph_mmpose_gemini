@@ -19,6 +19,7 @@ import matplotlib.pyplot as plt
 from mmpose.registry import TRANSFORMS
 from mmpose.datasets.transforms.mix_img_transforms import MixImageTransform
 import cv2
+from mmengine.dataset import Compose
 
 # Suppress warnings
 warnings.filterwarnings('ignore')
@@ -338,6 +339,33 @@ def main():
         print("="*70)
         
         runner = Runner.from_cfg(cfg)
+        
+        # --- MANUAL INJECTION FOR KeypointMixUp ---
+        # This is a workaround because the custom dataset might use an older
+        # mmcv.Compose pipeline that doesn't automatically inject the necessary
+        # `get_dataset` and `pre_transform` attributes into MixImageTransforms.
+        try:
+            train_dataset = runner.train_dataloader.dataset
+            keypoint_mixup_idx = -1
+            for i, transform in enumerate(train_dataset.pipeline.transforms):
+                if isinstance(transform, KeypointMixUp):
+                    keypoint_mixup_idx = i
+                    break
+
+            if keypoint_mixup_idx != -1:
+                print("Manually injecting dependencies into KeypointMixUp transform...")
+                mixup_transform = train_dataset.pipeline.transforms[keypoint_mixup_idx]
+
+                # 1. Inject the dataset accessor
+                mixup_transform.get_dataset = lambda: train_dataset
+
+                # 2. Build and inject the pre_transform Compose object
+                pre_transforms = train_dataset.pipeline.transforms[:keypoint_mixup_idx]
+                mixup_transform.pre_transform = Compose(pre_transforms)
+                print("Injection complete.")
+        except Exception as e:
+            print(f"WARNING: Could not manually inject dependencies for KeypointMixUp: {e}")
+        # --- END MANUAL INJECTION ---
         
         # Enhanced monitoring message
         print("🎯 Training with major upgrades in progress...")
