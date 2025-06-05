@@ -55,6 +55,7 @@ train_pipeline = [
         rotate_factor=30, # Increased rotation for better generalization
         scale_factor=(0.7, 1.3)), # Wider scale range
     dict(type='TopdownAffine', input_size=codec['input_size']), # Now uses 384x384
+    dict(type='KeypointMixUp', prob=0.75, lam_beta=1.0),
     dict(type='GenerateTarget', encoder=codec),
     dict(type='CustomPackPoseInputs', meta_keys=('id', 'img_id', 'img_path', 'ori_shape', 'img_shape', 'bbox', 'bbox_scores', 'flip_indices', 'center', 'scale', 'input_center', 'input_scale', 'input_size', 'patient_text_id', 'set', 'class'))
 ]

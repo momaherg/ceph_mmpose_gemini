@@ -15,6 +15,11 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
+# Custom transform imports
+from mmpose.registry import TRANSFORMS
+from mmpose.datasets.transforms.mix_image import MixImageTransform
+import cv2
+
 # Suppress warnings
 warnings.filterwarnings('ignore')
 
@@ -28,6 +33,97 @@ def safe_torch_load(*args, **kwargs):
     return _original_torch_load(*args, **kwargs)
 
 torch.load = safe_torch_load
+
+@TRANSFORMS.register_module()
+class KeypointMixUp(MixImageTransform):
+    """MixUp data augmentation for keypoint detection.
+
+    This transform mixes two images and their corresponding keypoints to
+    enhance dataset diversity and model generalization. It is designed for
+    top-down single-instance pose estimation where each sample has a fixed
+    number of keypoints.
+
+    The mixup process is as follows:
+        1. With a given probability, another random sample is chosen from the
+           dataset.
+        2. A mixing ratio `lambda` is drawn from a Beta distribution.
+        3. The new image is a weighted average of the two images:
+           `lam * img1 + (1 - lam) * img2`.
+        4. The new keypoints are a weighted average of the two keypoint sets:
+           `lam * kpts1 + (1 - lam) * kpts2`. A new keypoint is marked as
+           visible only if it was visible in both source images.
+
+    Required Keys:
+    - img
+    - keypoints
+
+    Modified Keys:
+    - img
+    - keypoints
+
+    Args:
+        prob (float): Probability of applying the mixup transformation.
+            Defaults to 0.5.
+        lam_beta (float): The `alpha` and `beta` parameter for the
+            Beta distribution used to sample the mixing ratio `lambda`.
+            Defaults to 1.0 (uniform distribution).
+    """
+
+    def __init__(self, prob=0.5, lam_beta=1.0):
+        super().__init__()
+        self.prob = prob
+        self.lam_beta = lam_beta
+
+    def transform(self, results):
+        """
+        Args:
+            results (dict): The results dict.
+
+        Returns:
+            dict: The results dict with mixup applied.
+        """
+        if np.random.rand() > self.prob:
+            return results
+
+        # Get another random sample processed by the same pipeline
+        # up to this transform.
+        mix_results = self._get_mix_results()
+        if mix_results is None:
+            return results
+
+        img1 = results['img']
+        kpts1 = results['keypoints']
+
+        img2 = mix_results['img']
+        kpts2 = mix_results['keypoints']
+
+        # The pipeline should ensure images are the same size,
+        # especially if placed after a resize transform like TopdownAffine.
+        assert img1.shape == img2.shape, (
+            'Images for MixUp must have the same shape. '
+            f'Got {img1.shape} and {img2.shape}')
+
+        # Mixup
+        lam = np.random.beta(self.lam_beta, self.lam_beta)
+
+        # Image mixup
+        results['img'] = cv2.addWeighted(img1, lam, img2, 1 - lam, 0)
+
+        # Keypoint mixup
+        # kpts shape: (num_keypoints, 3) with (x, y, visibility)
+        vis1 = kpts1[:, 2]
+        vis2 = kpts2[:, 2]
+
+        # Mix x, y coordinates
+        new_coords = lam * kpts1[:, :2] + (1 - lam) * kpts2[:, :2]
+
+        # New keypoint is visible only if it was visible in both images
+        new_vis = (vis1 > 0) & (vis2 > 0)
+
+        results['keypoints'] = np.hstack(
+            (new_coords, new_vis[:, np.newaxis].astype(kpts1.dtype)))
+
+        return results
 
 def plot_training_progress(work_dir):
     """Plot training progress from log files."""
