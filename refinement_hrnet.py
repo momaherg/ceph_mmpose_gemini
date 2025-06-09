@@ -5,7 +5,7 @@ from torch import Tensor
 from torchvision.ops import roi_align
 
 from mmpose.registry import MODELS
-from mmpose.models.pose_estimators.topdown import TopDownPoseEstimator
+from mmpose.models.pose_estimators import TopDown
 from mmpose.models.utils.tta import flip_heatmaps
 from mmpose.structures.bbox import get_udp_warp_matrix, get_warp_matrix
 from mmpose.utils.typing import (ConfigType, InstanceList, OptConfigType,
@@ -24,7 +24,7 @@ def _get_heatmaps_max_coords(heatmaps: Tensor) -> Tensor:
 
 
 @MODELS.register_module()
-class RefinementHRNet(TopDownPoseEstimator):
+class RefinementHRNet(TopDown):
     """
     A two-stage HRNet model for landmark detection.
     Stage 1: A standard HRNet predicts coarse heatmaps.
