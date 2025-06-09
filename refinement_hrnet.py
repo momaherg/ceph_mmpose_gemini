@@ -7,7 +7,7 @@ from torchvision.ops import roi_align
 from mmpose.registry import MODELS
 from mmpose.models.pose_estimators import TopdownPoseEstimator
 from mmpose.models.utils.tta import flip_heatmaps
-from mmpose.evaluation.functional import affine_transform
+from mmpose.evaluation.functional.transforms import affine_transform
 from mmpose.structures.bbox import get_udp_warp_matrix, get_warp_matrix
 from mmpose.utils.typing import (ConfigType, InstanceList, OptConfigType,
                                  OptSampleList, PixelDataList, SampleList)
