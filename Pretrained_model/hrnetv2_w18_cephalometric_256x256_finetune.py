@@ -11,18 +11,14 @@ optim_wrapper = dict(
                    norm_type=2)
 )
 
-# Replaced scheduler with OneCycleLR for potentially faster convergence and better generalization
+# Learning rate scheduler with warm-up and step decay
 param_scheduler = [
+    dict(type='LinearLR', begin=0, end=500, start_factor=1e-3, by_epoch=False),  # Warm-up
     dict(
-        type='OneCycleLR',
-        # total_steps will be automatically inferred by the runner based on max_epochs.
-        # The `lr` from the optimizer config is used as the peak learning rate.
-        pct_start=0.3,  # 30% of steps for warm-up, 70% for annealing.
-        anneal_strategy='cos',  # Use a cosine curve for annealing.
-        div_factor=25,  # Determines initial_lr (max_lr / 25).
-        final_div_factor=1e4, # Determines the lowest lr (initial_lr / 10000).
-        by_epoch=False  # The scheduler updates every iteration, not every epoch.
-    )
+        type='MultiStepLR',
+        by_epoch=True,
+        milestones=[70, 90],
+        gamma=0.1)
 ]
 
 # Dataset settings
