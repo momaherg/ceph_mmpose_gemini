@@ -16,7 +16,7 @@ param_scheduler = [
     dict(
         type='OneCycleLR',
         # total_steps will be automatically inferred by the runner based on max_epochs.
-        max_lr=3e-4,  # Corresponds to the optimizer's learning rate.
+        # The `lr` from the optimizer config is used as the peak learning rate.
         pct_start=0.3,  # 30% of steps for warm-up, 70% for annealing.
         anneal_strategy='cos',  # Use a cosine curve for annealing.
         div_factor=25,  # Determines initial_lr (max_lr / 25).
