@@ -262,12 +262,36 @@ class RefinementHRNet(TopdownPoseEstimator):
         # Add the predicted offset to the coarse coordinates
         final_coords_hm = coarse_coords_hm + predicted_offsets_hm
 
-        # Pack predictions into data samples.
-        # The head's decoder handles the transformation from heatmap to image space.
-        pred_instances_list = self.head.decode(final_coords_hm)
+        # Manually transform refined coordinates from heatmap space to image space
+        batch_size, num_kpts, _ = final_coords_hm.shape
+        heatmap_size = base_heatmaps.shape[2:]
 
-        # Update data samples with the refined predictions
         for i, data_sample in enumerate(data_samples):
-            data_sample.pred_instances = pred_instances_list[i]
+            # Get transform parameters from metainfo
+            center = data_sample.metainfo['input_center']
+            scale = data_sample.metainfo['input_scale']
+            rot = data_sample.metainfo.get('bbox_rotation', 0.0)
+
+            # Get inverse affine transform matrix
+            trans = get_warp_matrix(
+                center=center,
+                scale=scale,
+                rot=rot,
+                output_size=heatmap_size,
+                inv=True)
+
+            # Apply inverse transform to get coordinates in original image space
+            coords_hm_i = final_coords_hm[i].cpu().numpy()
+            coords_homo = np.concatenate(
+                (coords_hm_i, np.ones((num_kpts, 1))), axis=1)
+            coords_img = (trans @ coords_homo.T).T[:, :2]
+
+            # Get scores from the max value in the coarse heatmaps
+            scores = torch.amax(
+                base_heatmaps[i].view(num_kpts, -1), dim=1).cpu().numpy()
+
+            # Pack results into the data_sample
+            data_sample.pred_instances.keypoints = coords_img
+            data_sample.pred_instances.keypoint_scores = scores
 
         return data_samples 
