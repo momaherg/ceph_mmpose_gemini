@@ -291,10 +291,10 @@ class RefinementHRNet(TopdownPoseEstimator):
             scores = torch.amax(
                 base_heatmaps[i].view(num_kpts, -1), dim=1).cpu().numpy()
 
-            # Pack results into a new InstanceData object
+            # Pack results into a new InstanceData object, adding the instance dimension
             pred_instances = InstanceData()
-            pred_instances.keypoints = coords_img
-            pred_instances.keypoint_scores = scores
+            pred_instances.keypoints = np.expand_dims(coords_img, axis=0) # Shape: (1, K, 2)
+            pred_instances.keypoint_scores = np.expand_dims(scores, axis=0) # Shape: (1, K)
             
             # Set the pred_instances attribute of the data_sample
             data_sample.pred_instances = pred_instances
