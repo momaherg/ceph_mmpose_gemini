@@ -24,7 +24,7 @@ def _get_heatmaps_max_coords(heatmaps: Tensor) -> Tensor:
 
 
 @MODELS.register_module()
-class RefinementHRNet(TopDown):
+class RefinementHRNet(TopdownPoseEstimator):
     """
     A two-stage HRNet model for landmark detection.
     Stage 1: A standard HRNet predicts coarse heatmaps.
