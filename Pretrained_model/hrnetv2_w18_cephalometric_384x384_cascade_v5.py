@@ -28,11 +28,10 @@ model = dict(
     # --- Refinement Head (Stage 2) ---
     refine_head=dict(
         type='RegressionHead',
-        # The input to the head is flattened feature patches. The size is C * H * W.
-        # The error indicates the feature size is 1024 (from 1x32x32 patches).
-        # We set in_channels to match the feature size from the error to fix the mismatch.
-        in_channels=1024,
-        num_joints=19,
+        # Input features are C*H*W = 18 * 32 * 32 = 18432 from the feature patches
+        in_channels=18432,
+        # The head refines one keypoint at a time from its patch, so num_joints is 1
+        num_joints=1,
         loss=dict(type='MSELoss', use_target_weight=True, loss_weight=1.0),
         decoder=dict(
             type='RegressionLabel',
