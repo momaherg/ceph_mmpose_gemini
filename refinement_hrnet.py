@@ -124,8 +124,10 @@ class RefinementHRNet(TopdownPoseEstimator):
             rot = data_sample.metainfo.get('bbox_rotation', 0.0)
 
             # Get the ground-truth keypoints (in original image space)
-            # This array is (num_kpts, 3) with (x, y, visibility)
+            # This array is (num_kpts, 2) containing x, y coordinates
             gt_kpts_img = data_sample.gt_instances.keypoints[0]
+            # Keypoint weights (visibility) are stored in a separate array
+            keypoint_weights = data_sample.gt_instances.keypoints_visible[0]
 
             # Get the 2x3 affine transformation matrix
             trans = get_warp_matrix(
@@ -144,8 +146,6 @@ class RefinementHRNet(TopdownPoseEstimator):
             batch_gt_coords_hm.append(
                 torch.from_numpy(gt_coords_hm).to(coarse_coords.device))
             
-            # Extract keypoint weights (visibility) from the 3rd column
-            keypoint_weights = gt_kpts_img[:, 2]
             batch_keypoint_weights.append(
                 torch.from_numpy(keypoint_weights).to(coarse_coords.device))
 
