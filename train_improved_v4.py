@@ -15,12 +15,6 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
-# Custom transform imports
-from mmpose.registry import TRANSFORMS
-from mmpose.datasets.transforms.mix_img_transforms import MixImageTransform
-import cv2
-from mmengine.dataset import Compose
-
 # Suppress warnings
 warnings.filterwarnings('ignore')
 
@@ -34,124 +28,6 @@ def safe_torch_load(*args, **kwargs):
     return _original_torch_load(*args, **kwargs)
 
 torch.load = safe_torch_load
-
-@TRANSFORMS.register_module()
-class KeypointMixUp(MixImageTransform):
-    """MixUp data augmentation for keypoint detection.
-
-    This transform mixes two images and their corresponding keypoints to
-    enhance dataset diversity and model generalization. It is designed for
-    top-down single-instance pose estimation where each sample has a fixed
-    number of keypoints.
-
-    The mixup process is as follows:
-        1. With a given probability, another random sample is chosen from the
-           dataset.
-        2. A mixing ratio `lambda` is drawn from a Beta distribution.
-        3. The new image is a weighted average of the two images:
-           `lam * img1 + (1 - lam) * img2`.
-        4. The new keypoints are a weighted average of the two keypoint sets:
-           `lam * kpts1 + (1 - lam) * kpts2`. A new keypoint is marked as
-           visible only if it was visible in both source images.
-
-    Required Keys:
-    - img
-    - keypoints
-
-    Modified Keys:
-    - img
-    - keypoints
-
-    Args:
-        prob (float): Probability of applying the mixup transformation.
-            Defaults to 0.5.
-        lam_beta (float): The `alpha` and `beta` parameter for the
-            Beta distribution used to sample the mixing ratio `lambda`.
-            Defaults to 1.0 (uniform distribution).
-    """
-
-    def __init__(self, prob=0.5, lam_beta=1.0):
-        # The `pre_transform` argument is not needed here because BaseDataset
-        # from mmengine will set it dynamically. We still call super()
-        # to ensure parent class initialization logic is run.
-        super().__init__(prob=prob)
-        self.lam_beta = lam_beta
-
-    def _get_mix_results(self):
-        """Get results of another image and apply pre-processing."""
-        # The `get_dataset` method is injected by the `Compose` class in
-        # mmengine. It allows this transform to access the dataset it belongs to.
-        assert hasattr(self, 'get_dataset'), (
-            'The `get_dataset` method is not injected. Please make sure '
-            'this transform is used in a `mmengine.dataset.BaseDataset`.')
-        dataset = self.get_dataset()
-
-        # The `pre_transform` attribute is a `Compose` object that contains
-        # all transforms before this one in the pipeline. It is set by
-        # `BaseDataset` during initialization.
-        assert hasattr(self, 'pre_transform'), (
-            'The `pre_transform` attribute is not set. Please make sure '
-            'this transform is used in a `mmengine.dataset.BaseDataset`.')
-
-        # Get a random index for the sample to mix with.
-        idx = np.random.randint(len(dataset))
-        
-        # Get the data information for the random sample.
-        mix_data_info = dataset.get_data_info(idx)
-
-        # Apply the pre-processing transforms to the random sample.
-        return self.pre_transform(mix_data_info)
-
-    def transform(self, results):
-        """
-        Args:
-            results (dict): The results dict.
-
-        Returns:
-            dict: The results dict with mixup applied.
-        """
-        if np.random.rand() > self.prob:
-            return results
-
-        # Get another random sample processed by the same pipeline
-        # up to this transform.
-        mix_results = self._get_mix_results()
-        if mix_results is None:
-            return results
-
-        img1 = results['img']
-        kpts1 = results['keypoints']
-
-        img2 = mix_results['img']
-        kpts2 = mix_results['keypoints']
-
-        # The pipeline should ensure images are the same size,
-        # especially if placed after a resize transform like TopdownAffine.
-        assert img1.shape == img2.shape, (
-            'Images for MixUp must have the same shape. '
-            f'Got {img1.shape} and {img2.shape}')
-
-        # Mixup
-        lam = np.random.beta(self.lam_beta, self.lam_beta)
-
-        # Image mixup
-        results['img'] = cv2.addWeighted(img1, lam, img2, 1 - lam, 0)
-
-        # Keypoint mixup
-        # kpts shape: (num_keypoints, 3) with (x, y, visibility)
-        vis1 = kpts1[:, 2]
-        vis2 = kpts2[:, 2]
-
-        # Mix x, y coordinates
-        new_coords = lam * kpts1[:, :2] + (1 - lam) * kpts2[:, :2]
-
-        # New keypoint is visible only if it was visible in both images
-        new_vis = (vis1 > 0) & (vis2 > 0)
-
-        results['keypoints'] = np.hstack(
-            (new_coords, new_vis[:, np.newaxis].astype(kpts1.dtype)))
-
-        return results
 
 def plot_training_progress(work_dir):
     """Plot training progress from log files."""
@@ -339,33 +215,6 @@ def main():
         print("="*70)
         
         runner = Runner.from_cfg(cfg)
-        
-        # --- MANUAL INJECTION FOR KeypointMixUp ---
-        # This is a workaround because the custom dataset might use an older
-        # mmcv.Compose pipeline that doesn't automatically inject the necessary
-        # `get_dataset` and `pre_transform` attributes into MixImageTransforms.
-        try:
-            train_dataset = runner.train_dataloader.dataset
-            keypoint_mixup_idx = -1
-            for i, transform in enumerate(train_dataset.pipeline.transforms):
-                if isinstance(transform, KeypointMixUp):
-                    keypoint_mixup_idx = i
-                    break
-
-            if keypoint_mixup_idx != -1:
-                print("Manually injecting dependencies into KeypointMixUp transform...")
-                mixup_transform = train_dataset.pipeline.transforms[keypoint_mixup_idx]
-
-                # 1. Inject the dataset accessor
-                mixup_transform.get_dataset = lambda: train_dataset
-
-                # 2. Build and inject the pre_transform Compose object
-                pre_transforms = train_dataset.pipeline.transforms[:keypoint_mixup_idx]
-                mixup_transform.pre_transform = Compose(pre_transforms)
-                print("Injection complete.")
-        except Exception as e:
-            print(f"WARNING: Could not manually inject dependencies for KeypointMixUp: {e}")
-        # --- END MANUAL INJECTION ---
         
         # Enhanced monitoring message
         print("🎯 Training with major upgrades in progress...")
