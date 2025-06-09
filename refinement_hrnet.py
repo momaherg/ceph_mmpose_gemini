@@ -7,6 +7,7 @@ from torchvision.ops import roi_align
 from mmpose.registry import MODELS
 from mmpose.models.pose_estimators import TopdownPoseEstimator
 from mmpose.models.utils.tta import flip_heatmaps
+from mmpose.models.utils.transform import affine_transform
 from mmpose.structures.bbox import get_udp_warp_matrix, get_warp_matrix
 from mmpose.utils.typing import (ConfigType, InstanceList, OptConfigType,
                                  OptSampleList, PixelDataList, SampleList)
@@ -79,16 +80,16 @@ class RefinementHRNet(TopdownPoseEstimator):
             # Find the peak coordinates from these coarse heatmaps
             coarse_coords = _get_heatmaps_max_coords(base_heatmaps)
             
-            # Normalize coarse coordinates to [0, 1] for RoI Align
-            heatmap_size = base_heatmaps.shape[2:]
-            coarse_coords_normalized = coarse_coords / torch.tensor(
-                [heatmap_size[1], heatmap_size[0]],
-                device=coarse_coords.device, dtype=torch.float32)
-
         # Extract feature patches using RoI Align
         feature_map = features[0] # Highest-resolution features
-        box_centers = coarse_coords_normalized
         
+        # Normalize coarse coordinates to [0, 1] for RoI Align
+        heatmap_size = base_heatmaps.shape[2:]
+        coarse_coords_normalized = coarse_coords / torch.tensor(
+            [heatmap_size[1], heatmap_size[0]],
+            device=coarse_coords.device, dtype=torch.float32)
+
+        box_centers = coarse_coords_normalized
         patch_size_norm_w = self.patch_size[1] / feature_map.shape[3]
         patch_size_norm_h = self.patch_size[0] / feature_map.shape[2]
         
@@ -112,16 +113,31 @@ class RefinementHRNet(TopdownPoseEstimator):
         )
 
         # --- Prepare targets for the refinement loss ---
-        # Get ground-truth coordinates by finding the peak of the GT heatmaps
-        gt_heatmaps = torch.stack([d.gt_instance_labels.heatmaps for d in data_samples])
-        gt_coords = _get_heatmaps_max_coords(gt_heatmaps)
+        # Manually transform GT keypoints from image space to heatmap space
+        # This is more robust than trying to get coordinates from GT heatmaps
+        batch_gt_coords_hm = []
+        for data_sample in data_samples:
+            # Assuming one instance per image
+            gt_kpts_img = data_sample.gt_instances.keypoints[0]
+            center = data_sample.metainfo['input_center']
+            scale = data_sample.metainfo['input_scale']
+            
+            gt_coords_hm = affine_transform(gt_kpts_img, center, scale,
+                                            heatmap_size)
+            batch_gt_coords_hm.append(
+                torch.from_numpy(gt_coords_hm).to(coarse_coords.device))
+        
+        gt_coords = torch.stack(batch_gt_coords_hm)
         
         # The target is the offset from the coarse prediction to the ground truth
         refine_targets = gt_coords - coarse_coords
         
         # Reshape targets and weights for the loss function
         refine_targets_flat = refine_targets.view(batch_size * num_kpts, 2)
-        keypoint_weights = torch.stack([d.gt_instance_labels.keypoint_weights for d in data_samples])
+        
+        # Get weights from gt_instances
+        keypoint_weights = torch.stack(
+            [d.gt_instances.keypoint_weights[0] for d in data_samples])
         keypoint_weights_flat = keypoint_weights.view(batch_size * num_kpts, 1)
 
         # --- Run refinement head and calculate loss ---
