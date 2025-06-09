@@ -3,12 +3,12 @@ from typing import Dict, Optional
 import torch
 from torch import Tensor
 from torchvision.ops import roi_align
+import numpy as np
 
 from mmpose.registry import MODELS
 from mmpose.models.pose_estimators import TopdownPoseEstimator
 from mmpose.models.utils.tta import flip_heatmaps
-from mmpose.datasets.transforms.common import affine_transform
-from mmpose.structures.bbox import get_udp_warp_matrix, get_warp_matrix
+from mmpose.structures.bbox import get_warp_matrix
 from mmpose.utils.typing import (ConfigType, InstanceList, OptConfigType,
                                  OptSampleList, PixelDataList, SampleList)
 
@@ -114,19 +114,34 @@ class RefinementHRNet(TopdownPoseEstimator):
 
         # --- Prepare targets for the refinement loss ---
         # Manually transform GT keypoints from image space to heatmap space
-        # This is more robust than trying to get coordinates from GT heatmaps
+        # using the same affine transformation logic as the data pipeline.
         batch_gt_coords_hm = []
         for data_sample in data_samples:
-            # Assuming one instance per image
-            gt_kpts_img = data_sample.gt_instances.keypoints[0]
+            # Get transform parameters from metainfo
             center = data_sample.metainfo['input_center']
             scale = data_sample.metainfo['input_scale']
-            
-            gt_coords_hm = affine_transform(gt_kpts_img, center, scale,
-                                            heatmap_size)
+            rot = data_sample.metainfo.get('bbox_rotation', 0.0)
+
+            # Get the ground-truth keypoints (in original image space)
+            gt_kpts_img = data_sample.gt_instances.keypoints[0]
+
+            # Get the 2x3 affine transformation matrix
+            trans = get_warp_matrix(
+                center=center,
+                scale=scale,
+                rot=rot,
+                output_size=heatmap_size,
+                inv=False)
+
+            # Apply the transform to GT keypoints to get them in heatmap space
+            gt_kpts_xy = gt_kpts_img[:, :2]
+            gt_kpts_homogeneous = np.concatenate(
+                (gt_kpts_xy, np.ones((gt_kpts_xy.shape[0], 1))), axis=1)
+            gt_coords_hm = (trans @ gt_kpts_homogeneous.T).T
+
             batch_gt_coords_hm.append(
                 torch.from_numpy(gt_coords_hm).to(coarse_coords.device))
-        
+
         gt_coords = torch.stack(batch_gt_coords_hm)
         
         # The target is the offset from the coarse prediction to the ground truth
