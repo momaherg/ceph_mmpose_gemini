@@ -77,7 +77,8 @@ class RefinementHRNet(TopdownPoseEstimator):
             self.refine_head = MODELS.build(refine_head)
         else:
             # Fallback to a simple offset regression head
-            self.refine_head = OffsetRegressionHead(in_channels=backbone['extra']['stage2']['num_channels'][0] if isinstance(backbone, dict) else 18)
+            # For HRNetV2-w18 with concatenated features: 18+36+72+144=270 channels
+            self.refine_head = OffsetRegressionHead(in_channels=270)
         
         # refinement stage config
         self.patch_size = (32, 32) # Must match decoder input_size in config

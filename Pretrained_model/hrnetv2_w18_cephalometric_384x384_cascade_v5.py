@@ -26,19 +26,20 @@ model = dict(
     # and will have their weights loaded from the `load_from` checkpoint.
 
     # --- Refinement Head (Stage 2) ---
-    refine_head=dict(
-        type='RegressionHead',
-        in_channels=18,  # HRNetV2-w18 has 18 channels at the highest resolution feature map
-        num_joints=19,
-        loss=dict(type='MSELoss', use_target_weight=True, loss_weight=1.0),
-        decoder=dict(
-            type='RegressionLabel',
-            # This is the input size of the *feature patch* given to the refine head.
-            # It must match `patch_size` in the `RefinementHRNet` model implementation.
-            # This fixes the TypeError.
-            input_size=(32, 32),
-        )
-    )
+    # Commented out to use the built-in OffsetRegressionHead
+    # refine_head=dict(
+    #     type='RegressionHead',
+    #     in_channels=18,  # HRNetV2-w18 has 18 channels at the highest resolution feature map
+    #     num_joints=19,
+    #     loss=dict(type='MSELoss', use_target_weight=True, loss_weight=1.0),
+    #     decoder=dict(
+    #         type='RegressionLabel',
+    #         # This is the input size of the *feature patch* given to the refine head.
+    #         # It must match `patch_size` in the `RefinementHRNet` model implementation.
+    #         # This fixes the TypeError.
+    #         input_size=(32, 32),
+    #     )
+    # )
 )
 
 # Keep the same datasets, pipelines, and evaluators from the base config 
