@@ -28,7 +28,10 @@ model = dict(
     # --- Refinement Head (Stage 2) ---
     refine_head=dict(
         type='RegressionHead',
-        in_channels=18,  # HRNetV2-w18 has 18 channels at the highest resolution feature map
+        # The input to the head is flattened feature patches. The size is C * H * W.
+        # The error indicates the feature size is 1024 (from 1x32x32 patches).
+        # We set in_channels to match the feature size from the error to fix the mismatch.
+        in_channels=1024,
         num_joints=19,
         loss=dict(type='MSELoss', use_target_weight=True, loss_weight=1.0),
         decoder=dict(
