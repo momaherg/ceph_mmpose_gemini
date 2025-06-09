@@ -5,7 +5,7 @@ from torch import Tensor
 from torchvision.ops import roi_align
 
 from mmpose.registry import MODELS
-from mmpose.models.pose_estimators import TopDown
+from mmpose.models.pose_estimators import TopdownPoseEstimator
 from mmpose.models.utils.tta import flip_heatmaps
 from mmpose.structures.bbox import get_udp_warp_matrix, get_warp_matrix
 from mmpose.utils.typing import (ConfigType, InstanceList, OptConfigType,
