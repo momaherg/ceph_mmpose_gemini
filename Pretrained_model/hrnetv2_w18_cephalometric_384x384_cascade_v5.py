@@ -28,10 +28,8 @@ model = dict(
     # --- Refinement Head (Stage 2) ---
     refine_head=dict(
         type='RegressionHead',
-        # Input features are C*H*W = 18 * 32 * 32 = 18432 from the feature patches
-        in_channels=18432,
-        # The head refines one keypoint at a time from its patch, so num_joints is 1
-        num_joints=1,
+        in_channels=18,  # HRNetV2-w18 has 18 channels at the highest resolution feature map
+        num_joints=19,
         loss=dict(type='MSELoss', use_target_weight=True, loss_weight=1.0),
         decoder=dict(
             type='RegressionLabel',

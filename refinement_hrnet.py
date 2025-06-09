@@ -4,6 +4,8 @@ import torch
 from torch import Tensor
 from torchvision.ops import roi_align
 import numpy as np
+import torch.nn as nn
+import torch.nn.functional as F
 
 from mmpose.registry import MODELS
 from mmpose.models.pose_estimators import TopdownPoseEstimator
@@ -23,6 +25,32 @@ def _get_heatmaps_max_coords(heatmaps: Tensor) -> Tensor:
     
     return torch.cat((x_coords, y_coords), dim=2)
 
+
+class OffsetRegressionHead(nn.Module):
+    """A lightweight regression head that predicts (dx, dy) offsets from a
+    spatial feature patch. It performs global average pooling followed by two
+    fully connected layers.
+    """
+    def __init__(self, in_channels: int = 18, hidden_dim: int = 128):
+        super().__init__()
+        self.pool = nn.AdaptiveAvgPool2d(1)  # (B, C, 1, 1)
+        self.fc1 = nn.Linear(in_channels, hidden_dim)
+        self.relu = nn.ReLU(inplace=True)
+        self.fc2 = nn.Linear(hidden_dim, 2)  # dx, dy
+
+    def forward(self, x):
+        # x: (B, C, H, W)
+        x = self.pool(x).flatten(1)  # (B, C)
+        x = self.relu(self.fc1(x))   # (B, hidden_dim)
+        offsets = self.fc2(x)        # (B, 2)
+        return offsets
+
+    def loss(self, pred_offsets: Tensor, tgt_offsets: Tensor, weight: Tensor) -> Tensor:
+        # weight shape (B, 1) or (B,) -> broadcast to 2 dims
+        if weight.dim() == 1:
+            weight = weight.unsqueeze(1)
+        loss = F.mse_loss(pred_offsets * weight, tgt_offsets * weight, reduction='mean')
+        return loss
 
 @MODELS.register_module()
 class RefinementHRNet(TopdownPoseEstimator):
@@ -47,6 +75,9 @@ class RefinementHRNet(TopdownPoseEstimator):
 
         if refine_head:
             self.refine_head = MODELS.build(refine_head)
+        else:
+            # Fallback to a simple offset regression head
+            self.refine_head = OffsetRegressionHead(in_channels=backbone['extra']['stage2']['num_channels'][0] if isinstance(backbone, dict) else 18)
         
         # refinement stage config
         self.patch_size = (32, 32) # Must match decoder input_size in config
@@ -162,12 +193,7 @@ class RefinementHRNet(TopdownPoseEstimator):
 
         # --- Run refinement head and calculate loss ---
         predicted_offsets = self.refine_head(patches)
-        
-        # The `refine_head.loss` method expects features, not predictions.
-        # Since we have already run the forward pass to get `predicted_offsets`,
-        # we should call the head's actual loss function (`loss_module`) directly.
-        loss_func = self.refine_head.loss_module
-        refine_head_loss = loss_func(
+        refine_head_loss = self.refine_head.loss(
             predicted_offsets, refine_targets_flat, keypoint_weights_flat)
 
         # Combine losses from both stages
@@ -229,7 +255,7 @@ class RefinementHRNet(TopdownPoseEstimator):
         )
 
         # Predict offsets from the patches
-        predicted_offsets_hm = self.refine_head.forward(patches)
+        predicted_offsets_hm = self.refine_head(patches)
         predicted_offsets_hm = predicted_offsets_hm.view(batch_size, num_kpts, 2)
         
         # Add the predicted offset to the coarse coordinates
