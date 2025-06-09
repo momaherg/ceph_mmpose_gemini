@@ -116,6 +116,7 @@ class RefinementHRNet(TopdownPoseEstimator):
         # Manually transform GT keypoints from image space to heatmap space
         # using the same affine transformation logic as the data pipeline.
         batch_gt_coords_hm = []
+        batch_keypoint_weights = []
         for data_sample in data_samples:
             # Get transform parameters from metainfo
             center = data_sample.metainfo['input_center']
@@ -123,6 +124,7 @@ class RefinementHRNet(TopdownPoseEstimator):
             rot = data_sample.metainfo.get('bbox_rotation', 0.0)
 
             # Get the ground-truth keypoints (in original image space)
+            # This array is (num_kpts, 3) with (x, y, visibility)
             gt_kpts_img = data_sample.gt_instances.keypoints[0]
 
             # Get the 2x3 affine transformation matrix
@@ -141,8 +143,14 @@ class RefinementHRNet(TopdownPoseEstimator):
 
             batch_gt_coords_hm.append(
                 torch.from_numpy(gt_coords_hm).to(coarse_coords.device))
+            
+            # Extract keypoint weights (visibility) from the 3rd column
+            keypoint_weights = gt_kpts_img[:, 2]
+            batch_keypoint_weights.append(
+                torch.from_numpy(keypoint_weights).to(coarse_coords.device))
 
         gt_coords = torch.stack(batch_gt_coords_hm)
+        keypoint_weights = torch.stack(batch_keypoint_weights)
         
         # The target is the offset from the coarse prediction to the ground truth
         refine_targets = gt_coords - coarse_coords
@@ -150,9 +158,6 @@ class RefinementHRNet(TopdownPoseEstimator):
         # Reshape targets and weights for the loss function
         refine_targets_flat = refine_targets.view(batch_size * num_kpts, 2)
         
-        # Get weights from gt_instances
-        keypoint_weights = torch.stack(
-            [d.gt_instances.keypoint_weights[0] for d in data_samples])
         keypoint_weights_flat = keypoint_weights.view(batch_size * num_kpts, 1)
 
         # --- Run refinement head and calculate loss ---
