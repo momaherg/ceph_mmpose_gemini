@@ -176,10 +176,10 @@ class RefinementHRNet(TopdownPoseEstimator):
             gt_coords_hm = (trans @ gt_kpts_homogeneous.T).T
 
             batch_gt_coords_hm.append(
-                torch.from_numpy(gt_coords_hm).to(coarse_coords.device))
+                torch.from_numpy(gt_coords_hm).float().to(coarse_coords.device))
             
             batch_keypoint_weights.append(
-                torch.from_numpy(keypoint_weights).to(coarse_coords.device))
+                torch.from_numpy(keypoint_weights).float().to(coarse_coords.device))
 
         gt_coords = torch.stack(batch_gt_coords_hm)
         keypoint_weights = torch.stack(batch_keypoint_weights)
