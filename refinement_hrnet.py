@@ -162,7 +162,12 @@ class RefinementHRNet(TopdownPoseEstimator):
 
         # --- Run refinement head and calculate loss ---
         predicted_offsets = self.refine_head(patches)
-        refine_head_loss = self.refine_head.loss(
+        
+        # The `refine_head.loss` method expects features, not predictions.
+        # Since we have already run the forward pass to get `predicted_offsets`,
+        # we should call the head's actual loss function (`loss_module`) directly.
+        loss_func = self.refine_head.loss_module
+        refine_head_loss = loss_func(
             predicted_offsets, refine_targets_flat, keypoint_weights_flat)
 
         # Combine losses from both stages
