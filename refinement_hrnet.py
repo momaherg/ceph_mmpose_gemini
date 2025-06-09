@@ -13,6 +13,7 @@ from mmpose.models.utils.tta import flip_heatmaps
 from mmpose.structures.bbox import get_warp_matrix
 from mmpose.utils.typing import (ConfigType, InstanceList, OptConfigType,
                                  OptSampleList, PixelDataList, SampleList)
+from mmengine.structures import InstanceData
 
 def _get_heatmaps_max_coords(heatmaps: Tensor) -> Tensor:
     """Get coordinates of heatmap maximums."""
@@ -290,8 +291,12 @@ class RefinementHRNet(TopdownPoseEstimator):
             scores = torch.amax(
                 base_heatmaps[i].view(num_kpts, -1), dim=1).cpu().numpy()
 
-            # Pack results into the data_sample
-            data_sample.pred_instances.keypoints = coords_img
-            data_sample.pred_instances.keypoint_scores = scores
+            # Pack results into a new InstanceData object
+            pred_instances = InstanceData()
+            pred_instances.keypoints = coords_img
+            pred_instances.keypoint_scores = scores
+            
+            # Set the pred_instances attribute of the data_sample
+            data_sample.pred_instances = pred_instances
 
         return data_samples 
