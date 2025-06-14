@@ -80,15 +80,14 @@ def main():
         import custom_cephalometric_dataset
         import custom_transforms
         import cephalometric_dataset_info
-        import refinement_hrnet
         print("✓ Custom modules imported successfully")
     except ImportError as e:
         print(f"✗ Failed to import custom modules: {e}")
         return
     
     # Configuration
-    config_path = "Pretrained_model/hrnetv2_w18_cephalometric_384x384_cascade_v5.py"
-    work_dir = "work_dirs/hrnetv2_w18_cephalometric_384x384_cascade_v5"
+    config_path = "Pretrained_model/hrnetv2_w18_cephalometric_256x256_finetune.py"
+    work_dir = "work_dirs/hrnetv2_w18_cephalometric_384x384_adaptive_wing_loss_v4"  # New work dir for this experiment
     
     print(f"Config: {config_path}")
     print(f"Work Dir: {work_dir}")
@@ -161,18 +160,21 @@ def main():
     
     # Print major upgrade information
     print("\n" + "="*70)
-    print("🚀 MAJOR UPGRADES IN THIS VERSION - V5 (CASCADE)")
+    print("🚀 MAJOR UPGRADES IN THIS VERSION")
     print("="*70)
-    print(f"⚡️ Architecture: Two-Stage RefinementHRNet")
-    print(f"   • Stage 1: HRNetV2 predicts coarse heatmaps (loaded from V4 checkpoint).")
-    print(f"   • Stage 2: A lightweight regression head refines landmark positions.")
-    print(f"   • Expected: Significant MRE reduction, especially for outliers like Sella & Gonion.")
-    print(f"\n🚨 REMINDER: Make sure you have updated 'load_from' in your config file:")
-    print(f"   - {config_path}")
+    print(f"📐 Resolution Upgrade:")
+    print(f"   • Input size: 256×256 → 384×384 (+50% resolution)")
+    print(f"   • Heatmap size: 64×64 → 96×96 (+50% heatmap precision)")
+    print(f"   • Expected: 10-20% MRE reduction from sub-pixel precision")
     
-    print(f"\n🎯 Loss Function:")
-    print(f"   • Stage 1 Loss: AdaptiveWingLoss")
-    print(f"   • Stage 2 Loss: MSELoss on coordinate offsets")
+    print(f"\n🎯 Loss Function Upgrade:")
+    print(f"   • Loss: KeypointMSELoss → AdaptiveWingLoss")
+    print(f"   • Focus: Robust heatmap regression with adaptive behavior")
+    print(f"   • Expected: Better handling of difficult landmarks (Sella/Gonion) and outliers")
+    
+    print(f"\n📊 Memory Management:")
+    print(f"   • Batch size: 32 → 20 (reduced for 384×384)")
+    print(f"   • Training will be slightly slower but more precise")
     
     # Print enhanced training parameters
     print("\n" + "="*60)
@@ -215,15 +217,15 @@ def main():
         runner = Runner.from_cfg(cfg)
         
         # Enhanced monitoring message
-        print("🎯 Training with Layer 2 Cascade model in progress...")
+        print("🎯 Training with major upgrades in progress...")
         print("📊 Monitor metrics for improvements:")
-        print("🔹 Target Overall MRE: 2.35px → <2.1px")
-        print("🔹 Target Sella error: 4.67px → <4.0px")
-        print("🔹 Target Gonion error: 4.28px → <3.8px")
-        print(f"🔹 Training: {cfg.train_cfg.max_epochs} epochs with validation every {cfg.train_cfg.val_interval} epoch(s)")
-        print("🔹 Fine-tuning the refinement head on top of pre-trained HRNet.")
+        print("🔹 Target Overall MRE: 2.7px → <2.5px")
+        print("🔹 Target Sella error: 5.4px → <4.5px")
+        print("🔹 Target Gonion error: 4.9px → <4.0px")
+        print("🔹 Training: 60 epochs with validation every 2 epochs")
+        print("🔹 The model will adapt your existing fine-tuned weights to higher resolution")
         
-        print("\n⏱️  Starting training...")
+        print("\n⏱️  Starting training... (will take longer due to 384×384 resolution)")
         
         runner.train()
         

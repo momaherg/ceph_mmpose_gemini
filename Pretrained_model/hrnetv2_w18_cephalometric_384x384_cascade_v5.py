@@ -1,45 +1,69 @@
-# Inherit from the previous fine-tuned model config
+# Inherit from the original fine-tuning config to get all the dataset and pipeline settings
 _base_ = ['./hrnetv2_w18_cephalometric_256x256_finetune.py']
 
-# --- STAGE 2: CASCADE REFINEMENT CONFIG (V5) ---
+# -- MODEL CONFIGURATION: LAYER 2 CASCADE ---
+# Point to the best checkpoint from the previous run to initialize Stage 1
+load_from = '/content/ceph_mmpose_gemini/work_dirs/hrnetv2_w18_cephalometric_384x384_adaptive_wing_loss_v4/best_NME_epoch_86.pth' # Using the best V4 checkpoint
 
-# Load from the best checkpoint of the previous (V4) training
-# IMPORTANT: Update this path to your actual best checkpoint from the v4 experiment
-load_from = "/content/ceph_mmpose_gemini/work_dirs/hrnetv2_w18_cephalometric_384x384_adaptive_wing_loss_v4/best_NME_epoch_86.pth"
+# Define the custom model type from our new file
+custom_imports = dict(imports=['refinement_hrnet'], allow_failed_imports=False)
 
-# Fine-tune for fewer epochs as the backbone is already strong
-train_cfg = dict(by_epoch=True, max_epochs=40, val_interval=1)
-
-# Use a smaller learning rate for fine-tuning the new head
-optim_wrapper = dict(optimizer=dict(type='Adam', lr=1e-4))
-
-# Fine-tuning learning rate schedule
-param_scheduler = [
-    dict(type='LinearLR', begin=0, end=500, start_factor=0.01, by_epoch=False),
-    dict(type='CosineAnnealingLR', T_max=40, eta_min=1e-7, by_epoch=True)
-]
-
-# --- MODEL DEFINITION: RefinementHRNet ---
+# Build the two-stage cascade model
 model = dict(
-    type='RefinementHRNet',  # Use our custom cascade model
-    # The backbone, neck, and base head are inherited from the base config
-    # and will have their weights loaded from the `load_from` checkpoint.
-
-    # --- Refinement Head (Stage 2) ---
-    # Commented out to use the built-in OffsetRegressionHead
-    # refine_head=dict(
-    #     type='RegressionHead',
-    #     in_channels=18,  # HRNetV2-w18 has 18 channels at the highest resolution feature map
-    #     num_joints=19,
-    #     loss=dict(type='MSELoss', use_target_weight=True, loss_weight=1.0),
-    #     decoder=dict(
-    #         type='RegressionLabel',
-    #         # This is the input size of the *feature patch* given to the refine head.
-    #         # It must match `patch_size` in the `RefinementHRNet` model implementation.
-    #         # This fixes the TypeError.
-    #         input_size=(32, 32),
-    #     )
-    # )
+    type='RefinementHRNet', # Our new custom model class
+    # The backbone, neck, and data_preprocessor are inherited from _base_
+    # We only need to redefine the head structure
+    head=dict(
+        # This is Stage 1, the original heatmap head
+        type='HeatmapHead',
+        in_channels=18, # from HRNetv2-w18
+        out_channels=19,
+        loss=dict(
+            type='AdaptiveWingLoss',
+            use_target_weight=True,
+            loss_weight=1.0)),
+    refine_head=dict(
+        # This is Stage 2, a small regression head for refinement
+        type='RegressionHead',
+        in_channels=18, # from HRNetv2-w18 features
+        num_joints=19,
+        loss=dict(type='MSELoss', use_target_weight=True, loss_weight=0.2), # Lower weight for the refinement loss
+        decoder=dict(
+            type='RegressionLabel',
+            input_size=(32, 32), # patch size
+            output_size=(32, 32), # Does not matter for regression
+        )
+    ),
+    test_cfg=dict(
+        flip_test=True,
+        flip_mode='heatmap',
+        shift_heatmap=True,
+        # flip_indices are inherited from dataset metaifo
+    )
 )
 
-# Keep the same datasets, pipelines, and evaluators from the base config 
+# --- TRAINING SETTINGS FOR REFINEMENT ---
+# We are fine-tuning the refinement head, so we can use fewer epochs and a lower learning rate
+train_cfg = dict(by_epoch=True, max_epochs=40, val_interval=1)
+
+# Lower learning rate for fine-tuning
+optim_wrapper = dict(optimizer=dict(type='Adam', lr=1e-4))
+
+param_scheduler = [
+    dict(type='LinearLR', begin=0, end=500, start_factor=0.001, by_epoch=False),
+    dict(
+        type='MultiStepLR',
+        begin=0,
+        end=40,
+        by_epoch=True,
+        milestones=[20, 35],
+        gamma=0.1)
+]
+
+# Optional: Freeze the backbone for the first few epochs to stabilize refinement head training
+# paramwise_cfg = dict(
+#     custom_keys={
+#         'backbone': dict(lr_mult=0.0, decay_mult=0.0),
+#     }
+# )
+# resume=True # Resume from the checkpoint specified in load_from 

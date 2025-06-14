@@ -16,8 +16,10 @@ param_scheduler = [
     dict(type='LinearLR', begin=0, end=500, start_factor=1e-3, by_epoch=False),  # Warm-up
     dict(
         type='MultiStepLR',
+        begin=0,
+        end=100,
         by_epoch=True,
-        milestones=[70, 90],
+        milestones=[70, 90],  # Decay LR at epoch 70 and 90
         gamma=0.1)
 ]
 
