@@ -4,9 +4,9 @@ _base_ = ['./td-hm_hrnetv2-w18_8xb64-60e_aflw-256x256.py'] # Inherit from origin
 load_from = 'Pretrained_model/hrnetv2_w18_aflw_256x256-f2bbc62b_20210125.pth'
 train_cfg = dict(by_epoch=True, max_epochs=100, val_interval=2) # Extended training: 60 -> 100 epochs
 
-# Switched to AdamW for potentially better convergence
+# Optimizer settings: SGD with momentum
 optim_wrapper = dict(
-    optimizer=dict(type='AdamW', lr=3e-4, weight_decay=0.01),
+    optimizer=dict(type='SGD', lr=1e-2, momentum=0.9, weight_decay=1e-4),
     clip_grad=dict(max_norm=5.,
                    norm_type=2)
 )
@@ -14,14 +14,14 @@ optim_wrapper = dict(
 # Learning rate scheduler with warm-up and step decay
 param_scheduler = [
     dict(type='LinearLR', begin=0, end=500, start_factor=1e-3, by_epoch=False),  # Warm-up
-    dict(type='CosineAnnealingLR', T_max=100, eta_min=1e-6, by_epoch=True)  # Cosine annealing - updated T_max to match max_epochs
-    # dict(
-    #     type='MultiStepLR',
-    #     begin=0,
-    #     end=100,
-    #     by_epoch=True,
-    #     milestones=[70, 90],  # Decay LR at epoch 70 and 90
-    #     gamma=0.1)
+    # dict(type='CosineAnnealingLR', T_max=100, eta_min=1e-6, by_epoch=True)  # Cosine annealing - updated T_max to match max_epochs
+    dict(
+        type='MultiStepLR',
+        begin=0,
+        end=100,
+        by_epoch=True,
+        milestones=[70, 90],  # Decay LR at epoch 70 and 90
+        gamma=0.1)
 ]
 
 # Dataset settings
