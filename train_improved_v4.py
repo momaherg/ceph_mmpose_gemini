@@ -167,6 +167,8 @@ def main():
         # ------------------------------------------------------------------
         # 2)  Upsample minority classes so the training set is balanced.
         # ------------------------------------------------------------------
+        print("Before Balancing training set class distribution:")
+        print(train_df['class'].value_counts())
         class_counts = train_df['class'].value_counts()
         max_count = class_counts.max()
 
