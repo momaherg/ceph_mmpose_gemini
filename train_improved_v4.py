@@ -14,6 +14,8 @@ from mmengine.runner import Runner
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+import math
+from sklearn.utils import resample
 
 # Suppress warnings
 warnings.filterwarnings('ignore')
@@ -64,6 +66,37 @@ def plot_training_progress(work_dir):
     except Exception as e:
         print(f"Could not plot training progress: {e}")
 
+def _calculate_angle(p1, p2, p3):
+    """Calculates the angle at p2 between p1 and p3."""
+    v1 = (p1[0] - p2[0], p1[1] - p2[1])
+    v2 = (p3[0] - p2[0], p3[1] - p2[1])
+    angle = math.degrees(math.atan2(v2[1], v2[0]) - math.atan2(v1[1], v1[0]))
+    return angle
+
+def get_skeletal_class_and_anb(row):
+    """Calculates ANB angle and determines skeletal class from a dataframe row."""
+    try:
+        s = (row['sella_x'], row['sella_y'])
+        n = (row['nasion_x'], row['nasion_y'])
+        a = (row['A point_x'], row['A point_y'])
+        b = (row['B point_x'], row['B point_y'])
+        
+        sna_angle = _calculate_angle(s, n, a)
+        snb_angle = _calculate_angle(s, n, b)
+        
+        anb_angle = sna_angle - snb_angle
+        
+        if anb_angle > 4:
+            skeletal_class = 'Class II'
+        elif anb_angle < 2:
+            skeletal_class = 'Class III'
+        else:
+            skeletal_class = 'Class I'
+            
+        return pd.Series([skeletal_class, anb_angle])
+    except KeyError:
+        return pd.Series([None, None])
+
 def main():
     """Main improved training function with resolution and loss upgrades."""
     
@@ -112,11 +145,49 @@ def main():
         main_df = pd.read_json(data_file_path)
         print(f"Main DataFrame loaded. Shape: {main_df.shape}")
 
-        train_df = main_df[main_df['set'] == 'train'].reset_index(drop=True)
+        train_df_raw = main_df[main_df['set'] == 'train'].reset_index(drop=True)
         val_df = main_df[main_df['set'] == 'dev'].reset_index(drop=True)
         test_df = main_df[main_df['set'] == 'test'].reset_index(drop=True)
 
-        print(f"Train DataFrame shape: {train_df.shape}")
+        # --- Skeletal Class Balancing ---
+        print("\n" + "="*50)
+        print("⚖️ PERFORMING SKELETAL CLASS BALANCING")
+        print("="*50)
+        
+        # Calculate ANB and Class for training data
+        train_df_raw[['skeletal_class', 'ANB']] = train_df_raw.apply(get_skeletal_class_and_anb, axis=1)
+        
+        print("Original training set class distribution:")
+        print(train_df_raw['skeletal_class'].value_counts())
+        
+        # Separate classes
+        df_class1 = train_df_raw[train_df_raw['skeletal_class'] == 'Class I']
+        df_class2 = train_df_raw[train_df_raw['skeletal_class'] == 'Class II']
+        df_class3 = train_df_raw[train_df_raw['skeletal_class'] == 'Class III']
+        
+        # Upsample minority classes
+        majority_size = len(df_class1)
+        df_class2_upsampled = resample(df_class2, 
+                                     replace=True,     # sample with replacement
+                                     n_samples=majority_size,    # to match majority class
+                                     random_state=42) # reproducible results
+
+        df_class3_upsampled = resample(df_class3, 
+                                     replace=True,
+                                     n_samples=majority_size,
+                                     random_state=42)
+        
+        # Combine majority class with upsampled minority classes
+        train_df = pd.concat([df_class1, df_class2_upsampled, df_class3_upsampled])
+        
+        # Shuffle the balanced dataset
+        train_df = train_df.sample(frac=1, random_state=42).reset_index(drop=True)
+        
+        print("\nBalanced (upsampled) training set class distribution:")
+        print(train_df['skeletal_class'].value_counts())
+        print("="*50 + "\n")
+
+        print(f"Train DataFrame shape: {train_df.shape} (raw: {train_df_raw.shape})")
         print(f"Validation DataFrame shape: {val_df.shape}")
         print(f"Test DataFrame shape: {test_df.shape}")
 
@@ -276,4 +347,4 @@ def main():
         print(f"⚠️  Final validation setup failed: {e}")
 
 if __name__ == "__main__":
-    main() 
+    main()

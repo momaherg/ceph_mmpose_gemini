@@ -4,10 +4,10 @@ _base_ = ['./td-hm_hrnetv2-w18_8xb64-60e_aflw-256x256.py'] # Inherit from origin
 load_from = 'Pretrained_model/hrnetv2_w18_aflw_256x256-f2bbc62b_20210125.pth'
 train_cfg = dict(by_epoch=True, max_epochs=100, val_interval=2) # Extended training: 60 -> 100 epochs
 
-# Optimizer settings: SGD with momentum
+# Improved optimizer settings with cosine annealing
 optim_wrapper = dict(
-    optimizer=dict(type='SGD', lr=1e-2, momentum=0.9, weight_decay=1e-4),
-    clip_grad=dict(max_norm=5.,
+    optimizer=dict(type='Adam', lr=3e-4), # Higher starting LR for cosine schedule
+    clip_grad=dict(max_norm=5.,  # see next section
                    norm_type=2)
 )
 
