@@ -415,7 +415,7 @@ def train_mlp_models(args):
         val_losses = []
         best_val_loss = float('inf')
         
-        for epoch in range(100):
+        for epoch in range(1000):
             # Training
             model.train()
             epoch_train_loss = 0.0
