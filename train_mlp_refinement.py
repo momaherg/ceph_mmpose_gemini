@@ -1,258 +1,617 @@
 #!/usr/bin/env python3
 """
-MLP Refinement Stage for HRNetV2 Cephalometric Landmark Detection
+MLP-based Refinement Stage for Cephalometric Landmark Detection
+This script implements a two-stage approach:
+1. Generate training data by running HRNetV2 inference on all images
+2. Train separate MLP models for x and y coordinates to refine predictions
 """
 
 import os
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import Dataset, DataLoader, random_split
+import torch.utils.data as data
+import warnings
 import pandas as pd
 import numpy as np
-import argparse
-import glob
-from tqdm import tqdm
-
 from mmengine.config import Config
-from mmengine.runner import Runner
-from mmengine.dataset import Compose
+from mmengine.registry import init_default_scope
+from mmpose.apis import init_model, inference_topdown
+import glob
+import argparse
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+import matplotlib.pyplot as plt
+import joblib
 
-# Import custom modules from the workspace
-try:
-    import custom_cephalometric_dataset
-    import custom_transforms
-    import cephalometric_dataset_info
-    from mmpose.apis import init_model, inference_topdown
-    print("✓ Custom modules and MMPose APIs imported successfully")
-except ImportError as e:
-    print(f"✗ Failed to import custom modules or MMPose: {e}")
-    exit()
+# Suppress warnings
+warnings.filterwarnings('ignore')
+
+# Apply PyTorch safe loading fix
+import functools
+_original_torch_load = torch.load
+def safe_torch_load(*args, **kwargs):
+    if 'weights_only' not in kwargs:
+        kwargs['weights_only'] = False
+    return _original_torch_load(*args, **kwargs)
+torch.load = safe_torch_load
+
+class MLPRefinementModel(nn.Module):
+    """
+    MLP model for landmark coordinate refinement.
+    Input: 19 predicted coordinates
+    Hidden: 500 neurons
+    Output: 19 refined coordinates
+    """
+    def __init__(self, input_dim=19, hidden_dim=500, output_dim=19):
+        super(MLPRefinementModel, self).__init__()
+        self.network = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(hidden_dim, output_dim)
+        )
+        
+    def forward(self, x):
+        return self.network(x)
+
+class MLPDataset(data.Dataset):
+    """Dataset for MLP training."""
+    def __init__(self, predictions, ground_truth):
+        self.predictions = torch.FloatTensor(predictions)
+        self.ground_truth = torch.FloatTensor(ground_truth)
+        
+    def __len__(self):
+        return len(self.predictions)
+    
+    def __getitem__(self, idx):
+        return self.predictions[idx], self.ground_truth[idx]
 
 def generate_mlp_training_data(args):
     """
-    Runs inference with a trained HRNetV2 model to generate a dataset
-    of (predicted_landmarks, ground_truth_landmarks) pairs.
+    Stage 1: Generate training data by running HRNetV2 inference on all images.
     """
     print("="*80)
-    print("🚀 Stage 1: Generating MLP Training Data")
+    print("STAGE 1: GENERATING MLP TRAINING DATA")
     print("="*80)
-
-    # Load MMPose config and checkpoint
-    print(f"Loading config: {args.hrnet_config}")
-    cfg = Config.fromfile(args.hrnet_config)
-
-    if not args.hrnet_checkpoint:
-        # If checkpoint is not provided, find the latest 'best' checkpoint
-        checkpoint_pattern = os.path.join(cfg.work_dir, "best_NME_epoch_*.pth")
-        checkpoint_files = sorted(glob.glob(checkpoint_pattern), key=os.path.getmtime, reverse=True)
-        if not checkpoint_files:
-            print(f"✗ ERROR: No 'best' checkpoint found in {cfg.work_dir}. Please specify with --hrnet_checkpoint.")
-            return
-        args.hrnet_checkpoint = checkpoint_files[0]
-        print(f"✓ Found latest best checkpoint: {args.hrnet_checkpoint}")
-
-    # Initialize the HRNet model
-    device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
-    print(f"Using device: {device}")
-    model = init_model(cfg, args.hrnet_checkpoint, device=device)
     
-    # Prepare dataset
-    print(f"Loading main data file from: {args.data_path}")
-    full_df = pd.read_json(args.data_path)
+    # Initialize MMPose scope
+    init_default_scope('mmpose')
     
-    # We use the validation pipeline for inference to avoid augmentations
-    # but ensure the input is processed correctly for the model.
-    pipeline = Compose(cfg.val_pipeline)
+    # Import custom modules
+    try:
+        import custom_cephalometric_dataset
+        import custom_transforms
+        import cephalometric_dataset_info
+        print("✓ Custom modules imported successfully")
+    except ImportError as e:
+        print(f"✗ Failed to import custom modules: {e}")
+        return False
     
-    all_preds = []
-    all_gts = []
+    # Load config
+    try:
+        cfg = Config.fromfile(args.hrnet_config)
+        print(f"✓ Configuration loaded from {args.hrnet_config}")
+    except Exception as e:
+        print(f"✗ Failed to load config: {e}")
+        return False
     
-    print("🏃‍♂️ Running inference on all images...")
-    for i, row in tqdm(full_df.iterrows(), total=len(full_df)):
-        # Construct the data sample for the inference pipeline
-        data_info = {
-            'img_array': row['img_array'],
-            'bbox': np.array([[0, 0, row['img_cols'], row['img_rows']]], dtype=np.float32),
-            'keypoints': np.array([row['landmarks']], dtype=np.float32)
-        }
+    # Find checkpoint if not provided
+    if args.hrnet_checkpoint is None:
+        work_dir = "work_dirs/hrnetv2_w18_cephalometric_384x384_adaptive_wing_loss_v4"
+        checkpoint_pattern = os.path.join(work_dir, "best_NME_epoch_*.pth")
+        checkpoints = glob.glob(checkpoint_pattern)
         
-        # Apply the pipeline transformations
-        processed_data = pipeline(data_info)
+        if not checkpoints:
+            checkpoint_pattern = os.path.join(work_dir, "epoch_*.pth")
+            checkpoints = glob.glob(checkpoint_pattern)
         
-        # Run inference
-        results = inference_topdown(model, processed_data['img_array'])
+        if not checkpoints:
+            print(f"✗ No checkpoints found in {work_dir}")
+            return False
         
-        pred_keypoints = results[0].pred_instances.keypoints[0] # Shape: (19, 2)
-        gt_keypoints = data_info['keypoints'][0] # Shape: (19, 2) (use original, non-transformed GT)
-
-        all_preds.append(pred_keypoints)
-        all_gts.append(gt_keypoints)
-
-    # Flatten the data for the MLP
-    preds_flat = np.array(all_preds).reshape(len(all_preds), -1)
-    gts_flat = np.array(all_gts).reshape(len(all_gts), -1)
-
-    # Create a DataFrame
-    columns = []
+        args.hrnet_checkpoint = max(checkpoints, key=os.path.getctime)
+    
+    print(f"✓ Using checkpoint: {args.hrnet_checkpoint}")
+    
+    # Load data
+    try:
+        main_df = pd.read_json(args.data_path)
+        print(f"✓ Data loaded from {args.data_path}")
+        print(f"  Dataset shape: {main_df.shape}")
+    except Exception as e:
+        print(f"✗ Failed to load data: {e}")
+        return False
+    
+    # Get landmark information
+    landmark_names = cephalometric_dataset_info.landmark_names_in_order
+    landmark_cols = cephalometric_dataset_info.original_landmark_cols
+    
+    print(f"✓ Working with {len(landmark_names)} landmarks")
+    
+    # Initialize model
+    try:
+        model = init_model(args.hrnet_config, args.hrnet_checkpoint, 
+                          device='cuda:0' if torch.cuda.is_available() else 'cpu')
+        print("✓ HRNetV2 model initialized")
+    except Exception as e:
+        print(f"✗ Failed to initialize model: {e}")
+        return False
+    
+    # Prepare data storage
+    all_predictions_x = []
+    all_predictions_y = []
+    all_ground_truth_x = []
+    all_ground_truth_y = []
+    valid_samples = []
+    
+    print(f"\n🔄 Running inference on {len(main_df)} images...")
+    
+    # Process each image
+    for idx, row in main_df.iterrows():
+        try:
+            # Get image
+            img_array = np.array(row['Image'], dtype=np.uint8).reshape((224, 224, 3))
+            
+            # Get ground truth
+            gt_keypoints = []
+            valid_gt = True
+            for i in range(0, len(landmark_cols), 2):
+                x_col = landmark_cols[i]
+                y_col = landmark_cols[i+1]
+                if x_col in row and y_col in row and pd.notna(row[x_col]) and pd.notna(row[y_col]):
+                    gt_keypoints.append([row[x_col], row[y_col]])
+                else:
+                    gt_keypoints.append([0, 0])
+                    valid_gt = False
+            
+            # Skip samples with invalid ground truth
+            if not valid_gt:
+                continue
+                
+            gt_keypoints = np.array(gt_keypoints)
+            
+            # Prepare bbox
+            bbox = np.array([[0, 0, 224, 224]], dtype=np.float32)
+            
+            # Run inference
+            results = inference_topdown(model, img_array, bboxes=bbox, bbox_format='xyxy')
+            
+            if results and len(results) > 0:
+                pred_keypoints = results[0].pred_instances.keypoints[0]
+                
+                # Extract x and y coordinates
+                pred_x = pred_keypoints[:, 0]
+                pred_y = pred_keypoints[:, 1]
+                gt_x = gt_keypoints[:, 0]
+                gt_y = gt_keypoints[:, 1]
+                
+                # Store data
+                all_predictions_x.append(pred_x)
+                all_predictions_y.append(pred_y)
+                all_ground_truth_x.append(gt_x)
+                all_ground_truth_y.append(gt_y)
+                valid_samples.append(idx)
+            
+            if (idx + 1) % 100 == 0:
+                print(f"  Processed {idx + 1}/{len(main_df)} images")
+                
+        except Exception as e:
+            print(f"  Warning: Failed to process image {idx}: {e}")
+            continue
+    
+    print(f"✓ Successfully processed {len(valid_samples)} out of {len(main_df)} images")
+    
+    # Convert to numpy arrays
+    all_predictions_x = np.array(all_predictions_x)
+    all_predictions_y = np.array(all_predictions_y)
+    all_ground_truth_x = np.array(all_ground_truth_x)
+    all_ground_truth_y = np.array(all_ground_truth_y)
+    
+    # Create DataFrame for storage
+    data_dict = {}
+    
+    # Add prediction coordinates
     for i in range(19):
-        columns.append(f'pred_x_{i}')
-        columns.append(f'pred_y_{i}')
-    for i in range(19):
-        columns.append(f'gt_x_{i}')
-        columns.append(f'gt_y_{i}')
-
-    data_for_df = np.hstack((preds_flat, gts_flat))
-    df = pd.DataFrame(data_for_df, columns=columns)
+        data_dict[f'pred_x_{i}'] = all_predictions_x[:, i]
+        data_dict[f'pred_y_{i}'] = all_predictions_y[:, i]
+        data_dict[f'gt_x_{i}'] = all_ground_truth_x[:, i]
+        data_dict[f'gt_y_{i}'] = all_ground_truth_y[:, i]
+    
+    # Add metadata
+    data_dict['sample_idx'] = valid_samples
+    
+    mlp_df = pd.DataFrame(data_dict)
     
     # Save to CSV
-    df.to_csv(args.mlp_data_path, index=False)
-    print(f"\n✅ Successfully generated and saved MLP training data to: {args.mlp_data_path}")
+    mlp_df.to_csv(args.mlp_data_path, index=False)
+    print(f"✓ MLP training data saved to {args.mlp_data_path}")
+    
+    # Print statistics
+    print(f"\n📊 Dataset Statistics:")
+    print(f"  Total samples: {len(mlp_df)}")
+    print(f"  Features per coordinate: 19 landmarks")
+    print(f"  Input dimension: 19 (predicted coordinates)")
+    print(f"  Output dimension: 19 (ground truth coordinates)")
+    
+    # Compute initial errors
+    pred_coords = np.stack([all_predictions_x, all_predictions_y], axis=2)
+    gt_coords = np.stack([all_ground_truth_x, all_ground_truth_y], axis=2)
+    
+    radial_errors = np.sqrt(np.sum((pred_coords - gt_coords)**2, axis=2))
+    mean_errors = np.mean(radial_errors, axis=0)
+    
+    print(f"  Mean radial error per landmark (before refinement):")
+    for i, (name, error) in enumerate(zip(landmark_names, mean_errors)):
+        print(f"    {i:2d}. {name:<20}: {error:.3f} pixels")
+    
+    overall_mre = np.mean(radial_errors)
+    print(f"  Overall MRE: {overall_mre:.3f} pixels")
+    
+    return True
 
-
-class LandmarkDataset(Dataset):
-    """PyTorch Dataset for MLP landmark refinement."""
-    def __init__(self, csv_file, coord_type='x'):
-        self.data = pd.read_csv(csv_file)
-        self.coord_type = coord_type
+def train_mlp_models(args):
+    """
+    Stage 2: Train separate MLP models for x and y coordinates.
+    """
+    print("\n" + "="*80)
+    print("STAGE 2: TRAINING MLP REFINEMENT MODELS")
+    print("="*80)
+    
+    # Load MLP training data
+    try:
+        mlp_df = pd.read_csv(args.mlp_data_path)
+        print(f"✓ MLP training data loaded from {args.mlp_data_path}")
+        print(f"  Dataset shape: {mlp_df.shape}")
+    except Exception as e:
+        print(f"✗ Failed to load MLP training data: {e}")
+        return False
+    
+    # Prepare data
+    pred_x_cols = [f'pred_x_{i}' for i in range(19)]
+    pred_y_cols = [f'pred_y_{i}' for i in range(19)]
+    gt_x_cols = [f'gt_x_{i}' for i in range(19)]
+    gt_y_cols = [f'gt_y_{i}' for i in range(19)]
+    
+    # Extract features and targets
+    X_x = mlp_df[pred_x_cols].values
+    y_x = mlp_df[gt_x_cols].values
+    X_y = mlp_df[pred_y_cols].values
+    y_y = mlp_df[gt_y_cols].values
+    
+    print(f"✓ Data prepared:")
+    print(f"  X coordinates - Input shape: {X_x.shape}, Target shape: {y_x.shape}")
+    print(f"  Y coordinates - Input shape: {X_y.shape}, Target shape: {y_y.shape}")
+    
+    # Split data
+    X_x_train, X_x_val, y_x_train, y_x_val = train_test_split(
+        X_x, y_x, test_size=0.2, random_state=42)
+    X_y_train, X_y_val, y_y_train, y_y_val = train_test_split(
+        X_y, y_y, test_size=0.2, random_state=42)
+    
+    print(f"✓ Data split into train/validation:")
+    print(f"  Training samples: {len(X_x_train)}")
+    print(f"  Validation samples: {len(X_x_val)}")
+    
+    # Normalize data
+    scaler_x_input = StandardScaler()
+    scaler_x_target = StandardScaler()
+    scaler_y_input = StandardScaler()
+    scaler_y_target = StandardScaler()
+    
+    X_x_train_scaled = scaler_x_input.fit_transform(X_x_train)
+    X_x_val_scaled = scaler_x_input.transform(X_x_val)
+    y_x_train_scaled = scaler_x_target.fit_transform(y_x_train)
+    y_x_val_scaled = scaler_x_target.transform(y_x_val)
+    
+    X_y_train_scaled = scaler_y_input.fit_transform(X_y_train)
+    X_y_val_scaled = scaler_y_input.transform(X_y_val)
+    y_y_train_scaled = scaler_y_target.fit_transform(y_y_train)
+    y_y_val_scaled = scaler_y_target.transform(y_y_val)
+    
+    print("✓ Data normalized using StandardScaler")
+    
+    # Create datasets and dataloaders
+    train_dataset_x = MLPDataset(X_x_train_scaled, y_x_train_scaled)
+    val_dataset_x = MLPDataset(X_x_val_scaled, y_x_val_scaled)
+    train_dataset_y = MLPDataset(X_y_train_scaled, y_y_train_scaled)
+    val_dataset_y = MLPDataset(X_y_val_scaled, y_y_val_scaled)
+    
+    train_loader_x = data.DataLoader(train_dataset_x, batch_size=16, shuffle=True)
+    val_loader_x = data.DataLoader(val_dataset_x, batch_size=16, shuffle=False)
+    train_loader_y = data.DataLoader(train_dataset_y, batch_size=16, shuffle=True)
+    val_loader_y = data.DataLoader(val_dataset_y, batch_size=16, shuffle=False)
+    
+    # Device
+    device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+    print(f"✓ Using device: {device}")
+    
+    # Training function
+    def train_mlp(model, train_loader, val_loader, model_name, save_path):
+        """Train a single MLP model."""
+        print(f"\n🚀 Training {model_name} MLP...")
         
-        pred_cols = [f'pred_{coord_type}_{i}' for i in range(19)]
-        gt_cols = [f'gt_{coord_type}_{i}' for i in range(19)]
+        criterion = nn.MSELoss()
+        optimizer = optim.Adam(model.parameters(), lr=0.00001, weight_decay=0.0001)
         
-        self.preds = torch.tensor(self.data[pred_cols].values, dtype=torch.float32)
-        self.gts = torch.tensor(self.data[gt_cols].values, dtype=torch.float32)
-
-    def __len__(self):
-        return len(self.data)
-
-    def __getitem__(self, idx):
-        return self.preds[idx], self.gts[idx]
-
-
-class MLP(nn.Module):
-    """A simple MLP with one hidden layer."""
-    def __init__(self):
-        super(MLP, self).__init__()
-        self.model = nn.Sequential(
-            nn.Linear(19, 500),
-            nn.ReLU(),
-            nn.Linear(500, 19)
-        )
-
-    def forward(self, x):
-        return self.model(x)
-
-def train_mlp_model(args, coord_type):
-    """Trains a single MLP model for either 'x' or 'y' coordinates."""
-    device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
-    print(f"\n--- Training MLP for {coord_type.upper()}-coordinates on {device} ---")
-
-    # Data
-    full_dataset = LandmarkDataset(args.mlp_data_path, coord_type=coord_type)
-    train_size = int(0.8 * len(full_dataset))
-    val_size = len(full_dataset) - train_size
-    train_dataset, val_dataset = random_split(full_dataset, [train_size, val_size])
-
-    train_loader = DataLoader(train_dataset, batch_size=16, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=16, shuffle=False)
-
-    # Model, Loss, Optimizer
-    model = MLP().to(device)
-    criterion = nn.MSELoss() # L2 Loss
-    optimizer = optim.Adam(model.parameters(), lr=0.00001, weight_decay=0.0001)
-
-    best_val_loss = float('inf')
-
-    for epoch in range(100):
-        model.train()
-        train_loss = 0.0
-        for preds, gts in train_loader:
-            preds, gts = preds.to(device), gts.to(device)
+        train_losses = []
+        val_losses = []
+        best_val_loss = float('inf')
+        
+        for epoch in range(100):
+            # Training
+            model.train()
+            epoch_train_loss = 0.0
+            for batch_idx, (inputs, targets) in enumerate(train_loader):
+                inputs, targets = inputs.to(device), targets.to(device)
+                
+                optimizer.zero_grad()
+                outputs = model(inputs)
+                loss = criterion(outputs, targets)
+                loss.backward()
+                optimizer.step()
+                
+                epoch_train_loss += loss.item()
             
-            optimizer.zero_grad()
-            outputs = model(preds)
-            loss = criterion(outputs, gts)
-            loss.backward()
-            optimizer.step()
-            train_loss += loss.item() * preds.size(0)
-
-        model.eval()
-        val_loss = 0.0
-        with torch.no_grad():
-            for preds, gts in val_loader:
-                preds, gts = preds.to(device), gts.to(device)
-                outputs = model(preds)
-                loss = criterion(outputs, gts)
-                val_loss += loss.item() * preds.size(0)
-
-        train_loss /= len(train_loader.dataset)
-        val_loss /= len(val_loader.dataset)
+            avg_train_loss = epoch_train_loss / len(train_loader)
+            train_losses.append(avg_train_loss)
+            
+            # Validation
+            model.eval()
+            epoch_val_loss = 0.0
+            with torch.no_grad():
+                for inputs, targets in val_loader:
+                    inputs, targets = inputs.to(device), targets.to(device)
+                    outputs = model(inputs)
+                    loss = criterion(outputs, targets)
+                    epoch_val_loss += loss.item()
+            
+            avg_val_loss = epoch_val_loss / len(val_loader)
+            val_losses.append(avg_val_loss)
+            
+            # Save best model
+            if avg_val_loss < best_val_loss:
+                best_val_loss = avg_val_loss
+                torch.save(model.state_dict(), save_path)
+            
+            if (epoch + 1) % 20 == 0:
+                print(f"  Epoch {epoch+1}/100 - Train Loss: {avg_train_loss:.6f}, Val Loss: {avg_val_loss:.6f}")
         
-        print(f"Epoch {epoch+1:03d}/{100} | Train Loss: {train_loss:.6f} | Val Loss: {val_loss:.6f}")
-
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            save_path = f"mlp_{coord_type}_refiner.pth"
-            torch.save(model.state_dict(), save_path)
-            print(f"  -> Saved best model to {save_path}")
-
-def train_mlp(args):
-    """Main function to train both MLP models."""
-    print("="*80)
-    print("🚀 Stage 2: Training MLP Refinement Models")
-    print("="*80)
+        print(f"✓ {model_name} training completed. Best val loss: {best_val_loss:.6f}")
+        return train_losses, val_losses
     
-    if not os.path.exists(args.mlp_data_path):
-        print(f"✗ ERROR: MLP data file not found at {args.mlp_data_path}")
-        print("  Please run with --generate-data first.")
-        return
+    # Initialize models
+    model_x = MLPRefinementModel().to(device)
+    model_y = MLPRefinementModel().to(device)
+    
+    print(f"✓ MLP models initialized:")
+    print(f"  Architecture: 19 → 500 → 19")
+    print(f"  Parameters per model: {sum(p.numel() for p in model_x.parameters()):,}")
+    
+    # Create output directory
+    output_dir = "mlp_refinement_models"
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Train X coordinate model
+    model_x_path = os.path.join(output_dir, "mlp_x_model.pth")
+    train_losses_x, val_losses_x = train_mlp(
+        model_x, train_loader_x, val_loader_x, "X-coordinate", model_x_path)
+    
+    # Train Y coordinate model
+    model_y_path = os.path.join(output_dir, "mlp_y_model.pth")
+    train_losses_y, val_losses_y = train_mlp(
+        model_y, train_loader_y, val_loader_y, "Y-coordinate", model_y_path)
+    
+    # Save scalers
+    scaler_x_input_path = os.path.join(output_dir, "scaler_x_input.pkl")
+    scaler_x_target_path = os.path.join(output_dir, "scaler_x_target.pkl")
+    scaler_y_input_path = os.path.join(output_dir, "scaler_y_input.pkl")
+    scaler_y_target_path = os.path.join(output_dir, "scaler_y_target.pkl")
+    
+    joblib.dump(scaler_x_input, scaler_x_input_path)
+    joblib.dump(scaler_x_target, scaler_x_target_path)
+    joblib.dump(scaler_y_input, scaler_y_input_path)
+    joblib.dump(scaler_y_target, scaler_y_target_path)
+    
+    print(f"✓ Scalers saved to {output_dir}")
+    
+    # Plot training curves
+    fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(14, 10))
+    
+    # X coordinate losses
+    ax1.plot(train_losses_x, label='Training Loss', color='blue')
+    ax1.plot(val_losses_x, label='Validation Loss', color='red')
+    ax1.set_title('X-Coordinate MLP Training')
+    ax1.set_xlabel('Epoch')
+    ax1.set_ylabel('MSE Loss')
+    ax1.legend()
+    ax1.grid(True, alpha=0.3)
+    
+    # Y coordinate losses
+    ax2.plot(train_losses_y, label='Training Loss', color='blue')
+    ax2.plot(val_losses_y, label='Validation Loss', color='red')
+    ax2.set_title('Y-Coordinate MLP Training')
+    ax2.set_xlabel('Epoch')
+    ax2.set_ylabel('MSE Loss')
+    ax2.legend()
+    ax2.grid(True, alpha=0.3)
+    
+    # Combined loss comparison
+    ax3.plot(train_losses_x, label='X Train', color='blue', linestyle='-')
+    ax3.plot(val_losses_x, label='X Val', color='blue', linestyle='--')
+    ax3.plot(train_losses_y, label='Y Train', color='red', linestyle='-')
+    ax3.plot(val_losses_y, label='Y Val', color='red', linestyle='--')
+    ax3.set_title('Combined Training Comparison')
+    ax3.set_xlabel('Epoch')
+    ax3.set_ylabel('MSE Loss')
+    ax3.legend()
+    ax3.grid(True, alpha=0.3)
+    
+    # Final loss values
+    final_metrics = [
+        ['X Train', train_losses_x[-1]],
+        ['X Val', val_losses_x[-1]],
+        ['Y Train', train_losses_y[-1]],
+        ['Y Val', val_losses_y[-1]]
+    ]
+    
+    metrics_df = pd.DataFrame(final_metrics, columns=['Model', 'Final Loss'])
+    ax4.bar(metrics_df['Model'], metrics_df['Final Loss'], 
+            color=['lightblue', 'lightcoral', 'lightgreen', 'lightyellow'])
+    ax4.set_title('Final Training Metrics')
+    ax4.set_ylabel('MSE Loss')
+    ax4.tick_params(axis='x', rotation=45)
+    
+    plt.tight_layout()
+    plot_path = os.path.join(output_dir, "mlp_training_curves.png")
+    plt.savefig(plot_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    
+    print(f"✓ Training curves saved to {plot_path}")
+    
+    # Test refinement on validation set
+    print(f"\n📊 Testing refinement on validation set...")
+    
+    # Load best models
+    model_x.load_state_dict(torch.load(model_x_path))
+    model_y.load_state_dict(torch.load(model_y_path))
+    model_x.eval()
+    model_y.eval()
+    
+    with torch.no_grad():
+        # Get original predictions
+        original_x = scaler_x_input.inverse_transform(X_x_val_scaled)
+        original_y = scaler_y_input.inverse_transform(X_y_val_scaled)
         
-    train_mlp_model(args, 'x')
-    train_mlp_model(args, 'y')
+        # Get refined predictions
+        refined_x_scaled = model_x(torch.FloatTensor(X_x_val_scaled).to(device)).cpu().numpy()
+        refined_y_scaled = model_y(torch.FloatTensor(X_y_val_scaled).to(device)).cpu().numpy()
+        
+        refined_x = scaler_x_target.inverse_transform(refined_x_scaled)
+        refined_y = scaler_y_target.inverse_transform(refined_y_scaled)
+        
+        # Get ground truth
+        gt_x = scaler_x_target.inverse_transform(y_x_val_scaled)
+        gt_y = scaler_y_target.inverse_transform(y_y_val_scaled)
     
-    print("\n✅ Successfully trained both MLP refinement models.")
+    # Compute errors
+    original_coords = np.stack([original_x, original_y], axis=2)
+    refined_coords = np.stack([refined_x, refined_y], axis=2)
+    gt_coords = np.stack([gt_x, gt_y], axis=2)
+    
+    original_errors = np.sqrt(np.sum((original_coords - gt_coords)**2, axis=2))
+    refined_errors = np.sqrt(np.sum((refined_coords - gt_coords)**2, axis=2))
+    
+    original_mre = np.mean(original_errors)
+    refined_mre = np.mean(refined_errors)
+    improvement = (original_mre - refined_mre) / original_mre * 100
+    
+    print(f"✓ Validation Results:")
+    print(f"  Original MRE: {original_mre:.3f} pixels")
+    print(f"  Refined MRE: {refined_mre:.3f} pixels")
+    print(f"  Improvement: {improvement:.2f}%")
+    
+    # Save summary
+    summary = {
+        'stage': 'MLP Training Completed',
+        'original_mre': original_mre,
+        'refined_mre': refined_mre,
+        'improvement_percent': improvement,
+        'x_model_path': model_x_path,
+        'y_model_path': model_y_path,
+        'training_samples': len(X_x_train),
+        'validation_samples': len(X_x_val)
+    }
+    
+    summary_path = os.path.join(output_dir, "training_summary.json")
+    pd.DataFrame([summary]).to_json(summary_path, indent=2)
+    print(f"✓ Training summary saved to {summary_path}")
+    
+    return True
 
 def main():
+    """Main function with argument parsing."""
     parser = argparse.ArgumentParser(
-        description="Train an MLP refinement stage for HRNetV2 landmark detection."
-    )
+        description='MLP-based Refinement Stage for Cephalometric Landmark Detection',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Generate training data only:
+  python train_mlp_refinement.py --generate-data
+  
+  # Train MLP models only (requires existing data):
+  python train_mlp_refinement.py --train-mlp
+  
+  # Run both stages:
+  python train_mlp_refinement.py --generate-data --train-mlp
+        """)
     
     # --- Arguments for Data Generation ---
     gen_group = parser.add_argument_group('Data Generation')
-    gen_group.add_argument('--generate-data', action='store_true', help='Run the data generation stage.')
-    gen_group.add_argument('--hrnet-config', type=str, default='Pretrained_model/hrnetv2_w18_cephalometric_256x256_finetune.py', help='Path to the HRNetV2 config file.')
-    gen_group.add_argument('--hrnet-checkpoint', type=str, default=None, help='Path to the HRNetV2 model checkpoint. If not given, finds the latest best model in work_dir.')
-    gen_group.add_argument('--data-path', type=str, default="/content/drive/MyDrive/Lala's Masters/train_data_pure_old_numpy.json", help='Path to the JSON file with image data and ground truth.')
+    gen_group.add_argument('--generate-data', action='store_true', 
+                          help='Run the data generation stage.')
+    gen_group.add_argument('--hrnet-config', type=str, 
+                          default='Pretrained_model/hrnetv2_w18_cephalometric_256x256_finetune.py', 
+                          help='Path to the HRNetV2 config file.')
+    gen_group.add_argument('--hrnet-checkpoint', type=str, default=None, 
+                          help='Path to the HRNetV2 model checkpoint. If not given, finds the latest best model in work_dir.')
+    gen_group.add_argument('--data-path', type=str, 
+                          default="/content/drive/MyDrive/Lala's Masters/train_data_pure_old_numpy.json", 
+                          help='Path to the JSON file with image data and ground truth.')
     
     # --- Arguments for MLP Training ---
     train_group = parser.add_argument_group('MLP Training')
-    train_group.add_argument('--train-mlp', action='store_true', help='Run the MLP training stage.')
+    train_group.add_argument('--train-mlp', action='store_true', 
+                           help='Run the MLP training stage.')
     
     # --- Shared Arguments ---
-    parser.add_argument('--mlp-data-path', type=str, default='mlp_training_data.csv', help='Path to save/load the intermediate MLP training data CSV.')
-
-    args = parser.parse_args()
-
-    if args.generate_data:
-        generate_mlp_training_data(args)
+    parser.add_argument('--mlp-data-path', type=str, default='mlp_training_data.csv', 
+                       help='Path to save/load the intermediate MLP training data CSV.')
     
-    if args.train_mlp:
-        train_mlp(args)
-        
+    args = parser.parse_args()
+    
+    # Validate arguments
     if not args.generate_data and not args.train_mlp:
-        print("Please specify a stage to run: --generate-data and/or --train-mlp")
+        print("ERROR: Must specify at least one of --generate-data or --train-mlp")
         parser.print_help()
+        return
+    
+    print("="*80)
+    print("MLP-BASED REFINEMENT FOR CEPHALOMETRIC LANDMARK DETECTION")
+    print("="*80)
+    print("🎯 Goal: Train MLPs to refine HRNetV2 predictions")
+    print("📊 Architecture: 19 → 500 → 19 (separate for X and Y)")
+    print("⚙️  Training: 100 epochs, batch=16, lr=1e-5, Adam optimizer")
+    print("="*80)
+    
+    success = True
+    
+    # Stage 1: Generate training data
+    if args.generate_data:
+        success = generate_mlp_training_data(args)
+        if not success:
+            print("💥 Data generation failed!")
+            return
+    
+    # Stage 2: Train MLP models
+    if args.train_mlp:
+        if not os.path.exists(args.mlp_data_path):
+            print(f"ERROR: MLP training data not found at {args.mlp_data_path}")
+            print("Please run with --generate-data first")
+            return
+        
+        success = train_mlp_models(args)
+        if not success:
+            print("💥 MLP training failed!")
+            return
+    
+    if success:
+        print("\n🎉 MLP refinement training completed successfully!")
+        print("\n📋 Next steps:")
+        print("1. 🧪 Test the refinement models on test set")
+        print("2. 📊 Compare refined vs original predictions")
+        print("3. 🎨 Visualize improvement on challenging landmarks")
+        print("4. 🚀 Integrate refinement into inference pipeline")
 
 if __name__ == "__main__":
-    # Apply PyTorch safe loading fix for MMPose checkpoints
-    _original_torch_load = torch.load
-    def safe_torch_load(*args, **kwargs):
-        # MMPose checkpoints contain metadata (like HistoryBuffer) that requires
-        # `weights_only=False`. Since we are using a self-trained, trusted model,
-        # this is safe.
-        if 'weights_only' not in kwargs:
-            kwargs['weights_only'] = False
-        return _original_torch_load(*args, **kwargs)
-    torch.load = safe_torch_load
-
     main() 
