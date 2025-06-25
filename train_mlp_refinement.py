@@ -49,10 +49,10 @@ class MLPRefinementModel(nn.Module):
             nn.Linear(input_dim, hidden_dim),
             nn.ReLU(),
             nn.Dropout(0.1),
-            nn.Linear(hidden_dim, hidden_dim),  # Additional 500 neuron layer
+            nn.Linear(hidden_dim, 256),  # Additional 500 neuron layer
             nn.ReLU(),
             nn.Dropout(0.1),
-            nn.Linear(hidden_dim, output_dim)
+            nn.Linear(256, output_dim)
         )
         
     def forward(self, x):
@@ -420,7 +420,7 @@ def train_mlp_models(args):
         input_losses_val = []
         best_val_loss = float('inf')
         
-        for epoch in range(1000):
+        for epoch in range(3000):
             # Training
             model.train()
             epoch_train_loss = 0.0
@@ -472,7 +472,7 @@ def train_mlp_models(args):
                 torch.save(model.state_dict(), save_path)
             
             if (epoch + 1) % 20 == 0:
-                print(f"  Epoch {epoch+1}/1000 - Train Loss: {avg_train_loss:.6f}, Val Loss: {avg_val_loss:.6f}, Input Loss Train: {avg_input_loss_train:.6f}, Input Loss Val: {avg_input_loss_val:.6f}")
+                print(f"  Epoch {epoch+1}/3000 - Train Loss: {avg_train_loss:.6f}, Val Loss: {avg_val_loss:.6f}, Input Loss Train: {avg_input_loss_train:.6f}, Input Loss Val: {avg_input_loss_val:.6f}")
         
         print(f"✓ {model_name} training completed. Best val loss: {best_val_loss:.6f}")
         print(f"  Final Input Loss - Train: {input_losses_train[-1]:.6f}, Val: {input_losses_val[-1]:.6f}")
