@@ -200,9 +200,16 @@ def main():
             return np.degrees(np.arccos(cos_val))
 
         def _compute_class(row):
-            # If class already available and not NaN, keep it
+            # If class already available and not NaN, handle it
             if 'class' in row and pd.notna(row['class']):
-                return int(row['class'])
+                val = str(row['class']).strip().upper()
+                if val in ['1', 'I']:
+                    return 1
+                if val in ['2', 'II']:
+                    return 2
+                if val in ['3', 'III']:
+                    return 3
+                # If we can't parse the existing class, re-compute it below
 
             s = (row['sella_x'], row['sella_y'])
             n = (row['nasion_x'], row['nasion_y'])
