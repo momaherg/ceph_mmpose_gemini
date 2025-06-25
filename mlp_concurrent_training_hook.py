@@ -160,6 +160,25 @@ class ConcurrentMLPTrainingHook(Hook):
         if not hasattr(actual_model, 'cfg') and hasattr(runner, 'cfg'):
             actual_model.cfg = runner.cfg
             
+        # Set up dataset_meta if missing (required for inference_topdown)
+        if not hasattr(actual_model, 'dataset_meta'):
+            try:
+                import cephalometric_dataset_info
+                dataset_meta = {
+                    'dataset_name': 'cephalometric',
+                    'joint_weights': cephalometric_dataset_info.dataset_info.get('joint_weights', [1.0] * 19),
+                    'sigmas': cephalometric_dataset_info.dataset_info.get('sigmas', [0.035] * 19),
+                    'flip_indices': cephalometric_dataset_info.dataset_info.get('flip_indices', list(range(19))),
+                    'keypoint_info': cephalometric_dataset_info.dataset_info.get('keypoint_info', {}),
+                    'skeleton_info': cephalometric_dataset_info.dataset_info.get('skeleton_info', []),
+                    'keypoint_name2id': {f'keypoint_{i}': i for i in range(19)},
+                    'keypoint_id2name': {i: f'keypoint_{i}' for i in range(19)},
+                }
+                actual_model.dataset_meta = dataset_meta
+                logger.info('[ConcurrentMLPTrainingHook] Set dataset_meta for inference compatibility')
+            except Exception as e:
+                logger.warning(f'[ConcurrentMLPTrainingHook] Could not set dataset_meta: {e}')
+        
         model.eval()
         preds_x: List[np.ndarray] = []
         preds_y: List[np.ndarray] = []
