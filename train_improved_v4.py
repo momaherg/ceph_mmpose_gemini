@@ -14,6 +14,7 @@ from mmengine.runner import Runner
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+import argparse
 
 # Suppress warnings
 warnings.filterwarnings('ignore')
@@ -67,6 +68,17 @@ def plot_training_progress(work_dir):
 def main():
     """Main improved training function with resolution and loss upgrades."""
     
+    parser = argparse.ArgumentParser(
+        description='Improved Training Script for Cephalometric Landmark Detection - V4')
+    parser.add_argument(
+        '--test_split_file',
+        type=str,
+        default=None,
+        help=
+        'Path to a text file containing patient IDs for the test set, one ID per line.'
+    )
+    args = parser.parse_args()
+    
     print("="*80)
     print("IMPROVED CEPHALOMETRIC TRAINING - V4")
     print("🚀 MAJOR UPGRADES: 384×384 Resolution + Hard Keypoint Mining")
@@ -112,9 +124,58 @@ def main():
         main_df = pd.read_json(data_file_path)
         print(f"Main DataFrame loaded. Shape: {main_df.shape}")
 
-        train_df = main_df[main_df['set'] == 'train'].reset_index(drop=True)
-        val_df = main_df[main_df['set'] == 'dev'].reset_index(drop=True)
-        test_df = main_df[main_df['set'] == 'test'].reset_index(drop=True)
+        if args.test_split_file:
+            print(
+                f"Splitting data using external test set file: {args.test_split_file}"
+            )
+            with open(args.test_split_file, 'r') as f:
+                # Read IDs and convert to integer for matching
+                test_patient_ids = {
+                    int(line.strip())
+                    for line in f if line.strip()
+                }
+
+            if 'patient_id' not in main_df.columns:
+                print(
+                    "ERROR: 'patient_id' column not found in the main DataFrame."
+                )
+                return
+            # Ensure the DataFrame's patient_id is also an integer
+            main_df['patient_id'] = main_df['patient_id'].astype(int)
+
+            test_df = main_df[main_df['patient_id'].isin(
+                test_patient_ids)].reset_index(drop=True)
+            remaining_df = main_df[~main_df['patient_id'].
+                                   isin(test_patient_ids)]
+
+            if len(remaining_df) >= 100:
+                # We have enough data to sample 100 for validation
+                val_df = remaining_df.sample(n=100, random_state=42)
+                train_df = remaining_df.drop(val_df.index).reset_index(
+                    drop=True)
+                val_df = val_df.reset_index(drop=True)
+            else:
+                # Not enough data for a 100-patient validation set
+                print(
+                    f"WARNING: Only {len(remaining_df)} patients remaining after selecting the test set."
+                )
+                print(
+                    "Splitting the remaining data into 50% validation and 50% training."
+                )
+                if len(remaining_df) > 1:
+                    val_df = remaining_df.sample(frac=0.5, random_state=42)
+                    train_df = remaining_df.drop(val_df.index).reset_index(
+                        drop=True)
+                    val_df = val_df.reset_index(drop=True)
+                else:  # Only 0 or 1 patient left, not enough to split
+                    val_df = remaining_df.reset_index(drop=True)
+                    train_df = pd.DataFrame()  # Empty training set
+        else:
+            print("Splitting data using 'set' column from the JSON file.")
+            train_df = main_df[main_df['set'] == 'train'].reset_index(
+                drop=True)
+            val_df = main_df[main_df['set'] == 'dev'].reset_index(drop=True)
+            test_df = main_df[main_df['set'] == 'test'].reset_index(drop=True)
 
         print(f"Train DataFrame shape: {train_df.shape}")
         print(f"Validation DataFrame shape: {val_df.shape}")
