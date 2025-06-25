@@ -123,6 +123,64 @@ def generate_mlp_training_data(args):
         print(f"✗ Failed to load data: {e}")
         return False
     
+    # Split data following the same logic as train_improved_v4.py
+    print(f"\n📊 Splitting data...")
+    
+    if args.test_split_file:
+        print(f"Using external test set file: {args.test_split_file}")
+        with open(args.test_split_file, 'r') as f:
+            # Read IDs and convert to integer for matching
+            test_patient_ids = {
+                int(line.strip())
+                for line in f if line.strip()
+            }
+
+        if 'patient_id' not in main_df.columns:
+            print("ERROR: 'patient_id' column not found in the main DataFrame.")
+            return False
+        
+        # Ensure the DataFrame's patient_id is also an integer
+        main_df['patient_id'] = main_df['patient_id'].astype(int)
+
+        test_df = main_df[main_df['patient_id'].isin(test_patient_ids)].reset_index(drop=True)
+        remaining_df = main_df[~main_df['patient_id'].isin(test_patient_ids)]
+
+        if len(remaining_df) >= 100:
+            # We have enough data to sample 100 for validation
+            val_df = remaining_df.sample(n=100, random_state=42)
+            train_df = remaining_df.drop(val_df.index).reset_index(drop=True)
+            val_df = val_df.reset_index(drop=True)
+        else:
+            # Not enough data for a 100-patient validation set
+            print(f"WARNING: Only {len(remaining_df)} patients remaining after selecting the test set.")
+            print("Splitting the remaining data into 50% validation and 50% training.")
+            if len(remaining_df) > 1:
+                val_df = remaining_df.sample(frac=0.5, random_state=42)
+                train_df = remaining_df.drop(val_df.index).reset_index(drop=True)
+                val_df = val_df.reset_index(drop=True)
+            else:  # Only 0 or 1 patient left, not enough to split
+                val_df = remaining_df.reset_index(drop=True)
+                train_df = pd.DataFrame()  # Empty training set
+    else:
+        print("Splitting data using 'set' column from the JSON file.")
+        train_df = main_df[main_df['set'] == 'train'].reset_index(drop=True)
+        val_df = main_df[main_df['set'] == 'dev'].reset_index(drop=True)
+        test_df = main_df[main_df['set'] == 'test'].reset_index(drop=True)
+
+    print(f"✓ Data split completed:")
+    print(f"  Train samples: {len(train_df)}")
+    print(f"  Validation samples: {len(val_df)}")
+    print(f"  Test samples: {len(test_df)}")
+    
+    if train_df.empty or val_df.empty:
+        print("ERROR: Training or validation DataFrame is empty.")
+        return False
+    
+    # Combine train and validation for MLP training (we'll split later in MLP training stage)
+    mlp_source_df = pd.concat([train_df, val_df]).reset_index(drop=True)
+    print(f"✓ Using {len(mlp_source_df)} samples for MLP training (train + validation)")
+    print(f"  Excluding {len(test_df)} test samples to prevent data leakage")
+    
     # Get landmark information
     landmark_names = cephalometric_dataset_info.landmark_names_in_order
     landmark_cols = cephalometric_dataset_info.original_landmark_cols
@@ -144,11 +202,12 @@ def generate_mlp_training_data(args):
     all_ground_truth_x = []
     all_ground_truth_y = []
     valid_samples = []
+    original_sets = []  # Store original train/val labels
     
-    print(f"\n🔄 Running inference on {len(main_df)} images...")
+    print(f"\n🔄 Running inference on {len(mlp_source_df)} images (excluding test set)...")
     
     # Process each image
-    for idx, row in main_df.iterrows():
+    for idx, row in mlp_source_df.iterrows():
         try:
             # Get image
             img_array = np.array(row['Image'], dtype=np.uint8).reshape((224, 224, 3))
@@ -192,15 +251,26 @@ def generate_mlp_training_data(args):
                 all_ground_truth_x.append(gt_x)
                 all_ground_truth_y.append(gt_y)
                 valid_samples.append(idx)
+                
+                # Store original set information
+                if args.test_split_file:
+                    # Determine if this was originally train or val based on our split
+                    original_idx = mlp_source_df.index[idx]
+                    if original_idx in train_df.index:
+                        original_sets.append('train')
+                    else:
+                        original_sets.append('val')
+                else:
+                    original_sets.append(row.get('set', 'unknown'))
             
             if (idx + 1) % 100 == 0:
-                print(f"  Processed {idx + 1}/{len(main_df)} images")
+                print(f"  Processed {idx + 1}/{len(mlp_source_df)} images")
                 
         except Exception as e:
             print(f"  Warning: Failed to process image {idx}: {e}")
             continue
     
-    print(f"✓ Successfully processed {len(valid_samples)} out of {len(main_df)} images")
+    print(f"✓ Successfully processed {len(valid_samples)} out of {len(mlp_source_df)} images")
     
     # Convert to numpy arrays
     all_predictions_x = np.array(all_predictions_x)
@@ -220,6 +290,7 @@ def generate_mlp_training_data(args):
     
     # Add metadata
     data_dict['sample_idx'] = valid_samples
+    data_dict['original_set'] = original_sets
     
     mlp_df = pd.DataFrame(data_dict)
     
@@ -233,6 +304,12 @@ def generate_mlp_training_data(args):
     print(f"  Features per coordinate: 19 landmarks")
     print(f"  Input dimension: 19 (predicted coordinates)")
     print(f"  Output dimension: 19 (ground truth coordinates)")
+    
+    # Print distribution by original set
+    set_counts = pd.Series(original_sets).value_counts()
+    print(f"  Sample distribution:")
+    for set_name, count in set_counts.items():
+        print(f"    {set_name}: {count} samples")
     
     # Compute initial errors
     pred_coords = np.stack([all_predictions_x, all_predictions_y], axis=2)
@@ -558,6 +635,8 @@ Examples:
     gen_group.add_argument('--data-path', type=str, 
                           default="/content/drive/MyDrive/Lala's Masters/train_data_pure_old_numpy.json", 
                           help='Path to the JSON file with image data and ground truth.')
+    gen_group.add_argument('--test-split-file', type=str, default=None, 
+                          help='Path to the external test set file.')
     
     # --- Arguments for MLP Training ---
     train_group = parser.add_argument_group('MLP Training')
