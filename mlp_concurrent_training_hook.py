@@ -162,44 +162,111 @@ class ConcurrentMLPTrainingHook(Hook):
             
         try:
             with torch.no_grad():
-                # Extract predictions from model outputs
-                if hasattr(outputs, 'pred_instances') and hasattr(outputs.pred_instances, 'keypoints'):
-                    pred_keypoints = outputs.pred_instances.keypoints.detach().cpu()  # [batch_size, num_keypoints, 2]
-                elif isinstance(outputs, dict) and 'pred_instances' in outputs:
-                    pred_keypoints = outputs['pred_instances'].keypoints.detach().cpu()
-                else:
-                    # Try to find keypoints in outputs structure
-                    return
+                # Debug: Print structure to understand the data format
+                logger = runner.logger
+                if batch_idx == 0:  # Only log on first batch to avoid spam
+                    logger.info(f'[ConcurrentMLPTrainingHook] Debug - outputs type: {type(outputs)}')
+                    if hasattr(outputs, '__dict__'):
+                        logger.info(f'[ConcurrentMLPTrainingHook] Debug - outputs attributes: {list(outputs.__dict__.keys())}')
+                    elif isinstance(outputs, dict):
+                        logger.info(f'[ConcurrentMLPTrainingHook] Debug - outputs keys: {list(outputs.keys())}')
+                    
+                    logger.info(f'[ConcurrentMLPTrainingHook] Debug - data_batch type: {type(data_batch)}')
+                    if isinstance(data_batch, dict):
+                        logger.info(f'[ConcurrentMLPTrainingHook] Debug - data_batch keys: {list(data_batch.keys())}')
                 
-                # Extract ground truth from data batch
+                # Try multiple ways to extract predictions
+                pred_keypoints = None
+                
+                # Method 1: Direct attribute access
+                if hasattr(outputs, 'pred_instances') and hasattr(outputs.pred_instances, 'keypoints'):
+                    pred_keypoints = outputs.pred_instances.keypoints.detach().cpu()
+                
+                # Method 2: Dictionary access
+                elif isinstance(outputs, dict):
+                    if 'pred_instances' in outputs and hasattr(outputs['pred_instances'], 'keypoints'):
+                        pred_keypoints = outputs['pred_instances'].keypoints.detach().cpu()
+                    elif 'predictions' in outputs:
+                        pred_keypoints = outputs['predictions'].detach().cpu()
+                    elif 'pred_keypoints' in outputs:
+                        pred_keypoints = outputs['pred_keypoints'].detach().cpu()
+                
+                # Method 3: Check if outputs is a loss dict and we need to get predictions from runner
+                if pred_keypoints is None:
+                    # Sometimes outputs only contains loss, try to get predictions from the model's last forward
+                    model = runner.model
+                    if hasattr(model, '_last_predictions'):
+                        pred_keypoints = model._last_predictions.detach().cpu()
+                
+                # Try to extract ground truth from data_batch
                 gt_keypoints = None
+                
                 if isinstance(data_batch, dict):
+                    # Method 1: data_samples list
                     if 'data_samples' in data_batch:
                         data_samples = data_batch['data_samples']
                         if isinstance(data_samples, list) and len(data_samples) > 0:
-                            # Handle list of data samples
                             gt_list = []
                             for sample in data_samples:
                                 if hasattr(sample, 'gt_instances') and hasattr(sample.gt_instances, 'keypoints'):
-                                    gt_list.append(sample.gt_instances.keypoints)
+                                    gt_kpts = sample.gt_instances.keypoints
+                                    if isinstance(gt_kpts, torch.Tensor):
+                                        gt_list.append(gt_kpts.cpu())
+                                    else:
+                                        gt_list.append(torch.tensor(gt_kpts).cpu())
                             if gt_list:
-                                gt_keypoints = torch.stack(gt_list).cpu()  # [batch_size, num_keypoints, 2]
+                                gt_keypoints = torch.stack(gt_list)
+                        
+                        # Method 2: Single data sample
                         elif hasattr(data_samples, 'gt_instances') and hasattr(data_samples.gt_instances, 'keypoints'):
                             gt_keypoints = data_samples.gt_instances.keypoints.cpu()
+                    
+                    # Method 3: Direct keypoints in batch
+                    elif 'keypoints' in data_batch:
+                        gt_keypoints = data_batch['keypoints'].cpu()
+                    elif 'gt_keypoints' in data_batch:
+                        gt_keypoints = data_batch['gt_keypoints'].cpu()
+                
+                # Log what we found (only on first batch)
+                if batch_idx == 0:
+                    logger.info(f'[ConcurrentMLPTrainingHook] Debug - pred_keypoints: {pred_keypoints.shape if pred_keypoints is not None else None}')
+                    logger.info(f'[ConcurrentMLPTrainingHook] Debug - gt_keypoints: {gt_keypoints.shape if gt_keypoints is not None else None}')
                 
                 if gt_keypoints is None or pred_keypoints is None:
+                    if batch_idx == 0:
+                        logger.warning('[ConcurrentMLPTrainingHook] Could not extract keypoints from batch')
                     return
                 
-                # Ensure shapes match
+                # Ensure both tensors have the same shape
                 if pred_keypoints.shape != gt_keypoints.shape:
+                    if batch_idx == 0:
+                        logger.warning(f'[ConcurrentMLPTrainingHook] Shape mismatch: pred {pred_keypoints.shape} vs gt {gt_keypoints.shape}')
+                    return
+                
+                # Handle different possible shapes
+                if len(pred_keypoints.shape) == 3:  # [batch_size, num_keypoints, 2]
+                    batch_size, num_keypoints, coord_dim = pred_keypoints.shape
+                elif len(pred_keypoints.shape) == 4:  # [batch_size, 1, num_keypoints, 2]
+                    pred_keypoints = pred_keypoints.squeeze(1)
+                    gt_keypoints = gt_keypoints.squeeze(1)
+                    batch_size, num_keypoints, coord_dim = pred_keypoints.shape
+                else:
+                    if batch_idx == 0:
+                        logger.warning(f'[ConcurrentMLPTrainingHook] Unexpected keypoints shape: {pred_keypoints.shape}')
                     return
                 
                 # Check if we have the expected number of keypoints (19)
-                if pred_keypoints.shape[1] != 19:
+                if num_keypoints != 19:
+                    if batch_idx == 0:
+                        logger.warning(f'[ConcurrentMLPTrainingHook] Expected 19 keypoints, got {num_keypoints}')
+                    return
+                
+                if coord_dim != 2:
+                    if batch_idx == 0:
+                        logger.warning(f'[ConcurrentMLPTrainingHook] Expected 2 coordinates, got {coord_dim}')
                     return
                 
                 # Store coordinates for each sample in the batch
-                batch_size = pred_keypoints.shape[0]
                 for i in range(batch_size):
                     pred_x = pred_keypoints[i, :, 0]  # [19]
                     pred_y = pred_keypoints[i, :, 1]  # [19]
@@ -212,13 +279,18 @@ class ConcurrentMLPTrainingHook(Hook):
                         self._epoch_preds_y.append(pred_y)
                         self._epoch_gts_x.append(gt_x)
                         self._epoch_gts_y.append(gt_y)
+                
+                # Log collection progress occasionally
+                if batch_idx % 20 == 0 and len(self._epoch_preds_x) > 0:
+                    logger.info(f'[ConcurrentMLPTrainingHook] Collected {len(self._epoch_preds_x)} samples so far...')
                         
         except Exception as e:
-            # Silently continue if there's an issue with a particular batch
-            # Only log occasionally to avoid spam
-            if batch_idx % 100 == 0:
+            # Log the first few errors to help debug
+            if batch_idx < 5:
                 logger = runner.logger
                 logger.warning(f'[ConcurrentMLPTrainingHook] Failed to collect batch {batch_idx}: {e}')
+                import traceback
+                logger.warning(f'[ConcurrentMLPTrainingHook] Traceback: {traceback.format_exc()}')
 
     def after_train_epoch(self, runner: Runner):
         """After each HRNetV2 epoch, train MLP using collected predictions."""
