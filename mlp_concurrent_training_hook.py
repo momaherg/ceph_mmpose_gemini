@@ -234,11 +234,23 @@ class ConcurrentMLPTrainingHook(Hook):
                 
                 if results and len(results) > 0 and hasattr(results[0], 'pred_instances'):
                     pred_keypoints = results[0].pred_instances.keypoints[0]
+                    
                     # Scale back to original image size (224x224)
                     scale_x = 224.0 / input_size[0]
                     scale_y = 224.0 / input_size[1]
-                    pred_keypoints = pred_keypoints * torch.tensor([scale_x, scale_y]).to(pred_keypoints.device)
-                    return tensor_to_numpy(pred_keypoints)
+                    
+                    # Handle both tensor and numpy array cases
+                    if isinstance(pred_keypoints, torch.Tensor):
+                        # If tensor, scale on same device
+                        scale_tensor = torch.tensor([scale_x, scale_y]).to(pred_keypoints.device)
+                        pred_keypoints = pred_keypoints * scale_tensor
+                        return tensor_to_numpy(pred_keypoints)
+                    else:
+                        # If already numpy, scale directly
+                        pred_keypoints = tensor_to_numpy(pred_keypoints)
+                        pred_keypoints[:, 0] *= scale_x
+                        pred_keypoints[:, 1] *= scale_y
+                        return pred_keypoints
                 else:
                     return None
                     
