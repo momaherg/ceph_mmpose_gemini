@@ -124,58 +124,93 @@ class ConcurrentMLPTrainer:
         
         with torch.no_grad():
             for batch_idx, batch_data in enumerate(train_dataloader):
-                # Extract images and ground truth from batch
-                images = batch_data['inputs']  # This should be the batch of images
-                
-                # Process each image in the batch
-                for img_idx in range(len(images)):
-                    try:
-                        # Get single image
-                        img_tensor = images[img_idx]
-                        
-                        # Convert tensor to numpy for inference_topdown
-                        if isinstance(img_tensor, torch.Tensor):
-                            img_array = img_tensor.permute(1, 2, 0).cpu().numpy()
-                            img_array = (img_array * 255).astype(np.uint8)
-                        else:
-                            img_array = img_tensor
-                        
-                        # Get ground truth from batch metadata
-                        # This might need adjustment based on your exact data structure
-                        batch_meta = batch_data.get('data_samples', [])
-                        if img_idx < len(batch_meta):
-                            gt_keypoints = batch_meta[img_idx].gt_instances.keypoints.numpy()
-                        else:
+                try:
+                    # Extract data samples from MMPose batch structure
+                    data_samples = batch_data.get('data_samples', [])
+                    inputs = batch_data.get('inputs', None)
+                    
+                    if inputs is None or len(data_samples) == 0:
+                        continue
+                    
+                    # Process each sample in the batch
+                    for sample_idx, data_sample in enumerate(data_samples):
+                        try:
+                            # Get ground truth keypoints
+                            if hasattr(data_sample, 'gt_instances') and hasattr(data_sample.gt_instances, 'keypoints'):
+                                gt_keypoints = data_sample.gt_instances.keypoints.numpy()
+                                if gt_keypoints.shape[0] == 0:  # No keypoints
+                                    continue
+                                
+                                # Get the image tensor
+                                if sample_idx < len(inputs):
+                                    img_tensor = inputs[sample_idx]
+                                else:
+                                    continue
+                                
+                                # Convert tensor to numpy for inference
+                                if isinstance(img_tensor, torch.Tensor):
+                                    # Handle different tensor formats
+                                    if img_tensor.dim() == 3:  # C, H, W
+                                        img_array = img_tensor.permute(1, 2, 0).cpu().numpy()
+                                    else:  # Unexpected format
+                                        continue
+                                    
+                                    # Denormalize if needed (assuming ImageNet normalization)
+                                    if img_array.min() < 0:  # Likely normalized
+                                        # Reverse ImageNet normalization
+                                        mean = np.array([0.485, 0.456, 0.406])
+                                        std = np.array([0.229, 0.224, 0.225])
+                                        img_array = img_array * std + mean
+                                    
+                                    # Convert to uint8
+                                    img_array = np.clip(img_array * 255, 0, 255).astype(np.uint8)
+                                else:
+                                    continue
+                                
+                                # Get image dimensions
+                                h, w = img_array.shape[:2]
+                                bbox = np.array([[0, 0, w, h]], dtype=np.float32)
+                                
+                                # Run inference using the HRNetV2 model
+                                results = inference_topdown(hrnet_model, img_array, bboxes=bbox, bbox_format='xyxy')
+                                
+                                if results and len(results) > 0:
+                                    pred_keypoints = results[0].pred_instances.keypoints[0]
+                                    
+                                    # Extract coordinates
+                                    pred_x = pred_keypoints[:, 0]
+                                    pred_y = pred_keypoints[:, 1]
+                                    
+                                    # Handle ground truth format (assuming first person, all keypoints)
+                                    if gt_keypoints.ndim == 3:  # [num_persons, num_keypoints, 2/3]
+                                        gt_x = gt_keypoints[0, :, 0]
+                                        gt_y = gt_keypoints[0, :, 1]
+                                    elif gt_keypoints.ndim == 2:  # [num_keypoints, 2/3]
+                                        gt_x = gt_keypoints[:, 0]
+                                        gt_y = gt_keypoints[:, 1]
+                                    else:
+                                        continue
+                                    
+                                    # Ensure we have 19 landmarks
+                                    if len(pred_x) == 19 and len(gt_x) == 19:
+                                        all_predictions_x.append(pred_x)
+                                        all_predictions_y.append(pred_y)
+                                        all_ground_truth_x.append(gt_x)
+                                        all_ground_truth_y.append(gt_y)
+                                
+                        except Exception as e:
+                            print(f"      Warning: Failed to process sample {sample_idx}: {e}")
                             continue
-                        
-                        # Prepare bbox (full image)
-                        h, w = img_array.shape[:2]
-                        bbox = np.array([[0, 0, w, h]], dtype=np.float32)
-                        
-                        # Run inference
-                        results = inference_topdown(hrnet_model, img_array, bboxes=bbox, bbox_format='xyxy')
-                        
-                        if results and len(results) > 0:
-                            pred_keypoints = results[0].pred_instances.keypoints[0]
-                            
-                            # Extract coordinates
-                            pred_x = pred_keypoints[:, 0]
-                            pred_y = pred_keypoints[:, 1]
-                            gt_x = gt_keypoints[0, :, 0]  # Assuming single person
-                            gt_y = gt_keypoints[0, :, 1]
-                            
-                            # Store data
-                            all_predictions_x.append(pred_x)
-                            all_predictions_y.append(pred_y)
-                            all_ground_truth_x.append(gt_x)
-                            all_ground_truth_y.append(gt_y)
-                            
-                    except Exception as e:
-                        continue  # Skip problematic samples
                 
-                # Limit to reasonable number of samples per epoch to avoid excessive computation
-                if len(all_predictions_x) >= 500:  # Process max 500 samples per epoch
+                except Exception as e:
+                    print(f"    Warning: Failed to process batch {batch_idx}: {e}")
+                    continue
+                
+                # Limit to reasonable number of samples per epoch
+                if len(all_predictions_x) >= 500:
                     break
+        
+        print(f"    📊 Generated {len(all_predictions_x)} prediction samples for MLP training")
         
         if len(all_predictions_x) == 0:
             return None, None, None, None
@@ -375,7 +410,7 @@ class CustomRunner(Runner):
     """Custom Runner that integrates MLP training after each epoch."""
     
     def __init__(self, *args, **kwargs):
-        # Extract MLP trainer from kwargs
+        # Extract MLP trainer from kwargs before calling super()
         self.mlp_trainer = kwargs.pop('mlp_trainer', None)
         self.landmark_cols = kwargs.pop('landmark_cols', None)
         
@@ -383,6 +418,25 @@ class CustomRunner(Runner):
         
         if self.mlp_trainer is None:
             raise ValueError("MLP trainer must be provided")
+    
+    @classmethod
+    def from_cfg(cls, cfg, **kwargs):
+        """Override from_cfg to handle custom arguments."""
+        # Extract custom arguments
+        mlp_trainer = kwargs.pop('mlp_trainer', None)
+        landmark_cols = kwargs.pop('landmark_cols', None)
+        
+        # Create runner normally
+        runner = super().from_cfg(cfg, **kwargs)
+        
+        # Set custom attributes
+        runner.mlp_trainer = mlp_trainer
+        runner.landmark_cols = landmark_cols
+        
+        if runner.mlp_trainer is None:
+            raise ValueError("MLP trainer must be provided")
+        
+        return runner
     
     def train_epoch(self):
         """Override train_epoch to include MLP training."""
