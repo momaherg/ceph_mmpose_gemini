@@ -126,6 +126,12 @@ class ConcurrentMLPTrainingHook(Hook):
         self.criterion = nn.MSELoss()
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
+        # Online buffers to accumulate batch-wise predictions/GT during the epoch
+        self._buf_preds_x: List[np.ndarray] = []
+        self._buf_preds_y: List[np.ndarray] = []
+        self._buf_gts_x:   List[np.ndarray] = []
+        self._buf_gts_y:   List[np.ndarray] = []
+
     # ---------------------------------------------------------------------
     # MMEngine lifecycle methods
     # ---------------------------------------------------------------------
@@ -139,259 +145,32 @@ class ConcurrentMLPTrainingHook(Hook):
         self.opt_x = optim.Adam(self.mlp_x.parameters(), lr=self.mlp_lr, weight_decay=self.mlp_weight_decay)
         self.opt_y = optim.Adam(self.mlp_y.parameters(), lr=self.mlp_lr, weight_decay=self.mlp_weight_decay)
 
+        # Reset buffers at the very start
+        self._reset_epoch_buffers()
+
     def after_train_epoch(self, runner: Runner):
         """After each HRNetV2 epoch, train MLP on-the-fly using current predictions."""
         logger: MMLogger = runner.logger
         assert self.mlp_x is not None and self.mlp_y is not None
 
         # -----------------------------------------------------------------
-        # Step 1: Generate predictions on training data (GPU-optimized)
+        # NEW STEP 1: Use accumulated predictions from this epoch
         # -----------------------------------------------------------------
-        
-        # Get the actual model, handling potential wrapping
-        model = runner.model
-        if hasattr(model, 'module'):
-            # Handle DDP or other wrapped models
-            actual_model = model.module
-        else:
-            actual_model = model
-            
-        # Ensure model has required attributes for inference
-        if not hasattr(actual_model, 'cfg') and hasattr(runner, 'cfg'):
-            actual_model.cfg = runner.cfg
-            
-        model.eval()
-        preds_x: List[np.ndarray] = []
-        preds_y: List[np.ndarray] = []
-        gts_x:   List[np.ndarray] = []
-        gts_y:   List[np.ndarray] = []
 
-        train_dataset = runner.train_dataloader.dataset
-        logger.info('[ConcurrentMLPTrainingHook] Generating predictions for MLP on GPU...')
-
-        # Helper function to safely convert tensor to numpy
-        def tensor_to_numpy(data):
-            """Safely convert tensor to numpy, handling both tensor and numpy inputs."""
-            if isinstance(data, torch.Tensor):
-                return data.cpu().numpy()
-            elif isinstance(data, np.ndarray):
-                return data
-            else:
-                return np.array(data)
-
-        # Enhanced inference function that works with runner model
-        def run_model_inference(model, img_array):
-            """Run inference using the model directly, bypassing inference_topdown issues."""
-            try:
-                # Prepare input in the format expected by the model
-                import cv2
-                from mmpose.structures import PoseDataSample
-                from mmengine.structures import InstanceData
-                
-                # Resize image to model input size (384x384 based on config)
-                input_size = (384, 384)
-                img_resized = cv2.resize(img_array, input_size)
-                
-                # Convert to tensor and normalize (standard ImageNet normalization)
-                img_tensor = torch.from_numpy(img_resized).float().permute(2, 0, 1) / 255.0
-                mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
-                std = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
-                img_tensor = (img_tensor - mean) / std
-                
-                # Add batch dimension and move to device
-                img_batch = img_tensor.unsqueeze(0).to(self.device)
-                
-                # Create data sample with bbox covering whole image and required metadata
-                data_sample = PoseDataSample()
-                
-                # Create instance data with bbox
-                instance_data = InstanceData()
-                instance_data.bboxes = torch.tensor([[0, 0, input_size[0], input_size[1]]], dtype=torch.float32)
-                instance_data.bbox_scores = torch.tensor([1.0], dtype=torch.float32)  # Add bbox confidence score
-                data_sample.gt_instances = instance_data
-                
-                # Add required metadata for the model
-                # These should mimic what the pipeline does
-                center = np.array([img_array.shape[1]/2, img_array.shape[0]/2])
-                scale = np.array([img_array.shape[1], img_array.shape[0]])
-                
-                data_sample.set_metainfo({
-                    'flip_indices': list(range(19)),  # No flipping for landmarks 0-18
-                    'input_size': input_size,
-                    'center': center,
-                    'scale': scale,
-                    'input_center': center,
-                    'input_scale': scale
-                })
-                
-                # Create batch inputs
-                batch_inputs = img_batch
-                batch_data_samples = [data_sample]
-                
-                # Run model inference
-                with torch.no_grad():
-                    results = model(batch_inputs, batch_data_samples, mode='predict')
-                
-                if results and len(results) > 0 and hasattr(results[0], 'pred_instances'):
-                    pred_keypoints = results[0].pred_instances.keypoints[0]
-                    
-                    # Scale back to original image size (224x224)
-                    scale_x = 224.0 / input_size[0]
-                    scale_y = 224.0 / input_size[1]
-                    
-                    # Handle both tensor and numpy array cases
-                    if isinstance(pred_keypoints, torch.Tensor):
-                        # If tensor, scale on same device
-                        scale_tensor = torch.tensor([scale_x, scale_y]).to(pred_keypoints.device)
-                        pred_keypoints = pred_keypoints * scale_tensor
-                        return tensor_to_numpy(pred_keypoints)
-                    else:
-                        # If already numpy, scale directly
-                        pred_keypoints = tensor_to_numpy(pred_keypoints)
-                        pred_keypoints[:, 0] *= scale_x
-                        pred_keypoints[:, 1] *= scale_y
-                        return pred_keypoints
-                else:
-                    return None
-                    
-            except Exception as e:
-                logger.warning(f'[ConcurrentMLPTrainingHook] Model inference failed: {e}')
-                return None
-
-        # Access training data more robustly
-        try:
-            from tqdm import tqdm
-            
-            # Method 1: Try to access the raw annotation file
-            if hasattr(train_dataset, 'ann_file') and train_dataset.ann_file:
-                logger.info(f'[ConcurrentMLPTrainingHook] Loading data from annotation file: {train_dataset.ann_file}')
-                import pandas as pd
-                
-                try:
-                    df = pd.read_json(train_dataset.ann_file)
-                    logger.info(f'[ConcurrentMLPTrainingHook] Loaded {len(df)} samples from annotation file')
-                    
-                    # Import landmark info
-                    import cephalometric_dataset_info
-                    landmark_names = cephalometric_dataset_info.landmark_names_in_order
-                    landmark_cols = cephalometric_dataset_info.original_landmark_cols
-                    
-                    processed_count = 0
-                    
-                    for idx, row in tqdm(df.iterrows(), total=len(df), disable=runner.rank != 0, desc="GPU Inference from File"):
-                        try:
-                            # Get image from row
-                            img_array = np.array(row['Image'], dtype=np.uint8).reshape((224, 224, 3))
-                            
-                            # Get ground truth keypoints
-                            gt_keypoints = []
-                            valid_gt = True
-                            for i in range(0, len(landmark_cols), 2):
-                                x_col = landmark_cols[i]
-                                y_col = landmark_cols[i+1]
-                                if x_col in row and y_col in row and pd.notna(row[x_col]) and pd.notna(row[y_col]):
-                                    gt_keypoints.append([row[x_col], row[y_col]])
-                                else:
-                                    gt_keypoints.append([0, 0])
-                                    valid_gt = False
-                            
-                            # Skip samples with invalid ground truth
-                            if not valid_gt:
-                                continue
-                                
-                            gt_keypoints = np.array(gt_keypoints)
-                            
-                            # Run inference with enhanced model inference
-                            pred_keypoints = run_model_inference(model, img_array)
-                            
-                            if pred_keypoints is None or pred_keypoints.shape[0] != 19:
-                                continue
-                            
-                            # Store coordinates
-                            preds_x.append(pred_keypoints[:, 0])
-                            preds_y.append(pred_keypoints[:, 1])
-                            gts_x.append(gt_keypoints[:, 0])
-                            gts_y.append(gt_keypoints[:, 1])
-                            
-                            processed_count += 1
-                            
-                        except Exception as e:
-                            logger.warning(f'[ConcurrentMLPTrainingHook] Failed to process sample {idx}: {e}')
-                            continue
-                    
-                    logger.info(f'[ConcurrentMLPTrainingHook] Successfully processed {processed_count} samples from file')
-                    
-                except Exception as e:
-                    logger.warning(f'[ConcurrentMLPTrainingHook] Failed to load from annotation file: {e}')
-                    df = None
-            
-            # Method 2: Fallback to dataset iteration if file method fails
-            if not preds_x:  # No predictions from file method
-                logger.info('[ConcurrentMLPTrainingHook] Using dataset iteration method')
-                
-                processed_count = 0
-                
-                for idx in tqdm(range(len(train_dataset)), disable=runner.rank != 0, desc="Dataset Inference"):
-                    try:
-                        data_sample = train_dataset[idx]
-                        
-                        # Extract image - handle different possible formats
-                        if 'inputs' in data_sample:
-                            img = data_sample['inputs']
-                            if isinstance(img, torch.Tensor):
-                                # Convert from (C, H, W) tensor to (H, W, C) numpy
-                                img_np = tensor_to_numpy(img.permute(1, 2, 0) * 255).astype(np.uint8)
-                            else:
-                                img_np = np.array(img, dtype=np.uint8)
-                        else:
-                            continue
-                        
-                        # Extract ground truth keypoints with robust handling
-                        if 'data_samples' in data_sample and hasattr(data_sample['data_samples'], 'gt_instances'):
-                            gt_instances = data_sample['data_samples'].gt_instances
-                            if hasattr(gt_instances, 'keypoints') and len(gt_instances.keypoints) > 0:
-                                gt_kpts = tensor_to_numpy(gt_instances.keypoints[0])
-                            else:
-                                continue
-                        else:
-                            continue
-                        
-                        # Run inference with enhanced model inference
-                        pred_kpts = run_model_inference(model, img_np)
-                        
-                        if pred_kpts is None or pred_kpts.shape[0] != 19:
-                            continue
-                        
-                        # Store coordinates
-                        preds_x.append(pred_kpts[:, 0])
-                        preds_y.append(pred_kpts[:, 1])
-                        gts_x.append(gt_kpts[:, 0])
-                        gts_y.append(gt_kpts[:, 1])
-                        
-                        processed_count += 1
-                        
-                    except Exception as e:
-                        # Only log every 100th error to avoid spam
-                        if idx % 100 == 0:
-                            logger.warning(f'[ConcurrentMLPTrainingHook] Failed to process sample {idx}: {e}')
-                        continue
-                
-                logger.info(f'[ConcurrentMLPTrainingHook] Successfully processed {processed_count} samples via dataset iteration')
-
-        except Exception as e:
-            logger.error(f'[ConcurrentMLPTrainingHook] Critical error during data processing: {e}')
+        if getattr(runner, 'rank', 0) != 0:
+            # Only rank 0 trains the refinement models
             return
 
-        if not preds_x:
-            logger.warning('[ConcurrentMLPTrainingHook] No predictions generated; skipping MLP update.')
+        if not self._buf_preds_x:
+            logger.warning('[ConcurrentMLPTrainingHook] No accumulated predictions this epoch; skipping MLP update.')
             return
 
-        preds_x = np.stack(preds_x)
-        preds_y = np.stack(preds_y)
-        gts_x = np.stack(gts_x)
-        gts_y = np.stack(gts_y)
-        
-        logger.info(f'[ConcurrentMLPTrainingHook] Generated predictions for {len(preds_x)} samples')
+        preds_x = np.stack(self._buf_preds_x)
+        preds_y = np.stack(self._buf_preds_y)
+        gts_x   = np.stack(self._buf_gts_x)
+        gts_y   = np.stack(self._buf_gts_y)
+
+        logger.info(f'[ConcurrentMLPTrainingHook] Collected {len(preds_x)} samples during this epoch for MLP training')
 
         # -----------------------------------------------------------------
         # Step 2: Train MLPs for fixed number of epochs (GPU-optimized)
@@ -452,6 +231,11 @@ class ConcurrentMLPTrainingHook(Hook):
         logger.info(f'[ConcurrentMLPTrainingHook] MLP models saved for epoch {current_epoch}')
         logger.info(f'[ConcurrentMLPTrainingHook] Latest models: {mlp_x_latest_path}, {mlp_y_latest_path}')
 
+        # -----------------------------------------------------------------
+        # Reset buffers for next epoch
+        # -----------------------------------------------------------------
+        self._reset_epoch_buffers()
+
     # ---------------------------------------------------------------------
     # Optional: save MLP weights at end of run
     # ---------------------------------------------------------------------
@@ -463,4 +247,102 @@ class ConcurrentMLPTrainingHook(Hook):
         os.makedirs(save_dir, exist_ok=True)
         torch.save(self.mlp_x.state_dict(), os.path.join(save_dir, 'mlp_x_final.pth'))
         torch.save(self.mlp_y.state_dict(), os.path.join(save_dir, 'mlp_y_final.pth'))
-        logger.info(f'[ConcurrentMLPTrainingHook] Saved final MLP weights to {save_dir}') 
+        logger.info(f'[ConcurrentMLPTrainingHook] Saved final MLP weights to {save_dir}')
+
+    # ---------------------------------------------------------------------
+    # Epoch lifecycle helpers
+    # ---------------------------------------------------------------------
+
+    def before_train_epoch(self, runner: Runner):
+        """Called by MMEngine at the very start of every epoch."""
+        self._reset_epoch_buffers()
+
+    # ---------------------------------------------------------------------
+    # Helper utilities
+    # ---------------------------------------------------------------------
+
+    def _reset_epoch_buffers(self):
+        """Clear temporary buffers that store per-sample predictions/GT."""
+        self._buf_preds_x.clear(); self._buf_preds_y.clear()
+        self._buf_gts_x.clear();   self._buf_gts_y.clear()
+
+    # ---------------------------------------------------------------------
+    # Online accumulation – executed every training iteration
+    # ---------------------------------------------------------------------
+
+    def after_train_iter(self, runner: Runner, batch_idx: int, data_batch=None, outputs=None):
+        """Collect predictions and GT from the current mini-batch.
+
+        We run a *second* forward pass in `predict` mode to obtain decoded
+        keypoints.  This adds one extra forward per mini-batch but completely
+        removes the expensive epoch-end full-dataset sweep, leading to a net
+        speed-up because the images are already resident in GPU memory and we
+        avoid data-loader overhead.
+        """
+        # Safety checks – only rank 0 accumulates to avoid duplicate data in DDP
+        if getattr(runner, 'rank', 0) != 0:
+            return
+
+        if self.mlp_x is None or self.mlp_y is None:
+            # Not initialised yet
+            return
+
+        if data_batch is None:
+            return
+
+        try:
+            batch_inputs = data_batch.get('inputs', None)
+            batch_data_samples = data_batch.get('data_samples', None)
+
+            if batch_inputs is None or batch_data_samples is None:
+                return
+
+            model = runner.model
+            # Handle potential DDP wrapping
+            if hasattr(model, 'module'):
+                model_to_use = model.module
+            else:
+                model_to_use = model
+
+            # Switch to eval for deterministic predictions
+            was_training = model_to_use.training
+            model_to_use.eval()
+
+            with torch.no_grad():
+                pred_results = model_to_use(batch_inputs, batch_data_samples, mode='predict')
+
+            # Restore original mode
+            if was_training:
+                model_to_use.train()
+
+            # Iterate over batch
+            for res, gt_sample in zip(pred_results, batch_data_samples):
+                # Predictions
+                if (not hasattr(res, 'pred_instances') or
+                        not hasattr(res.pred_instances, 'keypoints')):
+                    continue
+
+                pred_kpts = res.pred_instances.keypoints  # shape (num_kpts, 2)
+                if isinstance(pred_kpts, torch.Tensor):
+                    pred_kpts = pred_kpts.detach().cpu().numpy()
+
+                # Ground truth
+                if (not hasattr(gt_sample, 'gt_instances') or
+                        not hasattr(gt_sample.gt_instances, 'keypoints')):
+                    continue
+
+                gt_kpts = gt_sample.gt_instances.keypoints
+                if isinstance(gt_kpts, torch.Tensor):
+                    gt_kpts = gt_kpts.detach().cpu().numpy()
+
+                if pred_kpts.shape[0] != 19 or gt_kpts.shape[0] != 19:
+                    # Unexpected size – skip
+                    continue
+
+                self._buf_preds_x.append(pred_kpts[:, 0])
+                self._buf_preds_y.append(pred_kpts[:, 1])
+                self._buf_gts_x.append(gt_kpts[:, 0])
+                self._buf_gts_y.append(gt_kpts[:, 1])
+
+        except Exception as e:
+            runner.logger.warning(f'[ConcurrentMLPTrainingHook] Failed to accumulate batch {batch_idx}: {e}') 
