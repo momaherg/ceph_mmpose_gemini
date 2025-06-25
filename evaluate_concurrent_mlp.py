@@ -42,7 +42,7 @@ class MLPRefinementModel(nn.Module):
     """MLP model for landmark coordinate refinement."""
     def __init__(self, input_dim=19, hidden_dim=500, output_dim=19):
         super(MLPRefinementModel, self).__init__()
-        self.network = nn.Sequential(
+        self.net = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
             nn.ReLU(),
             nn.Dropout(0.1),
@@ -50,7 +50,7 @@ class MLPRefinementModel(nn.Module):
         )
         
     def forward(self, x):
-        return self.network(x)
+        return self.net(x)
 
 def run_hrnet_inference(model, img_array, device):
     """Run HRNetV2 inference on a single image."""
