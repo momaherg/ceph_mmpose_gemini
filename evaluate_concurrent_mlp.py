@@ -14,7 +14,7 @@ import pandas as pd
 import numpy as np
 from mmengine.config import Config
 from mmengine.registry import init_default_scope
-from mmpose.apis import init_model
+from mmpose.apis import init_model, inference_topdown
 import glob
 import argparse
 import matplotlib.pyplot as plt
@@ -51,73 +51,6 @@ class MLPRefinementModel(nn.Module):
         
     def forward(self, x):
         return self.net(x)
-
-def run_hrnet_inference(model, img_array, device):
-    """Run HRNetV2 inference on a single image."""
-    try:
-        import cv2
-        from mmpose.structures import PoseDataSample
-        from mmengine.structures import InstanceData
-        
-        # Resize image to model input size (384x384)
-        input_size = (384, 384)
-        img_resized = cv2.resize(img_array, input_size)
-        
-        # Convert to tensor and normalize
-        img_tensor = torch.from_numpy(img_resized).float().permute(2, 0, 1) / 255.0
-        mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
-        std = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
-        img_tensor = (img_tensor - mean) / std
-        
-        # Add batch dimension and move to device
-        img_batch = img_tensor.unsqueeze(0).to(device)
-        
-        # Create data sample with required metadata
-        data_sample = PoseDataSample()
-        instance_data = InstanceData()
-        instance_data.bboxes = torch.tensor([[0, 0, input_size[0], input_size[1]]], dtype=torch.float32)
-        instance_data.bbox_scores = torch.tensor([1.0], dtype=torch.float32)
-        data_sample.gt_instances = instance_data
-        
-        # Add metadata
-        center = np.array([img_array.shape[1]/2, img_array.shape[0]/2])
-        scale = np.array([img_array.shape[1], img_array.shape[0]])
-        
-        data_sample.set_metainfo({
-            'flip_indices': list(range(19)),
-            'input_size': input_size,
-            'center': center,
-            'scale': scale,
-            'input_center': center,
-            'input_scale': scale
-        })
-        
-        # Run inference
-        with torch.no_grad():
-            results = model(img_batch, [data_sample], mode='predict')
-        
-        if results and len(results) > 0 and hasattr(results[0], 'pred_instances'):
-            pred_keypoints = results[0].pred_instances.keypoints[0]
-            
-            # Scale back to original image size (224x224)
-            scale_x = 224.0 / input_size[0]
-            scale_y = 224.0 / input_size[1]
-            
-            if isinstance(pred_keypoints, torch.Tensor):
-                scale_tensor = torch.tensor([scale_x, scale_y]).to(pred_keypoints.device)
-                pred_keypoints = pred_keypoints * scale_tensor
-                return pred_keypoints.cpu().numpy()
-            else:
-                pred_keypoints = np.array(pred_keypoints)
-                pred_keypoints[:, 0] *= scale_x
-                pred_keypoints[:, 1] *= scale_y
-                return pred_keypoints
-        else:
-            return None
-            
-    except Exception as e:
-        print(f"Inference failed: {e}")
-        return None
 
 def apply_mlp_refinement(predictions_x, predictions_y, mlp_x, mlp_y, scaler_x_input, scaler_x_target, scaler_y_input, scaler_y_target, device):
     """Apply MLP refinement to predictions."""
@@ -364,6 +297,9 @@ def main():
     norm_gts_x = []
     norm_gts_y = []
     
+    # Use the standard mmpose inference API for consistency
+    from mmpose.apis import inference_topdown
+    
     for idx, row in train_df.head(norm_sample_size).iterrows():
         try:
             img_array = np.array(row['Image'], dtype=np.uint8).reshape((224, 224, 3))
@@ -385,8 +321,17 @@ def main():
                 
             gt_keypoints = np.array(gt_keypoints)
             
-            # Run inference
-            pred_keypoints = run_hrnet_inference(hrnet_model, img_array, device)
+            # Run inference using the standard API
+            bbox = np.array([[0, 0, 224, 224]], dtype=np.float32)
+            results = inference_topdown(hrnet_model, img_array, bboxes=bbox, bbox_format='xyxy')
+            
+            if results and len(results) > 0:
+                pred_keypoints = results[0].pred_instances.keypoints[0]
+                if isinstance(pred_keypoints, torch.Tensor):
+                    pred_keypoints = pred_keypoints.cpu().numpy()
+            else:
+                continue
+            
             if pred_keypoints is None or pred_keypoints.shape[0] != 19:
                 continue
             
@@ -451,8 +396,17 @@ def main():
                 
             gt_keypoints = np.array(gt_keypoints)
             
-            # Run HRNetV2 inference
-            pred_keypoints = run_hrnet_inference(hrnet_model, img_array, device)
+            # Run HRNetV2 inference using the standard API
+            bbox = np.array([[0, 0, 224, 224]], dtype=np.float32)
+            results = inference_topdown(hrnet_model, img_array, bboxes=bbox, bbox_format='xyxy')
+            
+            if results and len(results) > 0:
+                pred_keypoints = results[0].pred_instances.keypoints[0]
+                if isinstance(pred_keypoints, torch.Tensor):
+                    pred_keypoints = pred_keypoints.cpu().numpy()
+            else:
+                continue
+
             if pred_keypoints is None or pred_keypoints.shape[0] != 19:
                 continue
             
