@@ -136,3 +136,23 @@ test_evaluator = val_evaluator
 #    name='visualizer')
 # default_hooks = dict(
 #    visualization=dict(enable=True, type='PoseVisualizationHook')) 
+
+# =========================================================================
+# CONCURRENT MLP TRAINING HOOK
+# =========================================================================
+# This hook trains MLP refinement models on-the-fly during HRNetV2 training.
+# After each HRNet epoch, it:
+# 1. Runs inference on training data using current HRNet weights
+# 2. Trains separate MLP models (X and Y coordinates) for 100 epochs
+# 3. Keeps MLP parameters independent (no gradient leakage to HRNet)
+
+custom_hooks = [
+    dict(
+        type='ConcurrentMLPTrainingHook',
+        mlp_epochs=100,              # Train MLPs for 100 epochs after each HRNet epoch
+        mlp_batch_size=16,           # MLP batch size
+        mlp_lr=1e-5,                 # MLP learning rate (same as standalone training)
+        mlp_weight_decay=1e-4,       # MLP weight decay
+        log_interval=20              # Log MLP training progress every 20 epochs
+    )
+] 
