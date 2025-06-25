@@ -201,11 +201,21 @@ class ConcurrentMLPTrainingHook(Hook):
                 # Add batch dimension and move to device
                 img_batch = img_tensor.unsqueeze(0).to(self.device)
                 
-                # Create data sample with bbox covering whole image
+                # Create data sample with bbox covering whole image and required metadata
                 data_sample = PoseDataSample()
+                
+                # Create instance data with bbox
                 instance_data = InstanceData()
                 instance_data.bboxes = torch.tensor([[0, 0, input_size[0], input_size[1]]], dtype=torch.float32)
                 data_sample.gt_instances = instance_data
+                
+                # Add required metadata for the model
+                data_sample.set_metainfo({
+                    'flip_indices': list(range(19)),  # No flipping for landmarks 0-18
+                    'input_size': input_size,
+                    'bbox_center': [input_size[0]/2, input_size[1]/2],
+                    'bbox_scale': [input_size[0], input_size[1]]
+                })
                 
                 # Create batch inputs
                 batch_inputs = img_batch
@@ -229,32 +239,27 @@ class ConcurrentMLPTrainingHook(Hook):
                 logger.warning(f'[ConcurrentMLPTrainingHook] Model inference failed: {e}')
                 return None
 
-        # We need to access the raw data from the dataset
+        # Access training data more robustly
         try:
             from tqdm import tqdm
             
-            # Access the underlying dataframe or annotations
-            if hasattr(train_dataset, 'data_df') and train_dataset.data_df is not None:
-                # Use pandas DataFrame - this is the most reliable approach
-                df = train_dataset.data_df
-                logger.info(f'[ConcurrentMLPTrainingHook] Processing {len(df)} samples from DataFrame')
+            # Method 1: Try to access the raw annotation file
+            if hasattr(train_dataset, 'ann_file') and train_dataset.ann_file:
+                logger.info(f'[ConcurrentMLPTrainingHook] Loading data from annotation file: {train_dataset.ann_file}')
+                import pandas as pd
                 
-                # Import landmark info
-                import cephalometric_dataset_info
-                landmark_names = cephalometric_dataset_info.landmark_names_in_order
-                landmark_cols = cephalometric_dataset_info.original_landmark_cols
-                
-                # Batch processing for efficiency
-                batch_size = 32  # Process multiple images at once
-                total_samples = len(df)
-                processed_count = 0
-                
-                for start_idx in tqdm(range(0, total_samples, batch_size), disable=runner.rank != 0, desc="GPU Inference"):
-                    end_idx = min(start_idx + batch_size, total_samples)
-                    batch_df = df.iloc[start_idx:end_idx]
+                try:
+                    df = pd.read_json(train_dataset.ann_file)
+                    logger.info(f'[ConcurrentMLPTrainingHook] Loaded {len(df)} samples from annotation file')
                     
-                    # Process batch
-                    for idx, row in batch_df.iterrows():
+                    # Import landmark info
+                    import cephalometric_dataset_info
+                    landmark_names = cephalometric_dataset_info.landmark_names_in_order
+                    landmark_cols = cephalometric_dataset_info.original_landmark_cols
+                    
+                    processed_count = 0
+                    
+                    for idx, row in tqdm(df.iterrows(), total=len(df), disable=runner.rank != 0, desc="GPU Inference from File"):
                         try:
                             # Get image from row
                             img_array = np.array(row['Image'], dtype=np.uint8).reshape((224, 224, 3))
@@ -294,12 +299,18 @@ class ConcurrentMLPTrainingHook(Hook):
                         except Exception as e:
                             logger.warning(f'[ConcurrentMLPTrainingHook] Failed to process sample {idx}: {e}')
                             continue
+                    
+                    logger.info(f'[ConcurrentMLPTrainingHook] Successfully processed {processed_count} samples from file')
+                    
+                except Exception as e:
+                    logger.warning(f'[ConcurrentMLPTrainingHook] Failed to load from annotation file: {e}')
+                    df = None
+            
+            # Method 2: Fallback to dataset iteration if file method fails
+            if not preds_x:  # No predictions from file method
+                logger.info('[ConcurrentMLPTrainingHook] Using dataset iteration method')
                 
-                logger.info(f'[ConcurrentMLPTrainingHook] Successfully processed {processed_count} samples')
-                        
-            else:
-                # Fallback: iterate through dataset samples with better error handling
-                logger.warning('[ConcurrentMLPTrainingHook] No data_df found, using dataset iteration fallback')
+                processed_count = 0
                 
                 for idx in tqdm(range(len(train_dataset)), disable=runner.rank != 0, desc="Dataset Inference"):
                     try:
@@ -314,7 +325,6 @@ class ConcurrentMLPTrainingHook(Hook):
                             else:
                                 img_np = np.array(img, dtype=np.uint8)
                         else:
-                            logger.warning(f'[ConcurrentMLPTrainingHook] No inputs found in sample {idx}')
                             continue
                         
                         # Extract ground truth keypoints with robust handling
@@ -323,10 +333,8 @@ class ConcurrentMLPTrainingHook(Hook):
                             if hasattr(gt_instances, 'keypoints') and len(gt_instances.keypoints) > 0:
                                 gt_kpts = tensor_to_numpy(gt_instances.keypoints[0])
                             else:
-                                logger.warning(f'[ConcurrentMLPTrainingHook] No keypoints in sample {idx}')
                                 continue
                         else:
-                            logger.warning(f'[ConcurrentMLPTrainingHook] No ground truth found in sample {idx}')
                             continue
                         
                         # Run inference with enhanced model inference
@@ -341,9 +349,15 @@ class ConcurrentMLPTrainingHook(Hook):
                         gts_x.append(gt_kpts[:, 0])
                         gts_y.append(gt_kpts[:, 1])
                         
+                        processed_count += 1
+                        
                     except Exception as e:
-                        logger.warning(f'[ConcurrentMLPTrainingHook] Failed to process sample {idx}: {e}')
+                        # Only log every 100th error to avoid spam
+                        if idx % 100 == 0:
+                            logger.warning(f'[ConcurrentMLPTrainingHook] Failed to process sample {idx}: {e}')
                         continue
+                
+                logger.info(f'[ConcurrentMLPTrainingHook] Successfully processed {processed_count} samples via dataset iteration')
 
         except Exception as e:
             logger.error(f'[ConcurrentMLPTrainingHook] Critical error during data processing: {e}')
