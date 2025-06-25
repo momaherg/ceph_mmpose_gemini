@@ -244,11 +244,14 @@ def main():
         parser.print_help()
 
 if __name__ == "__main__":
-    # Apply PyTorch safe loading fix if needed
+    # Apply PyTorch safe loading fix for MMPose checkpoints
     _original_torch_load = torch.load
     def safe_torch_load(*args, **kwargs):
+        # MMPose checkpoints contain metadata (like HistoryBuffer) that requires
+        # `weights_only=False`. Since we are using a self-trained, trusted model,
+        # this is safe.
         if 'weights_only' not in kwargs:
-            kwargs['weights_only'] = True # Set to True for safety, as we only load weights
+            kwargs['weights_only'] = False
         return _original_torch_load(*args, **kwargs)
     torch.load = safe_torch_load
 
