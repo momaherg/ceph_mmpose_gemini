@@ -145,7 +145,7 @@ class ConcurrentMLPTrainingHook(Hook):
         assert self.mlp_x is not None and self.mlp_y is not None
 
         # -----------------------------------------------------------------
-        # Step 1: Generate predictions on training data (no gradient)
+        # Step 1: Generate predictions on training data (GPU-optimized)
         # -----------------------------------------------------------------
         runner.model.eval()
         preds_x: List[np.ndarray] = []
@@ -154,16 +154,25 @@ class ConcurrentMLPTrainingHook(Hook):
         gts_y:   List[np.ndarray] = []
 
         train_dataset = runner.train_dataloader.dataset
-        logger.info('[ConcurrentMLPTrainingHook] Generating predictions for MLP …')
+        logger.info('[ConcurrentMLPTrainingHook] Generating predictions for MLP on GPU...')
 
-        # We need to access the raw data from the dataset, not the processed samples
-        # The CustomCephalometricDataset should have access to the raw data
+        # Helper function to safely convert tensor to numpy
+        def tensor_to_numpy(data):
+            """Safely convert tensor to numpy, handling both tensor and numpy inputs."""
+            if isinstance(data, torch.Tensor):
+                return data.cpu().numpy()
+            elif isinstance(data, np.ndarray):
+                return data
+            else:
+                return np.array(data)
+
+        # We need to access the raw data from the dataset
         try:
-            from tqdm import tqdm  # Only used inside hook for verbose progress
+            from tqdm import tqdm
             
             # Access the underlying dataframe or annotations
             if hasattr(train_dataset, 'data_df') and train_dataset.data_df is not None:
-                # Use pandas DataFrame
+                # Use pandas DataFrame - this is the most reliable approach
                 df = train_dataset.data_df
                 logger.info(f'[ConcurrentMLPTrainingHook] Processing {len(df)} samples from DataFrame')
                 
@@ -172,57 +181,72 @@ class ConcurrentMLPTrainingHook(Hook):
                 landmark_names = cephalometric_dataset_info.landmark_names_in_order
                 landmark_cols = cephalometric_dataset_info.original_landmark_cols
                 
-                for idx, row in tqdm(df.iterrows(), total=len(df), disable=runner.rank != 0):
-                    try:
-                        # Get image from row
-                        img_array = np.array(row['Image'], dtype=np.uint8).reshape((224, 224, 3))
-                        
-                        # Get ground truth keypoints
-                        gt_keypoints = []
-                        valid_gt = True
-                        for i in range(0, len(landmark_cols), 2):
-                            x_col = landmark_cols[i]
-                            y_col = landmark_cols[i+1]
-                            if x_col in row and y_col in row and pd.notna(row[x_col]) and pd.notna(row[y_col]):
-                                gt_keypoints.append([row[x_col], row[y_col]])
-                            else:
-                                gt_keypoints.append([0, 0])
-                                valid_gt = False
-                        
-                        # Skip samples with invalid ground truth
-                        if not valid_gt:
-                            continue
+                # Batch processing for efficiency
+                batch_size = 32  # Process multiple images at once
+                total_samples = len(df)
+                processed_count = 0
+                
+                for start_idx in tqdm(range(0, total_samples, batch_size), disable=runner.rank != 0, desc="GPU Inference"):
+                    end_idx = min(start_idx + batch_size, total_samples)
+                    batch_df = df.iloc[start_idx:end_idx]
+                    
+                    # Process batch
+                    for idx, row in batch_df.iterrows():
+                        try:
+                            # Get image from row
+                            img_array = np.array(row['Image'], dtype=np.uint8).reshape((224, 224, 3))
                             
-                        gt_keypoints = np.array(gt_keypoints)
-                        
-                        # Prepare bbox covering the whole image
-                        h, w = img_array.shape[:2]
-                        bbox = np.array([[0, 0, w, h]], dtype=np.float32)
-                        
-                        # Run inference with current HRNet model
-                        with torch.no_grad():
-                            results = inference_topdown(runner.model, img_array, bboxes=bbox, bbox_format='xyxy')
-                        
-                        if not results or len(results) == 0:
-                            continue
+                            # Get ground truth keypoints
+                            gt_keypoints = []
+                            valid_gt = True
+                            for i in range(0, len(landmark_cols), 2):
+                                x_col = landmark_cols[i]
+                                y_col = landmark_cols[i+1]
+                                if x_col in row and y_col in row and pd.notna(row[x_col]) and pd.notna(row[y_col]):
+                                    gt_keypoints.append([row[x_col], row[y_col]])
+                                else:
+                                    gt_keypoints.append([0, 0])
+                                    valid_gt = False
                             
-                        pred_keypoints = results[0].pred_instances.keypoints[0]  # shape (19, 2)
-                        
-                        # Store coordinates
-                        preds_x.append(pred_keypoints[:, 0])
-                        preds_y.append(pred_keypoints[:, 1])
-                        gts_x.append(gt_keypoints[:, 0])
-                        gts_y.append(gt_keypoints[:, 1])
-                        
-                    except Exception as e:
-                        logger.warning(f'[ConcurrentMLPTrainingHook] Failed to process sample {idx}: {e}')
-                        continue
+                            # Skip samples with invalid ground truth
+                            if not valid_gt:
+                                continue
+                                
+                            gt_keypoints = np.array(gt_keypoints)
+                            
+                            # Prepare bbox covering the whole image
+                            h, w = img_array.shape[:2]
+                            bbox = np.array([[0, 0, w, h]], dtype=np.float32)
+                            
+                            # Run inference with current HRNet model on GPU
+                            with torch.no_grad():
+                                results = inference_topdown(runner.model, img_array, bboxes=bbox, bbox_format='xyxy')
+                            
+                            if not results or len(results) == 0:
+                                continue
+                                
+                            pred_keypoints = results[0].pred_instances.keypoints[0]  # shape (19, 2)
+                            pred_keypoints = tensor_to_numpy(pred_keypoints)  # Ensure numpy
+                            
+                            # Store coordinates
+                            preds_x.append(pred_keypoints[:, 0])
+                            preds_y.append(pred_keypoints[:, 1])
+                            gts_x.append(gt_keypoints[:, 0])
+                            gts_y.append(gt_keypoints[:, 1])
+                            
+                            processed_count += 1
+                            
+                        except Exception as e:
+                            logger.warning(f'[ConcurrentMLPTrainingHook] Failed to process sample {idx}: {e}')
+                            continue
+                
+                logger.info(f'[ConcurrentMLPTrainingHook] Successfully processed {processed_count} samples')
                         
             else:
-                logger.warning('[ConcurrentMLPTrainingHook] Cannot access data_df from dataset. Trying alternative approach.')
+                # Fallback: iterate through dataset samples with better error handling
+                logger.warning('[ConcurrentMLPTrainingHook] No data_df found, using dataset iteration fallback')
                 
-                # Fallback: iterate through dataset samples
-                for idx in tqdm(range(len(train_dataset)), disable=runner.rank != 0):
+                for idx in tqdm(range(len(train_dataset)), disable=runner.rank != 0, desc="Dataset Inference"):
                     try:
                         data_sample = train_dataset[idx]
                         
@@ -231,16 +255,21 @@ class ConcurrentMLPTrainingHook(Hook):
                             img = data_sample['inputs']
                             if isinstance(img, torch.Tensor):
                                 # Convert from (C, H, W) tensor to (H, W, C) numpy
-                                img_np = (img.permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
+                                img_np = tensor_to_numpy(img.permute(1, 2, 0) * 255).astype(np.uint8)
                             else:
-                                img_np = img
+                                img_np = np.array(img, dtype=np.uint8)
                         else:
                             logger.warning(f'[ConcurrentMLPTrainingHook] No inputs found in sample {idx}')
                             continue
                         
-                        # Extract ground truth keypoints
-                        if 'data_samples' in data_sample:
-                            gt_kpts = data_sample['data_samples'].gt_instances.keypoints[0].cpu().numpy()
+                        # Extract ground truth keypoints with robust handling
+                        if 'data_samples' in data_sample and hasattr(data_sample['data_samples'], 'gt_instances'):
+                            gt_instances = data_sample['data_samples'].gt_instances
+                            if hasattr(gt_instances, 'keypoints') and len(gt_instances.keypoints) > 0:
+                                gt_kpts = tensor_to_numpy(gt_instances.keypoints[0])
+                            else:
+                                logger.warning(f'[ConcurrentMLPTrainingHook] No keypoints in sample {idx}')
+                                continue
                         else:
                             logger.warning(f'[ConcurrentMLPTrainingHook] No ground truth found in sample {idx}')
                             continue
@@ -249,14 +278,14 @@ class ConcurrentMLPTrainingHook(Hook):
                         h, w = img_np.shape[:2]
                         bbox = np.array([[0, 0, w, h]], dtype=np.float32)
                         
-                        # Run inference
+                        # Run inference on GPU
                         with torch.no_grad():
                             results = inference_topdown(runner.model, img_np, bboxes=bbox, bbox_format='xyxy')
                         
                         if not results or len(results) == 0:
                             continue
                             
-                        pred_kpts = results[0].pred_instances.keypoints[0]
+                        pred_kpts = tensor_to_numpy(results[0].pred_instances.keypoints[0])
                         
                         # Store coordinates
                         preds_x.append(pred_kpts[:, 0])
@@ -284,23 +313,24 @@ class ConcurrentMLPTrainingHook(Hook):
         logger.info(f'[ConcurrentMLPTrainingHook] Generated predictions for {len(preds_x)} samples')
 
         # -----------------------------------------------------------------
-        # Step 2: Train MLPs for fixed number of epochs
+        # Step 2: Train MLPs for fixed number of epochs (GPU-optimized)
         # -----------------------------------------------------------------
-        logger.info('[ConcurrentMLPTrainingHook] Training MLPs …')
+        logger.info('[ConcurrentMLPTrainingHook] Training MLPs on GPU…')
 
         # Build datasets and loaders (on-the-fly)
         ds_x = _MLPDataset(preds_x, gts_x)
         ds_y = _MLPDataset(preds_y, gts_y)
-        dl_x = data.DataLoader(ds_x, batch_size=self.mlp_batch_size, shuffle=True)
-        dl_y = data.DataLoader(ds_y, batch_size=self.mlp_batch_size, shuffle=True)
+        dl_x = data.DataLoader(ds_x, batch_size=self.mlp_batch_size, shuffle=True, pin_memory=True)
+        dl_y = data.DataLoader(ds_y, batch_size=self.mlp_batch_size, shuffle=True, pin_memory=True)
 
         def _train_one(model: MLPRefinementModel, optimiser: optim.Optimizer, loader: data.DataLoader, name: str):
             model.train()
+            total_loss = 0.0
             for ep in range(self.mlp_epochs):
                 epoch_loss = 0.0
                 for preds_batch, gts_batch in loader:
-                    preds_batch = preds_batch.to(self.device)
-                    gts_batch = gts_batch.to(self.device)
+                    preds_batch = preds_batch.to(self.device, non_blocking=True)
+                    gts_batch = gts_batch.to(self.device, non_blocking=True)
 
                     optimiser.zero_grad()
                     outputs = model(preds_batch)
@@ -309,8 +339,10 @@ class ConcurrentMLPTrainingHook(Hook):
                     optimiser.step()
 
                     epoch_loss += loss.item()
+                
+                total_loss = epoch_loss / len(loader)
                 if (ep + 1) % 20 == 0:
-                    logger.info(f'[ConcurrentMLPTrainingHook] {name} epoch {ep+1}/{self.mlp_epochs} loss: {epoch_loss / len(loader):.6f}')
+                    logger.info(f'[ConcurrentMLPTrainingHook] {name} epoch {ep+1}/{self.mlp_epochs} loss: {total_loss:.6f}')
 
         _train_one(self.mlp_x, self.opt_x, dl_x, 'MLP-X')
         _train_one(self.mlp_y, self.opt_y, dl_y, 'MLP-Y')
