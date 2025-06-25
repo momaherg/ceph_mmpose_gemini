@@ -147,7 +147,20 @@ class ConcurrentMLPTrainingHook(Hook):
         # -----------------------------------------------------------------
         # Step 1: Generate predictions on training data (GPU-optimized)
         # -----------------------------------------------------------------
-        runner.model.eval()
+        
+        # Get the actual model, handling potential wrapping
+        model = runner.model
+        if hasattr(model, 'module'):
+            # Handle DDP or other wrapped models
+            actual_model = model.module
+        else:
+            actual_model = model
+            
+        # Ensure model has required attributes for inference
+        if not hasattr(actual_model, 'cfg') and hasattr(runner, 'cfg'):
+            actual_model.cfg = runner.cfg
+            
+        model.eval()
         preds_x: List[np.ndarray] = []
         preds_y: List[np.ndarray] = []
         gts_x:   List[np.ndarray] = []
@@ -165,6 +178,56 @@ class ConcurrentMLPTrainingHook(Hook):
                 return data
             else:
                 return np.array(data)
+
+        # Enhanced inference function that works with runner model
+        def run_model_inference(model, img_array):
+            """Run inference using the model directly, bypassing inference_topdown issues."""
+            try:
+                # Prepare input in the format expected by the model
+                import cv2
+                from mmpose.structures import PoseDataSample
+                from mmengine.structures import InstanceData
+                
+                # Resize image to model input size (384x384 based on config)
+                input_size = (384, 384)
+                img_resized = cv2.resize(img_array, input_size)
+                
+                # Convert to tensor and normalize (standard ImageNet normalization)
+                img_tensor = torch.from_numpy(img_resized).float().permute(2, 0, 1) / 255.0
+                mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
+                std = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
+                img_tensor = (img_tensor - mean) / std
+                
+                # Add batch dimension and move to device
+                img_batch = img_tensor.unsqueeze(0).to(self.device)
+                
+                # Create data sample with bbox covering whole image
+                data_sample = PoseDataSample()
+                instance_data = InstanceData()
+                instance_data.bboxes = torch.tensor([[0, 0, input_size[0], input_size[1]]], dtype=torch.float32)
+                data_sample.gt_instances = instance_data
+                
+                # Create batch inputs
+                batch_inputs = img_batch
+                batch_data_samples = [data_sample]
+                
+                # Run model inference
+                with torch.no_grad():
+                    results = model(batch_inputs, batch_data_samples, mode='predict')
+                
+                if results and len(results) > 0 and hasattr(results[0], 'pred_instances'):
+                    pred_keypoints = results[0].pred_instances.keypoints[0]
+                    # Scale back to original image size (224x224)
+                    scale_x = 224.0 / input_size[0]
+                    scale_y = 224.0 / input_size[1]
+                    pred_keypoints = pred_keypoints * torch.tensor([scale_x, scale_y]).to(pred_keypoints.device)
+                    return tensor_to_numpy(pred_keypoints)
+                else:
+                    return None
+                    
+            except Exception as e:
+                logger.warning(f'[ConcurrentMLPTrainingHook] Model inference failed: {e}')
+                return None
 
         # We need to access the raw data from the dataset
         try:
@@ -214,19 +277,11 @@ class ConcurrentMLPTrainingHook(Hook):
                                 
                             gt_keypoints = np.array(gt_keypoints)
                             
-                            # Prepare bbox covering the whole image
-                            h, w = img_array.shape[:2]
-                            bbox = np.array([[0, 0, w, h]], dtype=np.float32)
+                            # Run inference with enhanced model inference
+                            pred_keypoints = run_model_inference(model, img_array)
                             
-                            # Run inference with current HRNet model on GPU
-                            with torch.no_grad():
-                                results = inference_topdown(runner.model, img_array, bboxes=bbox, bbox_format='xyxy')
-                            
-                            if not results or len(results) == 0:
+                            if pred_keypoints is None or pred_keypoints.shape[0] != 19:
                                 continue
-                                
-                            pred_keypoints = results[0].pred_instances.keypoints[0]  # shape (19, 2)
-                            pred_keypoints = tensor_to_numpy(pred_keypoints)  # Ensure numpy
                             
                             # Store coordinates
                             preds_x.append(pred_keypoints[:, 0])
@@ -274,18 +329,11 @@ class ConcurrentMLPTrainingHook(Hook):
                             logger.warning(f'[ConcurrentMLPTrainingHook] No ground truth found in sample {idx}')
                             continue
                         
-                        # Prepare bbox
-                        h, w = img_np.shape[:2]
-                        bbox = np.array([[0, 0, w, h]], dtype=np.float32)
+                        # Run inference with enhanced model inference
+                        pred_kpts = run_model_inference(model, img_np)
                         
-                        # Run inference on GPU
-                        with torch.no_grad():
-                            results = inference_topdown(runner.model, img_np, bboxes=bbox, bbox_format='xyxy')
-                        
-                        if not results or len(results) == 0:
+                        if pred_kpts is None or pred_kpts.shape[0] != 19:
                             continue
-                            
-                        pred_kpts = tensor_to_numpy(results[0].pred_instances.keypoints[0])
                         
                         # Store coordinates
                         preds_x.append(pred_kpts[:, 0])
