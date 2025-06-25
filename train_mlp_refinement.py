@@ -554,50 +554,198 @@ def train_mlp_models(args):
     model_y.load_state_dict(torch.load(model_y_path))
     model_x.eval()
     model_y.eval()
-    
-    with torch.no_grad():
-        # Get original predictions
-        original_x = scaler_x_input.inverse_transform(X_x_val_scaled)
-        original_y = scaler_y_input.inverse_transform(X_y_val_scaled)
+
+    # Get landmark information for detailed evaluation
+    try:
+        import cephalometric_dataset_info
+        landmark_names = cephalometric_dataset_info.landmark_names_in_order
+    except:
+        landmark_names = [f'Landmark_{i}' for i in range(19)]
+
+    def evaluate_mre_on_set(X_x_scaled, X_y_scaled, y_x_scaled, y_y_scaled, set_name):
+        """Evaluate MRE on a given dataset."""
+        print(f"\n🔍 Evaluating {set_name} Set:")
         
-        # Get refined predictions
-        refined_x_scaled = model_x(torch.FloatTensor(X_x_val_scaled).to(device)).cpu().numpy()
-        refined_y_scaled = model_y(torch.FloatTensor(X_y_val_scaled).to(device)).cpu().numpy()
+        with torch.no_grad():
+            # Get original predictions
+            original_x = scaler_x_input.inverse_transform(X_x_scaled)
+            original_y = scaler_y_input.inverse_transform(X_y_scaled)
+            
+            # Get refined predictions
+            refined_x_scaled = model_x(torch.FloatTensor(X_x_scaled).to(device)).cpu().numpy()
+            refined_y_scaled = model_y(torch.FloatTensor(X_y_scaled).to(device)).cpu().numpy()
+            
+            refined_x = scaler_x_target.inverse_transform(refined_x_scaled)
+            refined_y = scaler_y_target.inverse_transform(refined_y_scaled)
+            
+            # Get ground truth
+            gt_x = scaler_x_target.inverse_transform(y_x_scaled)
+            gt_y = scaler_y_target.inverse_transform(y_y_scaled)
         
-        refined_x = scaler_x_target.inverse_transform(refined_x_scaled)
-        refined_y = scaler_y_target.inverse_transform(refined_y_scaled)
+        # Compute errors
+        original_coords = np.stack([original_x, original_y], axis=2)
+        refined_coords = np.stack([refined_x, refined_y], axis=2)
+        gt_coords = np.stack([gt_x, gt_y], axis=2)
         
-        # Get ground truth
-        gt_x = scaler_x_target.inverse_transform(y_x_val_scaled)
-        gt_y = scaler_y_target.inverse_transform(y_y_val_scaled)
+        original_errors = np.sqrt(np.sum((original_coords - gt_coords)**2, axis=2))
+        refined_errors = np.sqrt(np.sum((refined_coords - gt_coords)**2, axis=2))
+        
+        # Overall MRE
+        original_mre = np.mean(original_errors)
+        refined_mre = np.mean(refined_errors)
+        improvement = (original_mre - refined_mre) / original_mre * 100
+        
+        print(f"  Overall MRE:")
+        print(f"    Original: {original_mre:.3f} pixels")
+        print(f"    Refined:  {refined_mre:.3f} pixels")
+        print(f"    Improvement: {improvement:.2f}%")
+        
+        # Per-landmark MRE
+        per_landmark_original = np.mean(original_errors, axis=0)
+        per_landmark_refined = np.mean(refined_errors, axis=0)
+        per_landmark_improvement = (per_landmark_original - per_landmark_refined) / per_landmark_original * 100
+        
+        print(f"\n  Per-Landmark MRE:")
+        print(f"  {'Index':<6} {'Landmark':<20} {'Original':<10} {'Refined':<10} {'Improvement':<12}")
+        print(f"  {'-'*6} {'-'*20} {'-'*10} {'-'*10} {'-'*12}")
+        
+        for i, name in enumerate(landmark_names):
+            print(f"  {i:<6} {name:<20} {per_landmark_original[i]:<10.3f} {per_landmark_refined[i]:<10.3f} {per_landmark_improvement[i]:<12.1f}%")
+        
+        # Find best and worst performing landmarks
+        best_landmark_idx = np.argmax(per_landmark_improvement)
+        worst_landmark_idx = np.argmin(per_landmark_improvement)
+        
+        print(f"\n  Best improvement: {landmark_names[best_landmark_idx]} ({per_landmark_improvement[best_landmark_idx]:.1f}%)")
+        print(f"  Worst improvement: {landmark_names[worst_landmark_idx]} ({per_landmark_improvement[worst_landmark_idx]:.1f}%)")
+        
+        # Statistics
+        print(f"\n  Error Statistics:")
+        print(f"    Original - Mean: {original_mre:.3f}, Std: {np.std(original_errors):.3f}, Median: {np.median(original_errors):.3f}")
+        print(f"    Refined  - Mean: {refined_mre:.3f}, Std: {np.std(refined_errors):.3f}, Median: {np.median(refined_errors):.3f}")
+        
+        return {
+            'set_name': set_name,
+            'original_mre': original_mre,
+            'refined_mre': refined_mre,
+            'improvement_percent': improvement,
+            'original_std': np.std(original_errors),
+            'refined_std': np.std(refined_errors),
+            'original_median': np.median(original_errors),
+            'refined_median': np.median(refined_errors),
+            'per_landmark_original': per_landmark_original,
+            'per_landmark_refined': per_landmark_refined,
+            'per_landmark_improvement': per_landmark_improvement,
+            'best_landmark': landmark_names[best_landmark_idx],
+            'best_improvement': per_landmark_improvement[best_landmark_idx],
+            'worst_landmark': landmark_names[worst_landmark_idx],
+            'worst_improvement': per_landmark_improvement[worst_landmark_idx]
+        }
+
+    # Evaluate on both training and validation sets
+    train_results = evaluate_mre_on_set(X_x_train_scaled, X_y_train_scaled, y_x_train_scaled, y_y_train_scaled, "Training")
+    val_results = evaluate_mre_on_set(X_x_val_scaled, X_y_val_scaled, y_x_val_scaled, y_y_val_scaled, "Validation")
     
-    # Compute errors
-    original_coords = np.stack([original_x, original_y], axis=2)
-    refined_coords = np.stack([refined_x, refined_y], axis=2)
-    gt_coords = np.stack([gt_x, gt_y], axis=2)
+    # Compare training vs validation performance
+    print(f"\n" + "="*80)
+    print("TRAINING vs VALIDATION COMPARISON")
+    print("="*80)
+    print(f"{'Metric':<25} {'Training':<15} {'Validation':<15} {'Difference':<15}")
+    print("-" * 75)
+    print(f"{'Original MRE':<25} {train_results['original_mre']:<15.3f} {val_results['original_mre']:<15.3f} {val_results['original_mre'] - train_results['original_mre']:<15.3f}")
+    print(f"{'Refined MRE':<25} {train_results['refined_mre']:<15.3f} {val_results['refined_mre']:<15.3f} {val_results['refined_mre'] - train_results['refined_mre']:<15.3f}")
+    print(f"{'Improvement %':<25} {train_results['improvement_percent']:<15.1f} {val_results['improvement_percent']:<15.1f} {val_results['improvement_percent'] - train_results['improvement_percent']:<15.1f}")
+    print(f"{'Original Std':<25} {train_results['original_std']:<15.3f} {val_results['original_std']:<15.3f} {val_results['original_std'] - train_results['original_std']:<15.3f}")
+    print(f"{'Refined Std':<25} {train_results['refined_std']:<15.3f} {val_results['refined_std']:<15.3f} {val_results['refined_std'] - train_results['refined_std']:<15.3f}")
     
-    original_errors = np.sqrt(np.sum((original_coords - gt_coords)**2, axis=2))
-    refined_errors = np.sqrt(np.sum((refined_coords - gt_coords)**2, axis=2))
+    # Check for overfitting
+    mre_gap = val_results['refined_mre'] - train_results['refined_mre']
+    improvement_gap = train_results['improvement_percent'] - val_results['improvement_percent']
     
-    original_mre = np.mean(original_errors)
-    refined_mre = np.mean(refined_errors)
-    improvement = (original_mre - refined_mre) / original_mre * 100
+    print(f"\n🔍 Overfitting Analysis:")
+    print(f"  MRE Gap (Val - Train): {mre_gap:.3f} pixels")
+    print(f"  Improvement Gap (Train - Val): {improvement_gap:.1f}%")
     
-    print(f"✓ Validation Results:")
-    print(f"  Original MRE: {original_mre:.3f} pixels")
-    print(f"  Refined MRE: {refined_mre:.3f} pixels")
-    print(f"  Improvement: {improvement:.2f}%")
+    if mre_gap > 0.2:
+        print(f"  ⚠️  Potential overfitting detected (MRE gap > 0.2 pixels)")
+    elif mre_gap > 0.1:
+        print(f"  ⚡ Mild overfitting (MRE gap > 0.1 pixels)")
+    else:
+        print(f"  ✅ Good generalization (MRE gap < 0.1 pixels)")
     
-    # Save summary
+    # Identify problematic landmarks
+    print(f"\n🎯 Landmark Analysis:")
+    problematic_landmarks = []
+    excellent_landmarks = []
+    
+    for i, name in enumerate(landmark_names):
+        val_improvement = val_results['per_landmark_improvement'][i]
+        if val_improvement < 0:
+            problematic_landmarks.append((name, val_improvement))
+        elif val_improvement > 10:
+            excellent_landmarks.append((name, val_improvement))
+    
+    if problematic_landmarks:
+        print(f"  ⚠️  Landmarks with degraded performance:")
+        for name, improvement in problematic_landmarks:
+            print(f"     {name}: {improvement:.1f}%")
+    
+    if excellent_landmarks:
+        print(f"  🌟 Landmarks with excellent improvement (>10%):")
+        for name, improvement in excellent_landmarks[:5]:  # Top 5
+            print(f"     {name}: {improvement:.1f}%")
+    
+    # Save comprehensive results
+    evaluation_results = {
+        'training': train_results,
+        'validation': val_results,
+        'mre_gap': mre_gap,
+        'improvement_gap': improvement_gap,
+        'overfitting_detected': mre_gap > 0.2,
+        'problematic_landmarks': problematic_landmarks,
+        'excellent_landmarks': excellent_landmarks
+    }
+    
+    # Save detailed results to CSV
+    detailed_results = []
+    for i, name in enumerate(landmark_names):
+        detailed_results.append({
+            'landmark_index': i,
+            'landmark_name': name,
+            'train_original_mre': train_results['per_landmark_original'][i],
+            'train_refined_mre': train_results['per_landmark_refined'][i],
+            'train_improvement': train_results['per_landmark_improvement'][i],
+            'val_original_mre': val_results['per_landmark_original'][i],
+            'val_refined_mre': val_results['per_landmark_refined'][i],
+            'val_improvement': val_results['per_landmark_improvement'][i],
+            'generalization_gap': train_results['per_landmark_improvement'][i] - val_results['per_landmark_improvement'][i]
+        })
+    
+    detailed_df = pd.DataFrame(detailed_results)
+    detailed_results_path = os.path.join(output_dir, "detailed_landmark_evaluation.csv")
+    detailed_df.to_csv(detailed_results_path, index=False)
+    print(f"\n✓ Detailed per-landmark results saved to {detailed_results_path}")
+    
+    # Update summary with comprehensive results
     summary = {
         'stage': 'MLP Training Completed',
-        'original_mre': original_mre,
-        'refined_mre': refined_mre,
-        'improvement_percent': improvement,
+        'training_original_mre': train_results['original_mre'],
+        'training_refined_mre': train_results['refined_mre'],
+        'training_improvement_percent': train_results['improvement_percent'],
+        'validation_original_mre': val_results['original_mre'],
+        'validation_refined_mre': val_results['refined_mre'],
+        'validation_improvement_percent': val_results['improvement_percent'],
+        'mre_gap': mre_gap,
+        'improvement_gap': improvement_gap,
+        'overfitting_detected': mre_gap > 0.2,
         'x_model_path': model_x_path,
         'y_model_path': model_y_path,
         'training_samples': len(X_x_train),
-        'validation_samples': len(X_x_val)
+        'validation_samples': len(X_x_val),
+        'best_landmark_train': train_results['best_landmark'],
+        'best_improvement_train': train_results['best_improvement'],
+        'best_landmark_val': val_results['best_landmark'],
+        'best_improvement_val': val_results['best_improvement']
     }
     
     summary_path = os.path.join(output_dir, "training_summary.json")
