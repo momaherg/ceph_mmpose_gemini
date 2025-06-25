@@ -16,6 +16,7 @@ import glob
 import cv2
 import matplotlib.pyplot as plt
 from scipy.ndimage import rotate as scipy_rotate
+import argparse
 
 # Suppress warnings
 warnings.filterwarnings('ignore')
@@ -163,7 +164,7 @@ def apply_tta_inference(model, img_array, bbox, augmentation_level='medium'):
         model: The pose model
         img_array: Input image array
         bbox: Bounding box
-        augmentation_level: 'medium' or 'heavy'
+        augmentation_level: 'medium'
     
     Returns:
         Averaged keypoints after TTA
@@ -171,16 +172,9 @@ def apply_tta_inference(model, img_array, bbox, augmentation_level='medium'):
     h, w = img_array.shape[:2]
     all_predictions = []
     
-    if augmentation_level == 'medium':
-        # Medium augmentation settings
-        scales = [0.95, 1.0, 1.05]
-        rotations = [-10, 0, 10]
-        use_flip = True
-    else:  # heavy
-        # Heavy augmentation settings
-        scales = [0.9, 0.95, 1.0, 1.05, 1.1]
-        rotations = [-15, -10, -5, 0, 5, 10, 15]
-        use_flip = True
+    # Medium augmentation settings (flipping is removed)
+    scales = [0.95, 1.0, 1.05]
+    rotations = [-10, 0, 10]
     
     # Apply augmentations
     for scale in scales:
@@ -228,40 +222,6 @@ def apply_tta_inference(model, img_array, bbox, augmentation_level='medium'):
                 
                 all_predictions.append(pred_kpts)
             
-            # Add flipped version
-            if use_flip:
-                flipped_img = np.fliplr(rotated_img).copy()
-                results_flip = inference_topdown(model, flipped_img, bboxes=bbox, bbox_format='xyxy')
-                
-                if results_flip and len(results_flip) > 0:
-                    pred_kpts_flip = results_flip[0].pred_instances.keypoints[0].copy()
-                    
-                    # Unflip
-                    pred_kpts_flip[:, 0] = w - pred_kpts_flip[:, 0]
-                    
-                    # Inverse rotation
-                    if rotation != 0:
-                        M_inv = cv2.getRotationMatrix2D((w/2, h/2), -rotation, 1.0)
-                        for i in range(len(pred_kpts_flip)):
-                            if pred_kpts_flip[i, 0] > 0 and pred_kpts_flip[i, 1] > 0:
-                                pt = np.array([pred_kpts_flip[i, 0], pred_kpts_flip[i, 1], 1])
-                                pred_kpts_flip[i, :2] = M_inv.dot(pt)[:2]
-                    
-                    # Inverse scale
-                    if scale != 1.0:
-                        if scale > 1:
-                            start_w = (int(w * scale) - w) // 2
-                            start_h = (int(h * scale) - h) // 2
-                            pred_kpts_flip[:, 0] = (pred_kpts_flip[:, 0] + start_w) / scale
-                            pred_kpts_flip[:, 1] = (pred_kpts_flip[:, 1] + start_h) / scale
-                        else:
-                            pad_w = (w - int(w * scale)) // 2
-                            pad_h = (h - int(h * scale)) // 2
-                            pred_kpts_flip[:, 0] = (pred_kpts_flip[:, 0] - pad_w) / scale
-                            pred_kpts_flip[:, 1] = (pred_kpts_flip[:, 1] - pad_h) / scale
-                    
-                    all_predictions.append(pred_kpts_flip)
-    
     # Average all predictions
     if all_predictions:
         averaged_keypoints = np.mean(all_predictions, axis=0)
@@ -271,6 +231,17 @@ def apply_tta_inference(model, img_array, bbox, augmentation_level='medium'):
 
 def main():
     """Main evaluation function with TTA refinements."""
+    
+    parser = argparse.ArgumentParser(
+        description='Test-Time Augmentation (TTA) Evaluation Script')
+    parser.add_argument(
+        '--test_split_file',
+        type=str,
+        default=None,
+        help=
+        'Path to a text file containing patient IDs for the test set, one ID per line.'
+    )
+    args = parser.parse_args()
     
     print("="*80)
     print("TEST-TIME AUGMENTATION (TTA) EVALUATION")
@@ -309,11 +280,35 @@ def main():
     # Load test data
     data_file_path = "/content/drive/MyDrive/Lala's Masters/train_data_pure_old_numpy.json"
     main_df = pd.read_json(data_file_path)
-    test_df = main_df[main_df['set'] == 'test'].reset_index(drop=True)
-    
+
+    if args.test_split_file:
+        print(f"Loading test set from external file: {args.test_split_file}")
+        with open(args.test_split_file, 'r') as f:
+            test_patient_ids = {
+                int(line.strip())
+                for line in f if line.strip()
+            }
+
+        if 'patient_id' not in main_df.columns:
+            print(
+                "ERROR: 'patient_id' column not found in the main DataFrame.")
+            return
+        main_df['patient_id'] = main_df['patient_id'].astype(int)
+
+        test_df = main_df[main_df['patient_id'].isin(
+            test_patient_ids)].reset_index(drop=True)
+    else:
+        print("Loading test set using 'set' column from JSON file.")
+        test_df = main_df[main_df['set'] == 'test'].reset_index(drop=True)
+        if test_df.empty:
+            print(
+                "Test set from 'set' column is empty, falling back to 'dev' set."
+            )
+            test_df = main_df[main_df['set'] == 'dev'].reset_index(drop=True)
+
     if test_df.empty:
-        print("Test set empty, using validation set")
-        test_df = main_df[main_df['set'] == 'dev'].reset_index(drop=True)
+        print("ERROR: No test samples found to evaluate.")
+        return
     
     print(f"Evaluating on {len(test_df)} test samples")
     
@@ -323,9 +318,7 @@ def main():
     
     # Store results for each refinement level
     results_baseline = {'pred': [], 'gt': []}
-    results_flip = {'pred': [], 'gt': []}
     results_medium_tta = {'pred': [], 'gt': []}
-    results_heavy_tta = {'pred': [], 'gt': []}
     
     # Initialize model
     model = init_model(config_path, checkpoint_path, 
@@ -377,59 +370,12 @@ def main():
     print_per_landmark_stats(baseline_per_landmark, landmark_names, "BASELINE PER-LANDMARK STATISTICS")
     
     # =======================
-    # STEP 2: SIMPLE FLIP TEST
+    # STEP 2: MEDIUM TTA (No Flip)
     # =======================
     print("\n" + "="*60)
-    print("STEP 2: SIMPLE FLIP TEST")
-    print("="*60)
-    
-    for idx, row in test_df.iterrows():
-        img_array = np.array(row['Image'], dtype=np.uint8).reshape((224, 224, 3))
-        gt_keypoints = results_baseline['gt'][idx]
-        
-        bbox = np.array([[0, 0, 224, 224]], dtype=np.float32)
-        
-        # Original inference
-        results_orig = inference_topdown(model, img_array, bboxes=bbox, bbox_format='xyxy')
-        
-        # Flipped inference
-        img_flipped = np.fliplr(img_array).copy()
-        results_flip_img = inference_topdown(model, img_flipped, bboxes=bbox, bbox_format='xyxy')
-        
-        if results_orig and results_flip_img and len(results_orig) > 0 and len(results_flip_img) > 0:
-            kpts_orig = results_orig[0].pred_instances.keypoints[0]
-            kpts_flip = results_flip_img[0].pred_instances.keypoints[0].copy()
-            
-            # Unflip
-            kpts_flip[:, 0] = 224 - kpts_flip[:, 0]
-            
-            # Average
-            kpts_averaged = (kpts_orig + kpts_flip) / 2.0
-            
-            results_flip['pred'].append(kpts_averaged)
-            results_flip['gt'].append(gt_keypoints)
-        
-        if (idx + 1) % 25 == 0:
-            print(f"Processed {idx + 1}/{len(test_df)} samples")
-    
-    # Compute flip test MRE
-    flip_metrics = compute_mre_simple(results_flip['pred'], results_flip['gt'])
-    print(f"\nFLIP TEST MRE: {flip_metrics['mre']:.3f} ± {flip_metrics['std']:.3f} pixels")
-    print(f"Median: {flip_metrics['median']:.3f}, P90: {flip_metrics['p90']:.3f}, P95: {flip_metrics['p95']:.3f}")
-    improvement_flip = (baseline_metrics['mre'] - flip_metrics['mre']) / baseline_metrics['mre'] * 100
-    print(f"Improvement over baseline: {improvement_flip:.1f}%")
-    
-    # Compute and print per-landmark statistics for flip test
-    flip_per_landmark = compute_per_landmark_mre(results_flip['pred'], results_flip['gt'], landmark_names)
-    print_per_landmark_stats(flip_per_landmark, landmark_names, "FLIP TEST PER-LANDMARK STATISTICS")
-    
-    # =======================
-    # STEP 3: MEDIUM TTA
-    # =======================
-    print("\n" + "="*60)
-    print("STEP 3: MEDIUM TEST-TIME AUGMENTATION")
-    print("Scales: [0.95, 1.0, 1.05], Rotations: [-10°, 0°, +10°], Flip: Yes")
-    print("Total augmentations: 3 × 3 × 2 = 18 predictions per image")
+    print("STEP 2: MEDIUM TEST-TIME AUGMENTATION (No Flip)")
+    print("Scales: [0.95, 1.0, 1.05], Rotations: [-10°, 0°, +10°]")
+    print("Total augmentations: 3 × 3 = 9 predictions per image")
     print("="*60)
     
     for idx, row in test_df.iterrows():
@@ -460,42 +406,6 @@ def main():
     print_per_landmark_stats(medium_per_landmark, landmark_names, "MEDIUM TTA PER-LANDMARK STATISTICS")
     
     # =======================
-    # STEP 4: HEAVY TTA
-    # =======================
-    print("\n" + "="*60)
-    print("STEP 4: HEAVY TEST-TIME AUGMENTATION")
-    print("Scales: [0.9, 0.95, 1.0, 1.05, 1.1], Rotations: [-15°, -10°, -5°, 0°, 5°, 10°, 15°], Flip: Yes")
-    print("Total augmentations: 5 × 7 × 2 = 70 predictions per image")
-    print("="*60)
-    
-    for idx, row in test_df.iterrows():
-        img_array = np.array(row['Image'], dtype=np.uint8).reshape((224, 224, 3))
-        gt_keypoints = results_baseline['gt'][idx]
-        
-        bbox = np.array([[0, 0, 224, 224]], dtype=np.float32)
-        
-        # Apply heavy TTA
-        pred_keypoints = apply_tta_inference(model, img_array, bbox, augmentation_level='heavy')
-        
-        if pred_keypoints is not None:
-            results_heavy_tta['pred'].append(pred_keypoints)
-            results_heavy_tta['gt'].append(gt_keypoints)
-        
-        if (idx + 1) % 5 == 0:
-            print(f"Processed {idx + 1}/{len(test_df)} samples")
-    
-    # Compute heavy TTA MRE
-    heavy_metrics = compute_mre_simple(results_heavy_tta['pred'], results_heavy_tta['gt'])
-    print(f"\nHEAVY TTA MRE: {heavy_metrics['mre']:.3f} ± {heavy_metrics['std']:.3f} pixels")
-    print(f"Median: {heavy_metrics['median']:.3f}, P90: {heavy_metrics['p90']:.3f}, P95: {heavy_metrics['p95']:.3f}")
-    improvement_heavy = (baseline_metrics['mre'] - heavy_metrics['mre']) / baseline_metrics['mre'] * 100
-    print(f"Improvement over baseline: {improvement_heavy:.1f}%")
-    
-    # Compute and print per-landmark statistics for heavy TTA
-    heavy_per_landmark = compute_per_landmark_mre(results_heavy_tta['pred'], results_heavy_tta['gt'], landmark_names)
-    print_per_landmark_stats(heavy_per_landmark, landmark_names, "HEAVY TTA PER-LANDMARK STATISTICS")
-    
-    # =======================
     # SUMMARY
     # =======================
     print("\n" + "="*80)
@@ -504,9 +414,7 @@ def main():
     print(f"{'Method':<25} {'MRE':<10} {'Improvement':<15} {'Inference Time':<20}")
     print("-" * 75)
     print(f"{'Baseline':<25} {baseline_metrics['mre']:.3f} ± {baseline_metrics['std']:.3f}  {'--':<15} {'1x':<20}")
-    print(f"{'Flip Test':<25} {flip_metrics['mre']:.3f} ± {flip_metrics['std']:.3f}  {improvement_flip:.1f}%{'':>10} {'2x':<20}")
-    print(f"{'Medium TTA':<25} {medium_metrics['mre']:.3f} ± {medium_metrics['std']:.3f}  {improvement_medium:.1f}%{'':>10} {'18x':<20}")
-    print(f"{'Heavy TTA':<25} {heavy_metrics['mre']:.3f} ± {heavy_metrics['std']:.3f}  {improvement_heavy:.1f}%{'':>10} {'70x':<20}")
+    print(f"{'Medium TTA':<25} {medium_metrics['mre']:.3f} ± {medium_metrics['std']:.3f}  {improvement_medium:.1f}%{'':>10} {'9x':<20}")
     
     # Save results
     output_dir = os.path.join(work_dir, "tta_refinements")
@@ -517,15 +425,9 @@ def main():
         {'method': 'Baseline', 'mre': baseline_metrics['mre'], 'std': baseline_metrics['std'], 
          'median': baseline_metrics['median'], 'p90': baseline_metrics['p90'], 'p95': baseline_metrics['p95'],
          'inference_multiplier': 1},
-        {'method': 'Flip Test', 'mre': flip_metrics['mre'], 'std': flip_metrics['std'],
-         'median': flip_metrics['median'], 'p90': flip_metrics['p90'], 'p95': flip_metrics['p95'],
-         'inference_multiplier': 2},
         {'method': 'Medium TTA', 'mre': medium_metrics['mre'], 'std': medium_metrics['std'],
          'median': medium_metrics['median'], 'p90': medium_metrics['p90'], 'p95': medium_metrics['p95'],
-         'inference_multiplier': 18},
-        {'method': 'Heavy TTA', 'mre': heavy_metrics['mre'], 'std': heavy_metrics['std'],
-         'median': heavy_metrics['median'], 'p90': heavy_metrics['p90'], 'p95': heavy_metrics['p95'],
-         'inference_multiplier': 70}
+         'inference_multiplier': 9}
     ])
     
     summary_path = os.path.join(output_dir, "tta_summary.csv")
@@ -539,12 +441,8 @@ def main():
             'landmark_index': i,
             'landmark_name': name,
             'baseline_mre': baseline_per_landmark[name]['mre'],
-            'flip_mre': flip_per_landmark[name]['mre'],
             'medium_tta_mre': medium_per_landmark[name]['mre'],
-            'heavy_tta_mre': heavy_per_landmark[name]['mre'],
-            'baseline_to_flip_improvement': (baseline_per_landmark[name]['mre'] - flip_per_landmark[name]['mre']) / baseline_per_landmark[name]['mre'] * 100 if baseline_per_landmark[name]['mre'] > 0 else 0,
-            'baseline_to_medium_improvement': (baseline_per_landmark[name]['mre'] - medium_per_landmark[name]['mre']) / baseline_per_landmark[name]['mre'] * 100 if baseline_per_landmark[name]['mre'] > 0 else 0,
-            'baseline_to_heavy_improvement': (baseline_per_landmark[name]['mre'] - heavy_per_landmark[name]['mre']) / baseline_per_landmark[name]['mre'] * 100 if baseline_per_landmark[name]['mre'] > 0 else 0
+            'baseline_to_medium_improvement': (baseline_per_landmark[name]['mre'] - medium_per_landmark[name]['mre']) / baseline_per_landmark[name]['mre'] * 100 if baseline_per_landmark[name]['mre'] > 0 else 0
         }
         per_landmark_comparison.append(row)
     
@@ -557,9 +455,9 @@ def main():
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
     
     # MRE improvement plot
-    methods = ['Baseline', 'Flip Test', 'Medium TTA', 'Heavy TTA']
-    mres = [baseline_metrics['mre'], flip_metrics['mre'], medium_metrics['mre'], heavy_metrics['mre']]
-    stds = [baseline_metrics['std'], flip_metrics['std'], medium_metrics['std'], heavy_metrics['std']]
+    methods = ['Baseline', 'Medium TTA']
+    mres = [baseline_metrics['mre'], medium_metrics['mre']]
+    stds = [baseline_metrics['std'], medium_metrics['std']]
     
     ax1.errorbar(methods, mres, yerr=stds, marker='o', markersize=10, capsize=5, linewidth=2)
     ax1.set_ylabel('Mean Radial Error (pixels)')
@@ -574,8 +472,8 @@ def main():
                 ha='center', va='bottom', fontsize=10, color='green')
     
     # Accuracy vs Inference Time trade-off
-    inference_times = [1, 2, 18, 70]
-    improvements = [0, improvement_flip, improvement_medium, improvement_heavy]
+    inference_times = [1, 9]
+    improvements = [0, improvement_medium]
     
     ax2.scatter(inference_times, improvements, s=100, alpha=0.7)
     for i, method in enumerate(methods):
@@ -600,24 +498,21 @@ def main():
     problematic_indices = [0, 10, 9]  # Sella, Gonion, PNS
     problematic_names = ['sella', 'Gonion', 'PNS']
     
-    print(f"{'Landmark':<15} {'Baseline':<12} {'Flip':<12} {'Medium TTA':<12} {'Heavy TTA':<12} {'Best Improvement':<20}")
+    print(f"{'Landmark':<15} {'Baseline':<12} {'Medium TTA':<12} {'Best Improvement':<20}")
     print("-" * 85)
     
     for idx, name in zip(problematic_indices, problematic_names):
         landmark = landmark_names[idx]
         baseline_mre = baseline_per_landmark[landmark]['mre']
-        flip_mre = flip_per_landmark[landmark]['mre']
         medium_mre = medium_per_landmark[landmark]['mre']
-        heavy_mre = heavy_per_landmark[landmark]['mre']
         
-        best_improvement = (baseline_mre - heavy_mre) / baseline_mre * 100 if baseline_mre > 0 else 0
+        best_improvement = (baseline_mre - medium_mre) / baseline_mre * 100 if baseline_mre > 0 else 0
         
-        print(f"{name:<15} {baseline_mre:<12.3f} {flip_mre:<12.3f} {medium_mre:<12.3f} {heavy_mre:<12.3f} {best_improvement:<20.1f}%")
+        print(f"{name:<15} {baseline_mre:<12.3f} {medium_mre:<12.3f} {best_improvement:<20.1f}%")
     
     print("\n✅ Test-time augmentation evaluation complete!")
-    print(f"🎯 Best MRE: {heavy_metrics['mre']:.3f} pixels (Heavy TTA)")
-    print(f"⚡ Fast option: {flip_metrics['mre']:.3f} pixels (Flip Test, only 2x slower)")
-    print(f"📈 Total improvement: {improvement_heavy:.1f}% (but 70x slower)")
+    print(f"🎯 Best MRE: {medium_metrics['mre']:.3f} pixels (Medium TTA)")
+    print(f"📈 Total improvement: {improvement_medium:.1f}% (9x slower)")
 
 if __name__ == "__main__":
     main() 
