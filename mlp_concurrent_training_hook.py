@@ -169,7 +169,6 @@ class ConcurrentMLPTrainingHook(Hook):
         train_dataset = runner.train_dataloader.dataset
         logger.info('[ConcurrentMLPTrainingHook] Generating predictions for MLP on GPU...')
 
-        # Helper function to safely convert tensor to numpy
         def tensor_to_numpy(data):
             """Safely convert tensor to numpy, handling both tensor and numpy inputs."""
             if isinstance(data, torch.Tensor):
@@ -178,85 +177,6 @@ class ConcurrentMLPTrainingHook(Hook):
                 return data
             else:
                 return np.array(data)
-
-        # Enhanced inference function that works with runner model
-        def run_model_inference(model, img_array):
-            """Run inference using the model directly, bypassing inference_topdown issues."""
-            try:
-                # Prepare input in the format expected by the model
-                import cv2
-                from mmpose.structures import PoseDataSample
-                from mmengine.structures import InstanceData
-                
-                # Resize image to model input size (384x384 based on config)
-                input_size = (384, 384)
-                img_resized = cv2.resize(img_array, input_size)
-                
-                # Convert to tensor and normalize (standard ImageNet normalization)
-                img_tensor = torch.from_numpy(img_resized).float().permute(2, 0, 1) / 255.0
-                mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
-                std = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
-                img_tensor = (img_tensor - mean) / std
-                
-                # Add batch dimension and move to device
-                img_batch = img_tensor.unsqueeze(0).to(self.device)
-                
-                # Create data sample with bbox covering whole image and required metadata
-                data_sample = PoseDataSample()
-                
-                # Create instance data with bbox
-                instance_data = InstanceData()
-                instance_data.bboxes = torch.tensor([[0, 0, input_size[0], input_size[1]]], dtype=torch.float32)
-                instance_data.bbox_scores = torch.tensor([1.0], dtype=torch.float32)  # Add bbox confidence score
-                data_sample.gt_instances = instance_data
-                
-                # Add required metadata for the model
-                # These should mimic what the pipeline does
-                center = np.array([img_array.shape[1]/2, img_array.shape[0]/2])
-                scale = np.array([img_array.shape[1], img_array.shape[0]])
-                
-                data_sample.set_metainfo({
-                    'flip_indices': list(range(19)),  # No flipping for landmarks 0-18
-                    'input_size': input_size,
-                    'center': center,
-                    'scale': scale,
-                    'input_center': center,
-                    'input_scale': scale
-                })
-                
-                # Create batch inputs
-                batch_inputs = img_batch
-                batch_data_samples = [data_sample]
-                
-                # Run model inference
-                with torch.no_grad():
-                    results = model(batch_inputs, batch_data_samples, mode='predict')
-                
-                if results and len(results) > 0 and hasattr(results[0], 'pred_instances'):
-                    pred_keypoints = results[0].pred_instances.keypoints[0]
-                    
-                    # Scale back to original image size (224x224)
-                    scale_x = 224.0 / input_size[0]
-                    scale_y = 224.0 / input_size[1]
-                    
-                    # Handle both tensor and numpy array cases
-                    if isinstance(pred_keypoints, torch.Tensor):
-                        # If tensor, scale on same device
-                        scale_tensor = torch.tensor([scale_x, scale_y]).to(pred_keypoints.device)
-                        pred_keypoints = pred_keypoints * scale_tensor
-                        return tensor_to_numpy(pred_keypoints)
-                    else:
-                        # If already numpy, scale directly
-                        pred_keypoints = tensor_to_numpy(pred_keypoints)
-                        pred_keypoints[:, 0] *= scale_x
-                        pred_keypoints[:, 1] *= scale_y
-                        return pred_keypoints
-                else:
-                    return None
-                    
-            except Exception as e:
-                logger.warning(f'[ConcurrentMLPTrainingHook] Model inference failed: {e}')
-                return None
 
         # Access training data more robustly
         try:
@@ -301,8 +221,15 @@ class ConcurrentMLPTrainingHook(Hook):
                                 
                             gt_keypoints = np.array(gt_keypoints)
                             
-                            # Run inference with enhanced model inference
-                            pred_keypoints = run_model_inference(model, img_array)
+                            # Run inference with the standard mmpose API
+                            bbox = np.array([[0, 0, 224, 224]], dtype=np.float32)
+                            results = inference_topdown(model, img_array, bboxes=bbox, bbox_format='xyxy')
+                            
+                            if results and len(results) > 0:
+                                pred_keypoints = results[0].pred_instances.keypoints[0]
+                                pred_keypoints = tensor_to_numpy(pred_keypoints)
+                            else:
+                                continue
                             
                             if pred_keypoints is None or pred_keypoints.shape[0] != 19:
                                 continue
@@ -356,8 +283,15 @@ class ConcurrentMLPTrainingHook(Hook):
                         else:
                             continue
                         
-                        # Run inference with enhanced model inference
-                        pred_kpts = run_model_inference(model, img_np)
+                        # Run inference with the standard mmpose API
+                        bbox = np.array([[0, 0, 224, 224]], dtype=np.float32)
+                        results = inference_topdown(model, img_np, bboxes=bbox, bbox_format='xyxy')
+                        
+                        if results and len(results) > 0:
+                            pred_kpts = results[0].pred_instances.keypoints[0]
+                            pred_kpts = tensor_to_numpy(pred_kpts)
+                        else:
+                            continue
                         
                         if pred_kpts is None or pred_kpts.shape[0] != 19:
                             continue
