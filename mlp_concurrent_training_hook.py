@@ -429,6 +429,28 @@ class ConcurrentMLPTrainingHook(Hook):
         _train_one(self.mlp_y, self.opt_y, dl_y, 'MLP-Y')
 
         logger.info('[ConcurrentMLPTrainingHook] Finished MLP update for this HRNet epoch.')
+        
+        # Save MLP models after each epoch
+        save_dir = os.path.join(runner.work_dir, 'concurrent_mlp')
+        os.makedirs(save_dir, exist_ok=True)
+        
+        # Save current epoch models
+        current_epoch = runner.epoch + 1  # runner.epoch is 0-indexed
+        mlp_x_epoch_path = os.path.join(save_dir, f'mlp_x_epoch_{current_epoch}.pth')
+        mlp_y_epoch_path = os.path.join(save_dir, f'mlp_y_epoch_{current_epoch}.pth')
+        
+        torch.save(self.mlp_x.state_dict(), mlp_x_epoch_path)
+        torch.save(self.mlp_y.state_dict(), mlp_y_epoch_path)
+        
+        # Also save as "latest" for easy access
+        mlp_x_latest_path = os.path.join(save_dir, 'mlp_x_latest.pth')
+        mlp_y_latest_path = os.path.join(save_dir, 'mlp_y_latest.pth')
+        
+        torch.save(self.mlp_x.state_dict(), mlp_x_latest_path)
+        torch.save(self.mlp_y.state_dict(), mlp_y_latest_path)
+        
+        logger.info(f'[ConcurrentMLPTrainingHook] MLP models saved for epoch {current_epoch}')
+        logger.info(f'[ConcurrentMLPTrainingHook] Latest models: {mlp_x_latest_path}, {mlp_y_latest_path}')
 
     # ---------------------------------------------------------------------
     # Optional: save MLP weights at end of run

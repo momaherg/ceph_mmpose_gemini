@@ -244,12 +244,56 @@ def main():
     mlp_x_path = os.path.join(mlp_dir, "mlp_x_final.pth")
     mlp_y_path = os.path.join(mlp_dir, "mlp_y_final.pth")
     
-    if not (os.path.exists(mlp_x_path) and os.path.exists(mlp_y_path)):
-        print("ERROR: MLP models not found. Make sure concurrent training completed successfully.")
-        print(f"Looking for: {mlp_x_path} and {mlp_y_path}")
-        return
-    
-    print(f"✓ Found MLP models: {mlp_x_path}, {mlp_y_path}")
+    # Check for final models first, then latest, then epoch-specific
+    if os.path.exists(mlp_x_path) and os.path.exists(mlp_y_path):
+        print(f"✓ Found final MLP models: {mlp_x_path}, {mlp_y_path}")
+        model_type = "final"
+    else:
+        # Try latest models
+        mlp_x_latest = os.path.join(mlp_dir, "mlp_x_latest.pth")
+        mlp_y_latest = os.path.join(mlp_dir, "mlp_y_latest.pth")
+        
+        if os.path.exists(mlp_x_latest) and os.path.exists(mlp_y_latest):
+            mlp_x_path = mlp_x_latest
+            mlp_y_path = mlp_y_latest
+            print(f"✓ Found latest MLP models: {mlp_x_path}, {mlp_y_path}")
+            model_type = "latest"
+        else:
+            # Try to find epoch-specific models
+            epoch_models = glob.glob(os.path.join(mlp_dir, "mlp_x_epoch_*.pth"))
+            if epoch_models:
+                # Get the latest epoch model
+                latest_x_model = max(epoch_models, key=lambda x: int(x.split('_epoch_')[1].split('.')[0]))
+                epoch_num = latest_x_model.split('_epoch_')[1].split('.')[0]
+                mlp_y_epoch = os.path.join(mlp_dir, f"mlp_y_epoch_{epoch_num}.pth")
+                
+                if os.path.exists(mlp_y_epoch):
+                    mlp_x_path = latest_x_model
+                    mlp_y_path = mlp_y_epoch
+                    print(f"✓ Found epoch {epoch_num} MLP models: {mlp_x_path}, {mlp_y_path}")
+                    model_type = f"epoch_{epoch_num}"
+                else:
+                    print("ERROR: MLP models not found.")
+                    print(f"Searched in: {mlp_dir}")
+                    print("Available files:")
+                    if os.path.exists(mlp_dir):
+                        for file in os.listdir(mlp_dir):
+                            print(f"  - {file}")
+                    else:
+                        print("  MLP directory does not exist")
+                    print("\nTip: Make sure concurrent training is running and has completed at least one epoch.")
+                    return
+            else:
+                print("ERROR: No MLP models found.")
+                print(f"Searched in: {mlp_dir}")
+                print("Available files:")
+                if os.path.exists(mlp_dir):
+                    for file in os.listdir(mlp_dir):
+                        print(f"  - {file}")
+                else:
+                    print("  MLP directory does not exist")
+                print("\nTip: Make sure concurrent training is running and has completed at least one epoch.")
+                return
     
     # Load models
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
@@ -450,6 +494,8 @@ def main():
     print("\n" + "="*80)
     print("EVALUATION RESULTS")
     print("="*80)
+    print(f"📊 Evaluated using {model_type} MLP models")
+    print(f"📈 HRNetV2 checkpoint: {os.path.basename(hrnet_checkpoint)}")
     
     print(f"\n🏷️  OVERALL PERFORMANCE:")
     print(f"{'Metric':<15} {'HRNetV2':<15} {'MLP Refined':<15} {'Improvement':<15}")
@@ -583,6 +629,12 @@ def main():
     print(f"\n🎉 Evaluation completed!")
     print(f"📈 Overall improvement: {improvement_mre:.1f}% reduction in MRE")
     print(f"🎯 Best performing landmarks benefit most from MLP refinement")
+    print(f"🔧 Evaluated using: {model_type} MLP models")
+    
+    if model_type == "latest":
+        print("💡 Note: Training is likely still in progress. Final results may differ.")
+    elif "epoch_" in model_type:
+        print("💡 Note: Using intermediate checkpoint. Final results may differ.")
 
 if __name__ == "__main__":
     main() 
