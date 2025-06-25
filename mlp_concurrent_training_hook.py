@@ -210,11 +210,17 @@ class ConcurrentMLPTrainingHook(Hook):
                 data_sample.gt_instances = instance_data
                 
                 # Add required metadata for the model
+                # These should mimic what the pipeline does
+                center = np.array([img_array.shape[1]/2, img_array.shape[0]/2])
+                scale = np.array([img_array.shape[1], img_array.shape[0]])
+                
                 data_sample.set_metainfo({
                     'flip_indices': list(range(19)),  # No flipping for landmarks 0-18
                     'input_size': input_size,
-                    'bbox_center': [input_size[0]/2, input_size[1]/2],
-                    'bbox_scale': [input_size[0], input_size[1]]
+                    'center': center,
+                    'scale': scale,
+                    'input_center': center,
+                    'input_scale': scale
                 })
                 
                 # Create batch inputs
