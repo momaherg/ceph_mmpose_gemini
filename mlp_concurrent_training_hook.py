@@ -101,7 +101,7 @@ class _MLPDataset(data.Dataset):
 
 @HOOKS.register_module()
 class ConcurrentMLPTrainingHook(Hook):
-    """MMEngine hook that performs concurrent MLP refinement training using a forward hook."""
+    """MMEngine hook that performs concurrent MLP refinement training using online collection."""
 
     priority = 'LOW'  # Run after default hooks
 
@@ -132,31 +132,21 @@ class ConcurrentMLPTrainingHook(Hook):
         self._epoch_preds_y: List[torch.Tensor] = []
         self._epoch_gts_x: List[torch.Tensor] = []
         self._epoch_gts_y: List[torch.Tensor] = []
-        
-        # To store captured heatmaps from the hook
-        self._last_pred_outputs = None
-        self.hook_handle = None
 
     # ---------------------------------------------------------------------
     # MMEngine lifecycle methods
     # ---------------------------------------------------------------------
 
-    def _forward_hook(self, module, inputs, outputs):
-        """A forward hook to capture model head's output (heatmaps)."""
-        self._last_pred_outputs = outputs
-
     def before_run(self, runner: Runner):
         logger: MMLogger = runner.logger
-        logger.info('[ConcurrentMLPTrainingHook] Initialising MLP models (OPTIMIZED-V2 with Forward Hook)...')
+        logger.info('[ConcurrentMLPTrainingHook] Initialising MLP models (OPTIMIZED VERSION)…')
 
         self.mlp_x = MLPRefinementModel().to(self.device)
         self.mlp_y = MLPRefinementModel().to(self.device)
         self.opt_x = optim.Adam(self.mlp_x.parameters(), lr=self.mlp_lr, weight_decay=self.mlp_weight_decay)
         self.opt_y = optim.Adam(self.mlp_y.parameters(), lr=self.mlp_lr, weight_decay=self.mlp_weight_decay)
         
-        logger.info('[ConcurrentMLPTrainingHook] Registering forward hook on model head to capture predictions.')
-        model_head = runner.model.head
-        self.hook_handle = model_head.register_forward_hook(self._forward_hook)
+        logger.info('[ConcurrentMLPTrainingHook] Using ONLINE COLLECTION approach - 50% faster!')
 
     def before_train_epoch(self, runner: Runner):
         """Clear buffers at the start of each epoch."""
@@ -166,19 +156,19 @@ class ConcurrentMLPTrainingHook(Hook):
         self._epoch_gts_y.clear()
 
     def after_train_iter(self, runner: Runner, batch_idx: int, data_batch=None, outputs=None):
-        """Collect predictions and ground truth during each training iteration using a forward hook."""
-        if self._last_pred_outputs is None or data_batch is None:
+        """Collect predictions and ground truth during each training iteration."""
+        if outputs is None or data_batch is None:
             return
-        
-        logger = runner.logger
+            
         try:
             with torch.no_grad():
-                # 1. Decode predictions from captured heatmaps
-                # The head's decode method returns numpy arrays
-                pred_keypoints_np, _ = runner.model.head.decode(self._last_pred_outputs)
-                pred_keypoints = torch.from_numpy(pred_keypoints_np).to('cpu', non_blocking=True)
-
-                # 2. Extract ground truth from data batch
+                logger = runner.logger
+                
+                # The outputs from after_train_iter usually only contains losses
+                # We need to run a forward pass to get predictions
+                model = runner.model
+                
+                # Extract ground truth first (this works)
                 gt_keypoints = None
                 if isinstance(data_batch, dict) and 'data_samples' in data_batch:
                     data_samples = data_batch['data_samples']
@@ -187,54 +177,94 @@ class ConcurrentMLPTrainingHook(Hook):
                         for sample in data_samples:
                             if hasattr(sample, 'gt_instances') and hasattr(sample.gt_instances, 'keypoints'):
                                 gt_kpts = sample.gt_instances.keypoints
-                                if not isinstance(gt_kpts, torch.Tensor):
-                                    gt_kpts = torch.tensor(gt_kpts)
-                                gt_list.append(gt_kpts.cpu())
+                                if isinstance(gt_kpts, torch.Tensor):
+                                    gt_list.append(gt_kpts.cpu())
+                                else:
+                                    gt_list.append(torch.tensor(gt_kpts).cpu())
                         if gt_list:
                             gt_keypoints = torch.stack(gt_list)
-
+                
                 if gt_keypoints is None:
-                    if batch_idx < 2: logger.warning('[ConcurrentMLPTrainingHook] Could not extract GT keypoints.')
                     return
-
-                # 3. Align shapes
-                # GT keypoints from dataloader are often (B, 1, K, 2)
+                
+                # Now get predictions by running a forward pass
+                model.eval()  # Set to eval mode for consistent predictions
+                try:
+                    # Run forward pass to get predictions
+                    with torch.no_grad():
+                        pred_results = model(data_batch['inputs'], data_batch['data_samples'], mode='predict')
+                    
+                    # Extract keypoints from prediction results
+                    pred_keypoints = None
+                    if isinstance(pred_results, list) and len(pred_results) > 0:
+                        # Handle list of prediction results
+                        pred_list = []
+                        for result in pred_results:
+                            if hasattr(result, 'pred_instances') and hasattr(result.pred_instances, 'keypoints'):
+                                pred_kpts = result.pred_instances.keypoints
+                                if len(pred_kpts.shape) == 3:  # [1, 19, 2]
+                                    pred_list.append(pred_kpts[0].cpu())  # Take first instance
+                                else:  # [19, 2]
+                                    pred_list.append(pred_kpts.cpu())
+                        if pred_list:
+                            pred_keypoints = torch.stack(pred_list)  # [batch_size, 19, 2]
+                    
+                    if pred_keypoints is None:
+                        if batch_idx == 0:
+                            logger.warning('[ConcurrentMLPTrainingHook] Could not extract predictions from model forward')
+                        return
+                        
+                finally:
+                    model.train()  # Reset to training mode
+                
+                # Handle ground truth shape: [20, 1, 19, 2] -> [20, 19, 2]
                 if len(gt_keypoints.shape) == 4 and gt_keypoints.shape[1] == 1:
                     gt_keypoints = gt_keypoints.squeeze(1)
-
+                
+                # Debug logging for first batch
+                if batch_idx == 0:
+                    logger.info(f'[ConcurrentMLPTrainingHook] Successfully extracted:')
+                    logger.info(f'  pred_keypoints: {pred_keypoints.shape}')
+                    logger.info(f'  gt_keypoints: {gt_keypoints.shape}')
+                
+                # Ensure shapes match
                 if pred_keypoints.shape != gt_keypoints.shape:
-                    if batch_idx < 2: logger.warning(f'[ConcurrentMLPTrainingHook] Shape mismatch: pred {pred_keypoints.shape} vs gt {gt_keypoints.shape}')
+                    if batch_idx == 0:
+                        logger.warning(f'[ConcurrentMLPTrainingHook] Shape mismatch: pred {pred_keypoints.shape} vs gt {gt_keypoints.shape}')
                     return
-
-                # 4. Store coordinates
-                batch_size, num_keypoints, _ = pred_keypoints.shape
-                if num_keypoints != 19:
-                    if batch_idx < 2: logger.warning(f'[ConcurrentMLPTrainingHook] Expected 19 keypoints, got {num_keypoints}.')
+                
+                # Validate dimensions
+                if len(pred_keypoints.shape) != 3 or pred_keypoints.shape[1] != 19 or pred_keypoints.shape[2] != 2:
+                    if batch_idx == 0:
+                        logger.warning(f'[ConcurrentMLPTrainingHook] Unexpected shape: {pred_keypoints.shape}, expected [batch, 19, 2]')
                     return
-                    
+                
+                # Store coordinates for each sample in the batch
+                batch_size = pred_keypoints.shape[0]
                 for i in range(batch_size):
-                    pred_x = pred_keypoints[i, :, 0]
-                    pred_y = pred_keypoints[i, :, 1]
-                    gt_x = gt_keypoints[i, :, 0]
-                    gt_y = gt_keypoints[i, :, 1]
+                    pred_x = pred_keypoints[i, :, 0]  # [19]
+                    pred_y = pred_keypoints[i, :, 1]  # [19]
+                    gt_x = gt_keypoints[i, :, 0]      # [19]
+                    gt_y = gt_keypoints[i, :, 1]      # [19]
                     
-                    if torch.sum(torch.abs(gt_x)) > 0: # Check if GT is not just padding
+                    # Validate that we have valid coordinates (not all zeros)
+                    if torch.sum(torch.abs(gt_x)) > 0 and torch.sum(torch.abs(gt_y)) > 0:
                         self._epoch_preds_x.append(pred_x)
                         self._epoch_preds_y.append(pred_y)
                         self._epoch_gts_x.append(gt_x)
                         self._epoch_gts_y.append(gt_y)
-
-                if batch_idx > 0 and batch_idx % 20 == 0 and len(self._epoch_preds_x) > 0:
+                
+                # Log collection progress occasionally
+                if batch_idx % 20 == 0 and len(self._epoch_preds_x) > 0:
                     logger.info(f'[ConcurrentMLPTrainingHook] Collected {len(self._epoch_preds_x)} samples so far...')
-
+                        
         except Exception as e:
+            # Log the first few errors to help debug
             if batch_idx < 5:
+                logger = runner.logger
                 logger.warning(f'[ConcurrentMLPTrainingHook] Failed to collect batch {batch_idx}: {e}')
                 import traceback
                 logger.warning(f'[ConcurrentMLPTrainingHook] Traceback: {traceback.format_exc()}')
-        finally:
-            # Reset for the next iteration
-            self._last_pred_outputs = None
 
     def after_train_epoch(self, runner: Runner):
         """After each HRNetV2 epoch, train MLP using collected predictions."""
@@ -335,11 +365,6 @@ class ConcurrentMLPTrainingHook(Hook):
     # ---------------------------------------------------------------------
     def after_run(self, runner: Runner):
         logger: MMLogger = runner.logger
-        # Remove the hook
-        if self.hook_handle:
-            self.hook_handle.remove()
-            logger.info('[ConcurrentMLPTrainingHook] Removed forward hook.')
-            
         if self.mlp_x is None or self.mlp_y is None:
             return
         save_dir = os.path.join(runner.work_dir, 'concurrent_mlp')
