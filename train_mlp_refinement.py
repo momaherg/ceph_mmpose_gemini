@@ -40,13 +40,16 @@ class MLPRefinementModel(nn.Module):
     """
     MLP model for landmark coordinate refinement.
     Input: 19 predicted coordinates
-    Hidden: 500 neurons
+    Hidden: 500 neurons (2 layers)
     Output: 19 refined coordinates
     """
     def __init__(self, input_dim=19, hidden_dim=500, output_dim=19):
         super(MLPRefinementModel, self).__init__()
         self.network = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(hidden_dim, hidden_dim),  # Additional 500 neuron layer
             nn.ReLU(),
             nn.Dropout(0.1),
             nn.Linear(hidden_dim, output_dim)
@@ -413,14 +416,21 @@ def train_mlp_models(args):
         
         train_losses = []
         val_losses = []
+        input_losses_train = []
+        input_losses_val = []
         best_val_loss = float('inf')
         
         for epoch in range(1000):
             # Training
             model.train()
             epoch_train_loss = 0.0
+            epoch_input_loss_train = 0.0
             for batch_idx, (inputs, targets) in enumerate(train_loader):
                 inputs, targets = inputs.to(device), targets.to(device)
+                
+                # Calculate input loss (original predictions vs ground truth)
+                input_loss = criterion(inputs, targets)
+                epoch_input_loss_train += input_loss.item()
                 
                 optimizer.zero_grad()
                 outputs = model(inputs)
@@ -431,20 +441,30 @@ def train_mlp_models(args):
                 epoch_train_loss += loss.item()
             
             avg_train_loss = epoch_train_loss / len(train_loader)
+            avg_input_loss_train = epoch_input_loss_train / len(train_loader)
             train_losses.append(avg_train_loss)
+            input_losses_train.append(avg_input_loss_train)
             
             # Validation
             model.eval()
             epoch_val_loss = 0.0
+            epoch_input_loss_val = 0.0
             with torch.no_grad():
                 for inputs, targets in val_loader:
                     inputs, targets = inputs.to(device), targets.to(device)
+                    
+                    # Calculate input loss (original predictions vs ground truth)
+                    input_loss = criterion(inputs, targets)
+                    epoch_input_loss_val += input_loss.item()
+                    
                     outputs = model(inputs)
                     loss = criterion(outputs, targets)
                     epoch_val_loss += loss.item()
             
             avg_val_loss = epoch_val_loss / len(val_loader)
+            avg_input_loss_val = epoch_input_loss_val / len(val_loader)
             val_losses.append(avg_val_loss)
+            input_losses_val.append(avg_input_loss_val)
             
             # Save best model
             if avg_val_loss < best_val_loss:
@@ -452,17 +472,20 @@ def train_mlp_models(args):
                 torch.save(model.state_dict(), save_path)
             
             if (epoch + 1) % 20 == 0:
-                print(f"  Epoch {epoch+1}/100 - Train Loss: {avg_train_loss:.6f}, Val Loss: {avg_val_loss:.6f}")
+                print(f"  Epoch {epoch+1}/1000 - Train Loss: {avg_train_loss:.6f}, Val Loss: {avg_val_loss:.6f}, Input Loss Train: {avg_input_loss_train:.6f}, Input Loss Val: {avg_input_loss_val:.6f}")
         
         print(f"✓ {model_name} training completed. Best val loss: {best_val_loss:.6f}")
-        return train_losses, val_losses
+        print(f"  Final Input Loss - Train: {input_losses_train[-1]:.6f}, Val: {input_losses_val[-1]:.6f}")
+        print(f"  Improvement - Train: {((input_losses_train[-1] - train_losses[-1]) / input_losses_train[-1] * 100):.1f}%, Val: {((input_losses_val[-1] - val_losses[-1]) / input_losses_val[-1] * 100):.1f}%")
+        
+        return train_losses, val_losses, input_losses_train, input_losses_val
     
     # Initialize models
     model_x = MLPRefinementModel().to(device)
     model_y = MLPRefinementModel().to(device)
     
     print(f"✓ MLP models initialized:")
-    print(f"  Architecture: 19 → 500 → 19")
+    print(f"  Architecture: 19 → 500 → 500 → 19")
     print(f"  Parameters per model: {sum(p.numel() for p in model_x.parameters()):,}")
     
     # Create output directory
@@ -471,12 +494,12 @@ def train_mlp_models(args):
     
     # Train X coordinate model
     model_x_path = os.path.join(output_dir, "mlp_x_model.pth")
-    train_losses_x, val_losses_x = train_mlp(
+    train_losses_x, val_losses_x, input_losses_train_x, input_losses_val_x = train_mlp(
         model_x, train_loader_x, val_loader_x, "X-coordinate", model_x_path)
     
     # Train Y coordinate model
     model_y_path = os.path.join(output_dir, "mlp_y_model.pth")
-    train_losses_y, val_losses_y = train_mlp(
+    train_losses_y, val_losses_y, input_losses_train_y, input_losses_val_y = train_mlp(
         model_y, train_loader_y, val_loader_y, "Y-coordinate", model_y_path)
     
     # Save scalers
@@ -498,6 +521,8 @@ def train_mlp_models(args):
     # X coordinate losses
     ax1.plot(train_losses_x, label='Training Loss', color='blue')
     ax1.plot(val_losses_x, label='Validation Loss', color='red')
+    ax1.plot(input_losses_train_x, label='Input Loss (Train)', color='green', linestyle='--')
+    ax1.plot(input_losses_val_x, label='Input Loss (Val)', color='orange', linestyle='--')
     ax1.set_title('X-Coordinate MLP Training')
     ax1.set_xlabel('Epoch')
     ax1.set_ylabel('MSE Loss')
@@ -507,6 +532,8 @@ def train_mlp_models(args):
     # Y coordinate losses
     ax2.plot(train_losses_y, label='Training Loss', color='blue')
     ax2.plot(val_losses_y, label='Validation Loss', color='red')
+    ax2.plot(input_losses_train_y, label='Input Loss (Train)', color='green', linestyle='--')
+    ax2.plot(input_losses_val_y, label='Input Loss (Val)', color='orange', linestyle='--')
     ax2.set_title('Y-Coordinate MLP Training')
     ax2.set_xlabel('Epoch')
     ax2.set_ylabel('MSE Loss')
@@ -518,23 +545,30 @@ def train_mlp_models(args):
     ax3.plot(val_losses_x, label='X Val', color='blue', linestyle='--')
     ax3.plot(train_losses_y, label='Y Train', color='red', linestyle='-')
     ax3.plot(val_losses_y, label='Y Val', color='red', linestyle='--')
+    ax3.plot(input_losses_train_x, label='X Input Train', color='green', linestyle='-', alpha=0.7)
+    ax3.plot(input_losses_val_x, label='X Input Val', color='green', linestyle='--', alpha=0.7)
     ax3.set_title('Combined Training Comparison')
     ax3.set_xlabel('Epoch')
     ax3.set_ylabel('MSE Loss')
     ax3.legend()
     ax3.grid(True, alpha=0.3)
     
-    # Final loss values
+    # Final loss values comparison
     final_metrics = [
         ['X Train', train_losses_x[-1]],
         ['X Val', val_losses_x[-1]],
+        ['X Input Train', input_losses_train_x[-1]],
+        ['X Input Val', input_losses_val_x[-1]],
         ['Y Train', train_losses_y[-1]],
-        ['Y Val', val_losses_y[-1]]
+        ['Y Val', val_losses_y[-1]],
+        ['Y Input Train', input_losses_train_y[-1]],
+        ['Y Input Val', input_losses_val_y[-1]]
     ]
     
     metrics_df = pd.DataFrame(final_metrics, columns=['Model', 'Final Loss'])
-    ax4.bar(metrics_df['Model'], metrics_df['Final Loss'], 
-            color=['lightblue', 'lightcoral', 'lightgreen', 'lightyellow'])
+    colors = ['lightblue', 'lightcoral', 'lightgreen', 'lightyellow', 
+              'skyblue', 'salmon', 'palegreen', 'khaki']
+    ax4.bar(metrics_df['Model'], metrics_df['Final Loss'], color=colors)
     ax4.set_title('Final Training Metrics')
     ax4.set_ylabel('MSE Loss')
     ax4.tick_params(axis='x', rotation=45)
@@ -807,7 +841,7 @@ Examples:
     print("MLP-BASED REFINEMENT FOR CEPHALOMETRIC LANDMARK DETECTION")
     print("="*80)
     print("🎯 Goal: Train MLPs to refine HRNetV2 predictions")
-    print("📊 Architecture: 19 → 500 → 19 (separate for X and Y)")
+    print("📊 Architecture: 19 → 500 → 500 → 19 (separate for X and Y)")
     print("⚙️  Training: 100 epochs, batch=16, lr=1e-5, Adam optimizer")
     print("="*80)
     
