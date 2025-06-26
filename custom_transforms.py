@@ -96,6 +96,10 @@ class PhotoMetricDistortion:
         self.saturation_range = saturation_range
         self.hue_delta = hue_delta
     
+    def __call__(self, results: dict) -> dict:
+        """Apply photometric distortion to image."""
+        return self.transform(results)
+    
     def transform(self, results: dict) -> dict:
         """Apply photometric distortion to image."""
         img = results['img']
@@ -154,6 +158,10 @@ class RandomGaussianNoise:
         self.std_range = std_range
         self.prob = prob
     
+    def __call__(self, results: dict) -> dict:
+        """Apply Gaussian noise to image."""
+        return self.transform(results)
+    
     def transform(self, results: dict) -> dict:
         """Apply Gaussian noise to image."""
         if random.random() < self.prob:
@@ -180,6 +188,10 @@ class RandomBlur:
     def __init__(self, blur_kernel_size=(3, 7), prob=0.2):
         self.blur_kernel_size = blur_kernel_size
         self.prob = prob
+    
+    def __call__(self, results: dict) -> dict:
+        """Apply random blur to image."""
+        return self.transform(results)
     
     def transform(self, results: dict) -> dict:
         """Apply random blur to image."""
@@ -210,6 +222,10 @@ class ElasticTransform:
         self.alpha = alpha
         self.sigma = sigma
         self.prob = prob
+    
+    def __call__(self, results: dict) -> dict:
+        """Apply elastic deformation."""
+        return self.transform(results)
     
     def transform(self, results: dict) -> dict:
         """Apply elastic deformation."""
