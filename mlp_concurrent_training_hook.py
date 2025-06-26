@@ -57,6 +57,8 @@ from mmengine.runner import Runner
 from mmpose.apis import inference_topdown
 import numpy as np
 import pandas as pd
+from sklearn.preprocessing import StandardScaler
+import joblib
 
 # -----------------------------------------------------------------------------
 #  MLP architecture (identical to the one used in train_mlp_refinement.py)
@@ -125,6 +127,13 @@ class ConcurrentMLPTrainingHook(Hook):
         self.opt_y: optim.Optimizer | None = None
         self.criterion = nn.MSELoss()
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        
+        # Normalization scalers - initialized once and reused
+        self.scaler_x_input: StandardScaler | None = None
+        self.scaler_x_target: StandardScaler | None = None
+        self.scaler_y_input: StandardScaler | None = None
+        self.scaler_y_target: StandardScaler | None = None
+        self.scalers_initialized = False
 
     # ---------------------------------------------------------------------
     # MMEngine lifecycle methods
@@ -138,6 +147,12 @@ class ConcurrentMLPTrainingHook(Hook):
         self.mlp_y = MLPRefinementModel().to(self.device)
         self.opt_x = optim.Adam(self.mlp_x.parameters(), lr=self.mlp_lr, weight_decay=self.mlp_weight_decay)
         self.opt_y = optim.Adam(self.mlp_y.parameters(), lr=self.mlp_lr, weight_decay=self.mlp_weight_decay)
+        
+        # Initialize scalers
+        self.scaler_x_input = StandardScaler()
+        self.scaler_x_target = StandardScaler()
+        self.scaler_y_input = StandardScaler()
+        self.scaler_y_target = StandardScaler()
 
     def after_train_epoch(self, runner: Runner):
         """After each HRNetV2 epoch, train MLP on-the-fly using current predictions."""
@@ -347,17 +362,59 @@ class ConcurrentMLPTrainingHook(Hook):
         logger.info(f'[ConcurrentMLPTrainingHook] Generated predictions for {len(preds_x)} samples')
 
         # -----------------------------------------------------------------
+        # Step 1.5: Initialize normalization scalers (only once)
+        # -----------------------------------------------------------------
+        if not self.scalers_initialized:
+            logger.info('[ConcurrentMLPTrainingHook] Initializing normalization scalers...')
+            
+            # Fit scalers on the first batch of data
+            self.scaler_x_input.fit(preds_x)
+            self.scaler_x_target.fit(gts_x)
+            self.scaler_y_input.fit(preds_y)
+            self.scaler_y_target.fit(gts_y)
+            
+            self.scalers_initialized = True
+            logger.info('[ConcurrentMLPTrainingHook] Normalization scalers initialized')
+            
+            # Save scalers for evaluation
+            save_dir = os.path.join(runner.work_dir, 'concurrent_mlp')
+            os.makedirs(save_dir, exist_ok=True)
+            
+            joblib.dump(self.scaler_x_input, os.path.join(save_dir, 'scaler_x_input.pkl'))
+            joblib.dump(self.scaler_x_target, os.path.join(save_dir, 'scaler_x_target.pkl'))
+            joblib.dump(self.scaler_y_input, os.path.join(save_dir, 'scaler_y_input.pkl'))
+            joblib.dump(self.scaler_y_target, os.path.join(save_dir, 'scaler_y_target.pkl'))
+            
+            logger.info(f'[ConcurrentMLPTrainingHook] Scalers saved to {save_dir}')
+
+        # Normalize data using the consistent scalers
+        preds_x_scaled = self.scaler_x_input.transform(preds_x)
+        gts_x_scaled = self.scaler_x_target.transform(gts_x)
+        preds_y_scaled = self.scaler_y_input.transform(preds_y)
+        gts_y_scaled = self.scaler_y_target.transform(gts_y)
+
+        # -----------------------------------------------------------------
         # Step 2: Train MLPs for fixed number of epochs (GPU-optimized)
         # -----------------------------------------------------------------
         logger.info('[ConcurrentMLPTrainingHook] Training MLPs on GPU…')
+        
+        # Calculate initial loss before refinement for logging
+        initial_loss_x = self.criterion(
+            torch.from_numpy(preds_x_scaled).float(), 
+            torch.from_numpy(gts_x_scaled).float()
+        ).item()
+        initial_loss_y = self.criterion(
+            torch.from_numpy(preds_y_scaled).float(), 
+            torch.from_numpy(gts_y_scaled).float()
+        ).item()
 
-        # Build datasets and loaders (on-the-fly)
-        ds_x = _MLPDataset(preds_x, gts_x)
-        ds_y = _MLPDataset(preds_y, gts_y)
+        # Build datasets and loaders (on-the-fly) with normalized data
+        ds_x = _MLPDataset(preds_x_scaled, gts_x_scaled)
+        ds_y = _MLPDataset(preds_y_scaled, gts_y_scaled)
         dl_x = data.DataLoader(ds_x, batch_size=self.mlp_batch_size, shuffle=True, pin_memory=True)
         dl_y = data.DataLoader(ds_y, batch_size=self.mlp_batch_size, shuffle=True, pin_memory=True)
 
-        def _train_one(model: MLPRefinementModel, optimiser: optim.Optimizer, loader: data.DataLoader, name: str):
+        def _train_one(model: MLPRefinementModel, optimiser: optim.Optimizer, loader: data.DataLoader, name: str, initial_loss: float):
             model.train()
             total_loss = 0.0
             for ep in range(self.mlp_epochs):
@@ -376,10 +433,10 @@ class ConcurrentMLPTrainingHook(Hook):
                 
                 total_loss = epoch_loss / len(loader)
                 if (ep + 1) % 20 == 0:
-                    logger.info(f'[ConcurrentMLPTrainingHook] {name} epoch {ep+1}/{self.mlp_epochs} loss: {total_loss:.6f}')
+                    logger.info(f'[ConcurrentMLPTrainingHook] {name} epoch {ep+1}/{self.mlp_epochs} | MLP loss: {total_loss:.6f}, Initial loss: {initial_loss:.6f}')
 
-        _train_one(self.mlp_x, self.opt_x, dl_x, 'MLP-X')
-        _train_one(self.mlp_y, self.opt_y, dl_y, 'MLP-Y')
+        _train_one(self.mlp_x, self.opt_x, dl_x, 'MLP-X', initial_loss_x)
+        _train_one(self.mlp_y, self.opt_y, dl_y, 'MLP-Y', initial_loss_y)
 
         logger.info('[ConcurrentMLPTrainingHook] Finished MLP update for this HRNet epoch.')
         

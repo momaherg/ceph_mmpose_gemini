@@ -275,95 +275,35 @@ def main():
     landmark_names = cephalometric_dataset_info.landmark_names_in_order
     landmark_cols = cephalometric_dataset_info.original_landmark_cols
     
-    # We need to compute normalization statistics from training data for MLP
-    print("Computing normalization statistics from training data...")
+    # Load saved normalization scalers
+    print("Loading saved normalization scalers...")
+    scaler_dir = os.path.join(args.work_dir, "concurrent_mlp")
     
-    # Load training data for normalization
-    if args.test_split_file:
-        remaining_df = main_df[~main_df['patient_id'].isin(test_patient_ids)]
-        if len(remaining_df) >= 100:
-            val_df = remaining_df.sample(n=100, random_state=42)
-            train_df = remaining_df.drop(val_df.index).reset_index(drop=True)
-        else:
-            train_df = remaining_df
-    else:
-        train_df = main_df[main_df['set'] == 'train'].reset_index(drop=True)
+    scaler_x_input_path = os.path.join(scaler_dir, "scaler_x_input.pkl")
+    scaler_x_target_path = os.path.join(scaler_dir, "scaler_x_target.pkl")
+    scaler_y_input_path = os.path.join(scaler_dir, "scaler_y_input.pkl")
+    scaler_y_target_path = os.path.join(scaler_dir, "scaler_y_target.pkl")
     
-    # Generate normalization data by running inference on a subset of training data
-    print("Generating normalization statistics (this may take a moment)...")
-    norm_sample_size = min(200, len(train_df))  # Use subset for efficiency
-    norm_preds_x = []
-    norm_preds_y = []
-    norm_gts_x = []
-    norm_gts_y = []
+    # Check if scalers exist
+    scaler_files = [scaler_x_input_path, scaler_x_target_path, scaler_y_input_path, scaler_y_target_path]
+    missing_scalers = [f for f in scaler_files if not os.path.exists(f)]
     
-    # Use the standard mmpose inference API for consistency
-    from mmpose.apis import inference_topdown
-    
-    for idx, row in train_df.head(norm_sample_size).iterrows():
-        try:
-            img_array = np.array(row['Image'], dtype=np.uint8).reshape((224, 224, 3))
-            
-            # Get ground truth
-            gt_keypoints = []
-            valid_gt = True
-            for i in range(0, len(landmark_cols), 2):
-                x_col = landmark_cols[i]
-                y_col = landmark_cols[i+1]
-                if x_col in row and y_col in row and pd.notna(row[x_col]) and pd.notna(row[y_col]):
-                    gt_keypoints.append([row[x_col], row[y_col]])
-                else:
-                    gt_keypoints.append([0, 0])
-                    valid_gt = False
-            
-            if not valid_gt:
-                continue
-                
-            gt_keypoints = np.array(gt_keypoints)
-            
-            # Run inference using the standard API
-            bbox = np.array([[0, 0, 224, 224]], dtype=np.float32)
-            results = inference_topdown(hrnet_model, img_array, bboxes=bbox, bbox_format='xyxy')
-            
-            if results and len(results) > 0:
-                pred_keypoints = results[0].pred_instances.keypoints[0]
-                if isinstance(pred_keypoints, torch.Tensor):
-                    pred_keypoints = pred_keypoints.cpu().numpy()
-            else:
-                continue
-            
-            if pred_keypoints is None or pred_keypoints.shape[0] != 19:
-                continue
-            
-            norm_preds_x.append(pred_keypoints[:, 0])
-            norm_preds_y.append(pred_keypoints[:, 1])
-            norm_gts_x.append(gt_keypoints[:, 0])
-            norm_gts_y.append(gt_keypoints[:, 1])
-            
-        except Exception as e:
-            continue
-    
-    if len(norm_preds_x) < 10:
-        print("ERROR: Insufficient data for normalization")
+    if missing_scalers:
+        print(f"ERROR: Missing scaler files: {missing_scalers}")
+        print("This indicates that concurrent MLP training hasn't run yet or scalers weren't saved.")
+        print("Please run concurrent training first.")
         return
     
-    # Create scalers
-    norm_preds_x = np.array(norm_preds_x)
-    norm_preds_y = np.array(norm_preds_y)
-    norm_gts_x = np.array(norm_gts_x)
-    norm_gts_y = np.array(norm_gts_y)
-    
-    scaler_x_input = StandardScaler()
-    scaler_x_target = StandardScaler()
-    scaler_y_input = StandardScaler()
-    scaler_y_target = StandardScaler()
-    
-    scaler_x_input.fit(norm_preds_x)
-    scaler_x_target.fit(norm_gts_x)
-    scaler_y_input.fit(norm_preds_y)
-    scaler_y_target.fit(norm_gts_y)
-    
-    print(f"✓ Normalization statistics computed from {len(norm_preds_x)} samples")
+    # Load scalers
+    try:
+        scaler_x_input = joblib.load(scaler_x_input_path)
+        scaler_x_target = joblib.load(scaler_x_target_path)
+        scaler_y_input = joblib.load(scaler_y_input_path)
+        scaler_y_target = joblib.load(scaler_y_target_path)
+        print("✓ Normalization scalers loaded successfully")
+    except Exception as e:
+        print(f"ERROR: Failed to load scalers: {e}")
+        return
     
     # Evaluation on test set
     print(f"\n🔄 Running evaluation on {len(test_df)} test samples...")
