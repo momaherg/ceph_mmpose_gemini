@@ -263,17 +263,40 @@ class ElasticTransform:
             # Apply same deformation to keypoints if they exist
             if 'keypoints' in results:
                 keypoints = results['keypoints']
-                if keypoints.shape[0] > 0 and keypoints.shape[1] >= 2:
-                    for i in range(keypoints.shape[0]):
-                        x_coord, y_coord = keypoints[i, 0], keypoints[i, 1]
-                        if 0 <= x_coord < w and 0 <= y_coord < h:
-                            x_idx = min(int(x_coord), w - 1)
-                            y_idx = min(int(y_coord), h - 1)
-                            new_x = x_coord + dx[y_idx, x_idx]
-                            new_y = y_coord + dy[y_idx, x_idx]
-                            keypoints[i, 0] = np.clip(new_x, 0, w - 1)
-                            keypoints[i, 1] = np.clip(new_y, 0, h - 1)
-                    results['keypoints'] = keypoints
+                # Handle different keypoint array structures
+                if isinstance(keypoints, np.ndarray) and keypoints.size > 0:
+                    # Flatten keypoints to handle different shapes (N, 2) or (1, N, 2) etc.
+                    original_shape = keypoints.shape
+                    if len(original_shape) == 3 and original_shape[0] == 1:
+                        # Shape is (1, N, 2) - squeeze first dimension
+                        keypoints_2d = keypoints.squeeze(0)
+                    elif len(original_shape) == 2:
+                        # Shape is (N, 2)
+                        keypoints_2d = keypoints
+                    else:
+                        # Skip transformation for unexpected shapes
+                        return results
+                    
+                    # Apply deformation to each keypoint
+                    for i in range(keypoints_2d.shape[0]):
+                        if keypoints_2d.shape[1] >= 2:  # Ensure we have at least x, y coordinates
+                            x_coord = float(keypoints_2d[i, 0])
+                            y_coord = float(keypoints_2d[i, 1])
+                            
+                            # Check bounds using scalar values
+                            if 0 <= x_coord < w and 0 <= y_coord < h:
+                                x_idx = min(int(x_coord), w - 1)
+                                y_idx = min(int(y_coord), h - 1)
+                                new_x = x_coord + dx[y_idx, x_idx]
+                                new_y = y_coord + dy[y_idx, x_idx]
+                                keypoints_2d[i, 0] = np.clip(new_x, 0, w - 1)
+                                keypoints_2d[i, 1] = np.clip(new_y, 0, h - 1)
+                    
+                    # Restore original shape
+                    if len(original_shape) == 3 and original_shape[0] == 1:
+                        results['keypoints'] = keypoints_2d.reshape(original_shape)
+                    else:
+                        results['keypoints'] = keypoints_2d
         
         return results
 
