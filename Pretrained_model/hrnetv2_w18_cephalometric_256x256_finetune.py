@@ -85,12 +85,12 @@ train_pipeline = [
     ),
     
     # Elastic Deformation - slight deformations for medical realism
-    dict(
-        type='ElasticTransform',
-        alpha=50,  # Displacement strength
-        sigma=5,   # Smoothness of displacement
-        prob=0.3   # Apply to 30% of images
-    ),
+    # dict(
+    #     type='ElasticTransform',
+    #     alpha=50,  # Displacement strength
+    #     sigma=5,   # Smoothness of displacement
+    #     prob=0.3   # Apply to 30% of images
+    # ),
     
     dict(type='TopdownAffine', input_size=codec['input_size']), # Now uses 384x384
     dict(type='GenerateTarget', encoder=codec),
