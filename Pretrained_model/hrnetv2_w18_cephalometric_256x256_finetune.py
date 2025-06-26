@@ -55,12 +55,43 @@ model = dict(
 train_pipeline = [
     dict(type='LoadImageNumpy'), # Load from numpy array
     dict(type='GetBBoxCenterScale'),
-    dict(type='RandomFlip', direction='horizontal'),
+    # REMOVED: RandomFlip - not suitable for cephalometric landmarks as they're not symmetric
+    
+    # Photometric Augmentations
+    dict(
+        type='PhotoMetricDistortion',
+        brightness_delta=32,
+        contrast_range=(0.7, 1.3),
+        saturation_range=(0.7, 1.3),
+        hue_delta=18
+    ),
+    dict(
+        type='RandomGaussianNoise',
+        std_range=(0.0, 0.05),  # Add slight Gaussian noise
+        prob=0.3
+    ),
+    dict(
+        type='RandomBlur',
+        blur_kernel_size=(3, 7),  # Random blur with kernel size 3-7
+        prob=0.2
+    ),
+    
+    # Geometric Augmentations
     dict(
         type='RandomBBoxTransform',
-        shift_prob=0,
-        rotate_factor=30, # Increased rotation for better generalization
-        scale_factor=(0.7, 1.3)), # Wider scale range
+        shift_prob=0.3,  # Add some shifting
+        rotate_factor=15,  # Reduced rotation for medical images
+        scale_factor=(0.85, 1.15)  # More conservative scaling
+    ),
+    
+    # Elastic Deformation - slight deformations for medical realism
+    dict(
+        type='ElasticTransform',
+        alpha=50,  # Displacement strength
+        sigma=5,   # Smoothness of displacement
+        prob=0.3   # Apply to 30% of images
+    ),
+    
     dict(type='TopdownAffine', input_size=codec['input_size']), # Now uses 384x384
     dict(type='GenerateTarget', encoder=codec),
     dict(type='CustomPackPoseInputs', meta_keys=('id', 'img_id', 'img_path', 'ori_shape', 'img_shape', 'bbox', 'bbox_scores', 'flip_indices', 'center', 'scale', 'input_center', 'input_scale', 'input_size', 'patient_text_id', 'set', 'class'))
@@ -149,7 +180,7 @@ test_evaluator = val_evaluator
 custom_hooks = [
     dict(
         type='ConcurrentMLPTrainingHook',
-        mlp_epochs=100,              # Train MLPs for 100 epochs after each HRNet epoch
+        mlp_epochs=170,              # Increased from 100 to 170 epochs after each HRNet epoch
         mlp_batch_size=16,           # MLP batch size
         mlp_lr=1e-5,                 # MLP learning rate (same as standalone training)
         mlp_weight_decay=1e-4,       # MLP weight decay
