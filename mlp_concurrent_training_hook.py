@@ -108,7 +108,7 @@ class ConcurrentMLPTrainingHook(Hook):
 
     def __init__(
         self,
-        mlp_epochs: int = 170,
+        mlp_epochs: int = 100,
         mlp_batch_size: int = 16,
         mlp_lr: float = 1e-5,
         mlp_weight_decay: float = 1e-4,
@@ -125,7 +125,7 @@ class ConcurrentMLPTrainingHook(Hook):
         self.mlp_y: MLPRefinementModel | None = None
         self.opt_x: optim.Optimizer | None = None
         self.opt_y: optim.Optimizer | None = None
-        self.criterion = nn.L1Loss()
+        self.criterion = nn.MSELoss()
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         
         # Normalization scalers - initialized once and reused
