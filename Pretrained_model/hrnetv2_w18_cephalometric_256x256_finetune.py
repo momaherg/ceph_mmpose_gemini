@@ -57,34 +57,34 @@ train_pipeline = [
     dict(type='GetBBoxCenterScale'),
     # REMOVED: RandomFlip - not suitable for cephalometric landmarks as they're not symmetric
     
-    # Photometric Augmentations
-    dict(
-        type='PhotoMetricDistortion',
-        brightness_delta=32,
-        contrast_range=(0.7, 1.3),
-        saturation_range=(0.7, 1.3),
-        hue_delta=18
-    ),
-    dict(
-        type='RandomGaussianNoise',
-        std_range=(0.0, 0.05),  # Add slight Gaussian noise
-        prob=0.3
-    ),
-    dict(
-        type='RandomBlur',
-        blur_kernel_size=(3, 7),  # Random blur with kernel size 3-7
-        prob=0.2
-    ),
+    # Photometric Augmentations (DISABLED)
+    # dict(
+    #     type='PhotoMetricDistortion',
+    #     brightness_delta=32,
+    #     contrast_range=(0.7, 1.3),
+    #     saturation_range=(0.7, 1.3),
+    #     hue_delta=18
+    # ),
+    # dict(
+    #     type='RandomGaussianNoise',
+    #     std_range=(0.0, 0.05),  # Add slight Gaussian noise
+    #     prob=0.3
+    # ),
+    # dict(
+    #     type='RandomBlur',
+    #     blur_kernel_size=(3, 7),  # Random blur with kernel size 3-7
+    #     prob=0.2
+    # ),
     
-    # Geometric Augmentations
-    dict(
-        type='RandomBBoxTransform',
-        shift_prob=0.3,  # Add some shifting
-        rotate_factor=15,  # Reduced rotation for medical images
-        scale_factor=(0.85, 1.15)  # More conservative scaling
-    ),
+    # Geometric Augmentations (DISABLED)
+    # dict(
+    #     type='RandomBBoxTransform',
+    #     shift_prob=0.3,  # Add some shifting
+    #     rotate_factor=15,  # Reduced rotation for medical images
+    #     scale_factor=(0.85, 1.15)  # More conservative scaling
+    # ),
     
-    # Elastic Deformation - slight deformations for medical realism
+    # Elastic Deformation - slight deformations for medical realism (DISABLED)
     # dict(
     #     type='ElasticTransform',
     #     alpha=50,  # Displacement strength
