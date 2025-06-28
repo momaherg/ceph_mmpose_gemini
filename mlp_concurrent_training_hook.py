@@ -2,23 +2,20 @@
 """
 Concurrent MLP Training Hook for MMEngine / MMPose
 -------------------------------------------------
-This hook trains two MLP refinement models (one for X, one for Y) **concurrently**
-with HRNetV2 training.  After every HRNet training epoch, the hook:
+This hook trains a joint MLP refinement model **concurrently** with HRNetV2 training.
+After every HRNet training epoch, the hook:
 
 1.  Runs inference on the entire *training* dataloader using the *current*
     HRNetV2 weights to obtain predicted landmark coordinates.
 2.  Creates an in-memory dataset of (predicted → ground-truth) coordinate pairs.
-3.  Trains each MLP for a fixed number of epochs (default: 100).
+3.  Trains a joint 38-D MLP for a fixed number of epochs (default: 100).
 
-Important design decisions:
-•   **One-time initialisation** – MLP weights, optimisers and scalers are created
-    once in `before_run` and *persist* across the whole HRNet training.
-•   **No gradient leakage** – MLP training is completely detached from the
-    HRNetV2 computation graph (`torch.no_grad()`), so gradients do **not**
-    propagate back.
-•   **CPU/GPU awareness** – Trains on GPU if available, else CPU.
-•   **Lightweight aggregation** – Keeps everything in RAM; suitable for ≈1.5k
-    images.
+Key improvements:
+•   **Landmark-wise normalization** – Each landmark gets its own scaler for better handling of different coordinate ranges
+•   **Joint 38-D MLP** – Single model learns X,Y correlations instead of separate models
+•   **Cosine LR scheduling** – Better convergence than fixed learning rate
+•   **One-time initialisation** – MLP weights, optimisers and scalers are created once and persist
+•   **No gradient leakage** – MLP training is completely detached from HRNetV2
 
 To enable this hook, add to your config:
 
@@ -28,9 +25,9 @@ custom_hooks = [
         type='ConcurrentMLPTrainingHook',
         mlp_epochs=100,
         mlp_batch_size=16,
-        mlp_lr=1e-5,
+        mlp_lr=3e-4,  # Higher initial LR for cosine schedule
         mlp_weight_decay=1e-4,
-        log_interval=20  # optional
+        log_interval=20
     )
 ]
 ```
@@ -43,6 +40,7 @@ from __future__ import annotations
 
 import os
 from typing import List
+import math
 
 import torch
 import torch.nn as nn
@@ -61,31 +59,71 @@ from sklearn.preprocessing import StandardScaler
 import joblib
 
 # -----------------------------------------------------------------------------
-#  MLP architecture (identical to the one used in train_mlp_refinement.py)
+#  Joint 38-D MLP architecture with residual connections
 # -----------------------------------------------------------------------------
 
-class MLPRefinementModel(nn.Module):
-    """Simple 19→500→19 fully connected network with ReLU + dropout."""
-
-    def __init__(self, input_dim: int = 19, hidden_dim: int = 500, output_dim: int = 19):
+class JointMLPRefinementModel(nn.Module):
+    """
+    Joint MLP model for landmark coordinate refinement.
+    Input: 38 predicted coordinates (19 landmarks × 2 coordinates)
+    Hidden: 512 neurons with residual connection
+    Output: 38 refined coordinates
+    """
+    def __init__(self, input_dim=38, hidden_dim=512, output_dim=38):
         super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim),
-            nn.ReLU(inplace=True),
-            nn.Dropout(0.1),
-            nn.Linear(hidden_dim, output_dim),
-        )
-
+        self.input_dim = input_dim
+        self.hidden_dim = hidden_dim
+        self.output_dim = output_dim
+        
+        # Main network with residual connection
+        self.fc1 = nn.Linear(input_dim, hidden_dim)
+        self.fc2 = nn.Linear(hidden_dim, hidden_dim)
+        self.fc3 = nn.Linear(hidden_dim, output_dim)
+        
+        # Residual connection (input -> output)
+        self.residual = nn.Linear(input_dim, output_dim)
+        
+        self.relu = nn.ReLU(inplace=True)
+        self.dropout = nn.Dropout(0.1)
+        
+        # Initialize weights
+        self._init_weights()
+        
+    def _init_weights(self):
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+    
     def forward(self, x):
-        return self.net(x)
+        # Main path
+        out = self.fc1(x)
+        out = self.relu(out)
+        out = self.dropout(out)
+        
+        out = self.fc2(out)
+        out = self.relu(out)
+        out = self.dropout(out)
+        
+        out = self.fc3(out)
+        
+        # Residual connection
+        residual = self.residual(x)
+        
+        # Combine main path and residual
+        out = out + residual
+        
+        return out
 
 
-class _MLPDataset(data.Dataset):
-    """In-memory dataset of predicted → ground-truth coordinates."""
+class _JointMLPDataset(data.Dataset):
+    """In-memory dataset for joint 38-D MLP training."""
 
     def __init__(self, preds: np.ndarray, gts: np.ndarray):
-        # preds/gts shape: [N, 19]
+        # preds/gts shape: [N, 38] (19 landmarks × 2 coordinates)
         assert preds.shape == gts.shape
+        assert preds.shape[1] == 38
         self.preds = torch.from_numpy(preds).float()
         self.gts = torch.from_numpy(gts).float()
 
@@ -96,13 +134,27 @@ class _MLPDataset(data.Dataset):
         return self.preds[idx], self.gts[idx]
 
 
+class CosineAnnealingLR:
+    """Simple cosine annealing learning rate scheduler."""
+    
+    def __init__(self, optimizer, T_max, eta_min=1e-6):
+        self.optimizer = optimizer
+        self.T_max = T_max
+        self.eta_min = eta_min
+        self.base_lrs = [group['lr'] for group in optimizer.param_groups]
+        
+    def step(self, epoch):
+        for param_group, base_lr in zip(self.optimizer.param_groups, self.base_lrs):
+            param_group['lr'] = self.eta_min + (base_lr - self.eta_min) * (1 + math.cos(math.pi * epoch / self.T_max)) / 2
+
+
 # -----------------------------------------------------------------------------
 #  Hook implementation
 # -----------------------------------------------------------------------------
 
 @HOOKS.register_module()
 class ConcurrentMLPTrainingHook(Hook):
-    """MMEngine hook that performs concurrent MLP refinement training."""
+    """MMEngine hook that performs concurrent joint MLP refinement training."""
 
     priority = 'LOW'  # Run after default hooks
 
@@ -110,9 +162,9 @@ class ConcurrentMLPTrainingHook(Hook):
         self,
         mlp_epochs: int = 100,
         mlp_batch_size: int = 16,
-        mlp_lr: float = 1e-5,
+        mlp_lr: float = 3e-4,  # Higher initial LR for cosine schedule
         mlp_weight_decay: float = 1e-4,
-        log_interval: int = 50,
+        log_interval: int = 20,
     ) -> None:
         self.mlp_epochs = mlp_epochs
         self.mlp_batch_size = mlp_batch_size
@@ -121,18 +173,15 @@ class ConcurrentMLPTrainingHook(Hook):
         self.log_interval = log_interval
 
         # These will be initialised in before_run
-        self.mlp_x: MLPRefinementModel | None = None
-        self.mlp_y: MLPRefinementModel | None = None
-        self.opt_x: optim.Optimizer | None = None
-        self.opt_y: optim.Optimizer | None = None
+        self.mlp_model: JointMLPRefinementModel | None = None
+        self.optimizer: optim.Optimizer | None = None
+        self.lr_scheduler: CosineAnnealingLR | None = None
         self.criterion = nn.MSELoss()
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         
-        # Normalization scalers - initialized once and reused
-        self.scaler_x_input: StandardScaler | None = None
-        self.scaler_x_target: StandardScaler | None = None
-        self.scaler_y_input: StandardScaler | None = None
-        self.scaler_y_target: StandardScaler | None = None
+        # Landmark-wise normalization scalers (19 scalers each for input and target)
+        self.landmark_scalers_input: List[StandardScaler] = []
+        self.landmark_scalers_target: List[StandardScaler] = []
         self.scalers_initialized = False
 
     # ---------------------------------------------------------------------
@@ -141,32 +190,32 @@ class ConcurrentMLPTrainingHook(Hook):
 
     def before_run(self, runner: Runner):
         logger: MMLogger = runner.logger
-        logger.info('[ConcurrentMLPTrainingHook] Initialising MLP models …')
+        logger.info('[ConcurrentMLPTrainingHook] Initialising joint 38-D MLP model with landmark-wise scalers…')
 
-        self.mlp_x = MLPRefinementModel().to(self.device)
-        self.mlp_y = MLPRefinementModel().to(self.device)
-        self.opt_x = optim.Adam(self.mlp_x.parameters(), lr=self.mlp_lr, weight_decay=self.mlp_weight_decay)
-        self.opt_y = optim.Adam(self.mlp_y.parameters(), lr=self.mlp_lr, weight_decay=self.mlp_weight_decay)
+        # Initialize joint MLP model
+        self.mlp_model = JointMLPRefinementModel(input_dim=38, hidden_dim=512, output_dim=38).to(self.device)
+        self.optimizer = optim.Adam(self.mlp_model.parameters(), lr=self.mlp_lr, weight_decay=self.mlp_weight_decay)
+        self.lr_scheduler = CosineAnnealingLR(self.optimizer, T_max=self.mlp_epochs, eta_min=1e-6)
         
-        # Initialize scalers
-        self.scaler_x_input = StandardScaler()
-        self.scaler_x_target = StandardScaler()
-        self.scaler_y_input = StandardScaler()
-        self.scaler_y_target = StandardScaler()
+        # Initialize landmark-wise scalers (19 for each coordinate type)
+        self.landmark_scalers_input = [StandardScaler() for _ in range(19)]
+        self.landmark_scalers_target = [StandardScaler() for _ in range(19)]
+        
+        logger.info(f'[ConcurrentMLPTrainingHook] Model architecture: 38 → 512 → 512 → 38 with residual connection')
+        logger.info(f'[ConcurrentMLPTrainingHook] Parameters: {sum(p.numel() for p in self.mlp_model.parameters()):,}')
 
     def after_train_epoch(self, runner: Runner):
-        """After each HRNetV2 epoch, train MLP on-the-fly using current predictions."""
+        """After each HRNetV2 epoch, train joint MLP on-the-fly using current predictions."""
         logger: MMLogger = runner.logger
-        assert self.mlp_x is not None and self.mlp_y is not None
+        assert self.mlp_model is not None
 
         # -----------------------------------------------------------------
-        # Step 1: Generate predictions on training data (GPU-optimized)
+        # Step 1: Generate predictions on training data
         # -----------------------------------------------------------------
         
         # Get the actual model, handling potential wrapping
         model = runner.model
         if hasattr(model, 'module'):
-            # Handle DDP or other wrapped models
             actual_model = model.module
         else:
             actual_model = model
@@ -175,7 +224,7 @@ class ConcurrentMLPTrainingHook(Hook):
         if not hasattr(actual_model, 'cfg') and hasattr(runner, 'cfg'):
             actual_model.cfg = runner.cfg
             
-        # Set up dataset_meta if missing (required for inference_topdown)
+        # Set up dataset_meta if missing
         if not hasattr(actual_model, 'dataset_meta'):
             try:
                 import cephalometric_dataset_info
@@ -195,16 +244,14 @@ class ConcurrentMLPTrainingHook(Hook):
                 logger.warning(f'[ConcurrentMLPTrainingHook] Could not set dataset_meta: {e}')
         
         model.eval()
-        preds_x: List[np.ndarray] = []
-        preds_y: List[np.ndarray] = []
-        gts_x:   List[np.ndarray] = []
-        gts_y:   List[np.ndarray] = []
+        all_preds: List[np.ndarray] = []  # Will store [N, 19, 2] predictions
+        all_gts: List[np.ndarray] = []    # Will store [N, 19, 2] ground truths
 
         train_dataset = runner.train_dataloader.dataset
-        logger.info('[ConcurrentMLPTrainingHook] Generating predictions for MLP on GPU...')
+        logger.info('[ConcurrentMLPTrainingHook] Generating predictions for joint MLP...')
 
         def tensor_to_numpy(data):
-            """Safely convert tensor to numpy, handling both tensor and numpy inputs."""
+            """Safely convert tensor to numpy."""
             if isinstance(data, torch.Tensor):
                 return data.cpu().numpy()
             elif isinstance(data, np.ndarray):
@@ -212,29 +259,26 @@ class ConcurrentMLPTrainingHook(Hook):
             else:
                 return np.array(data)
 
-        # Access training data more robustly
+        # Generate training data
         try:
             from tqdm import tqdm
             
-            # Method 1: Try to access the raw annotation file
             if hasattr(train_dataset, 'ann_file') and train_dataset.ann_file:
-                logger.info(f'[ConcurrentMLPTrainingHook] Loading data from annotation file: {train_dataset.ann_file}')
-                import pandas as pd
+                logger.info(f'[ConcurrentMLPTrainingHook] Loading data from: {train_dataset.ann_file}')
                 
                 try:
                     df = pd.read_json(train_dataset.ann_file)
-                    logger.info(f'[ConcurrentMLPTrainingHook] Loaded {len(df)} samples from annotation file')
+                    logger.info(f'[ConcurrentMLPTrainingHook] Loaded {len(df)} samples')
                     
-                    # Import landmark info
                     import cephalometric_dataset_info
                     landmark_names = cephalometric_dataset_info.landmark_names_in_order
                     landmark_cols = cephalometric_dataset_info.original_landmark_cols
                     
                     processed_count = 0
                     
-                    for idx, row in tqdm(df.iterrows(), total=len(df), disable=runner.rank != 0, desc="GPU Inference from File"):
+                    for idx, row in tqdm(df.iterrows(), total=len(df), disable=runner.rank != 0, desc="Generating joint MLP data"):
                         try:
-                            # Get image from row
+                            # Get image
                             img_array = np.array(row['Image'], dtype=np.uint8).reshape((224, 224, 3))
                             
                             # Get ground truth keypoints
@@ -249,228 +293,164 @@ class ConcurrentMLPTrainingHook(Hook):
                                     gt_keypoints.append([0, 0])
                                     valid_gt = False
                             
-                            # Skip samples with invalid ground truth
                             if not valid_gt:
                                 continue
                                 
-                            gt_keypoints = np.array(gt_keypoints)
+                            gt_keypoints = np.array(gt_keypoints)  # Shape: [19, 2]
                             
-                            # Run inference with the standard mmpose API
+                            # Run inference
                             bbox = np.array([[0, 0, 224, 224]], dtype=np.float32)
                             results = inference_topdown(model, img_array, bboxes=bbox, bbox_format='xyxy')
                             
                             if results and len(results) > 0:
                                 pred_keypoints = results[0].pred_instances.keypoints[0]
-                                pred_keypoints = tensor_to_numpy(pred_keypoints)
+                                pred_keypoints = tensor_to_numpy(pred_keypoints)  # Shape: [19, 2]
                             else:
                                 continue
                             
                             if pred_keypoints is None or pred_keypoints.shape[0] != 19:
                                 continue
                             
-                            # Store coordinates
-                            preds_x.append(pred_keypoints[:, 0])
-                            preds_y.append(pred_keypoints[:, 1])
-                            gts_x.append(gt_keypoints[:, 0])
-                            gts_y.append(gt_keypoints[:, 1])
-                            
+                            # Store predictions and ground truths
+                            all_preds.append(pred_keypoints)
+                            all_gts.append(gt_keypoints)
                             processed_count += 1
                             
                         except Exception as e:
-                            logger.warning(f'[ConcurrentMLPTrainingHook] Failed to process sample {idx}: {e}')
+                            if processed_count < 5:  # Only log first few errors
+                                logger.warning(f'[ConcurrentMLPTrainingHook] Failed to process sample {idx}: {e}')
                             continue
                     
-                    logger.info(f'[ConcurrentMLPTrainingHook] Successfully processed {processed_count} samples from file')
+                    logger.info(f'[ConcurrentMLPTrainingHook] Successfully processed {processed_count} samples')
                     
                 except Exception as e:
-                    logger.warning(f'[ConcurrentMLPTrainingHook] Failed to load from annotation file: {e}')
-                    df = None
-            
-            # Method 2: Fallback to dataset iteration if file method fails
-            if not preds_x:  # No predictions from file method
-                logger.info('[ConcurrentMLPTrainingHook] Using dataset iteration method')
-                
-                processed_count = 0
-                
-                for idx in tqdm(range(len(train_dataset)), disable=runner.rank != 0, desc="Dataset Inference"):
-                    try:
-                        data_sample = train_dataset[idx]
-                        
-                        # Extract image - handle different possible formats
-                        if 'inputs' in data_sample:
-                            img = data_sample['inputs']
-                            if isinstance(img, torch.Tensor):
-                                # Convert from (C, H, W) tensor to (H, W, C) numpy
-                                img_np = tensor_to_numpy(img.permute(1, 2, 0) * 255).astype(np.uint8)
-                            else:
-                                img_np = np.array(img, dtype=np.uint8)
-                        else:
-                            continue
-                        
-                        # Extract ground truth keypoints with robust handling
-                        if 'data_samples' in data_sample and hasattr(data_sample['data_samples'], 'gt_instances'):
-                            gt_instances = data_sample['data_samples'].gt_instances
-                            if hasattr(gt_instances, 'keypoints') and len(gt_instances.keypoints) > 0:
-                                gt_kpts = tensor_to_numpy(gt_instances.keypoints[0])
-                            else:
-                                continue
-                        else:
-                            continue
-                        
-                        # Run inference with the standard mmpose API
-                        bbox = np.array([[0, 0, 224, 224]], dtype=np.float32)
-                        results = inference_topdown(model, img_np, bboxes=bbox, bbox_format='xyxy')
-                        
-                        if results and len(results) > 0:
-                            pred_kpts = results[0].pred_instances.keypoints[0]
-                            pred_kpts = tensor_to_numpy(pred_kpts)
-                        else:
-                            continue
-                        
-                        if pred_kpts is None or pred_kpts.shape[0] != 19:
-                            continue
-                        
-                        # Store coordinates
-                        preds_x.append(pred_kpts[:, 0])
-                        preds_y.append(pred_kpts[:, 1])
-                        gts_x.append(gt_kpts[:, 0])
-                        gts_y.append(gt_kpts[:, 1])
-                        
-                        processed_count += 1
-                        
-                    except Exception as e:
-                        # Only log every 100th error to avoid spam
-                        if idx % 100 == 0:
-                            logger.warning(f'[ConcurrentMLPTrainingHook] Failed to process sample {idx}: {e}')
-                        continue
-                
-                logger.info(f'[ConcurrentMLPTrainingHook] Successfully processed {processed_count} samples via dataset iteration')
+                    logger.error(f'[ConcurrentMLPTrainingHook] Failed to load annotation file: {e}')
+                    return
 
         except Exception as e:
             logger.error(f'[ConcurrentMLPTrainingHook] Critical error during data processing: {e}')
             return
 
-        if not preds_x:
+        if not all_preds:
             logger.warning('[ConcurrentMLPTrainingHook] No predictions generated; skipping MLP update.')
             return
 
-        preds_x = np.stack(preds_x)
-        preds_y = np.stack(preds_y)
-        gts_x = np.stack(gts_x)
-        gts_y = np.stack(gts_y)
+        # Convert to numpy arrays
+        all_preds = np.array(all_preds)  # Shape: [N, 19, 2]
+        all_gts = np.array(all_gts)      # Shape: [N, 19, 2]
         
-        logger.info(f'[ConcurrentMLPTrainingHook] Generated predictions for {len(preds_x)} samples')
+        logger.info(f'[ConcurrentMLPTrainingHook] Generated data: {all_preds.shape[0]} samples, {all_preds.shape[1]} landmarks')
 
         # -----------------------------------------------------------------
-        # Step 1.5: Initialize normalization scalers (only once)
+        # Step 2: Landmark-wise normalization
         # -----------------------------------------------------------------
+        
         if not self.scalers_initialized:
-            logger.info('[ConcurrentMLPTrainingHook] Initializing normalization scalers...')
+            logger.info('[ConcurrentMLPTrainingHook] Initializing landmark-wise scalers...')
             
-            # Fit scalers on the first batch of data
-            self.scaler_x_input.fit(preds_x)
-            self.scaler_x_target.fit(gts_x)
-            self.scaler_y_input.fit(preds_y)
-            self.scaler_y_target.fit(gts_y)
+            # Fit scalers for each landmark separately
+            for landmark_idx in range(19):
+                # Input scalers (predictions)
+                pred_coords = all_preds[:, landmark_idx, :].reshape(-1, 2)  # [N, 2]
+                self.landmark_scalers_input[landmark_idx].fit(pred_coords)
+                
+                # Target scalers (ground truth)
+                gt_coords = all_gts[:, landmark_idx, :].reshape(-1, 2)  # [N, 2]
+                self.landmark_scalers_target[landmark_idx].fit(gt_coords)
             
             self.scalers_initialized = True
-            logger.info('[ConcurrentMLPTrainingHook] Normalization scalers initialized')
+            logger.info('[ConcurrentMLPTrainingHook] Landmark-wise scalers initialized')
             
-            # Save scalers for evaluation
+            # Save scalers
             save_dir = os.path.join(runner.work_dir, 'concurrent_mlp')
             os.makedirs(save_dir, exist_ok=True)
             
-            joblib.dump(self.scaler_x_input, os.path.join(save_dir, 'scaler_x_input.pkl'))
-            joblib.dump(self.scaler_x_target, os.path.join(save_dir, 'scaler_x_target.pkl'))
-            joblib.dump(self.scaler_y_input, os.path.join(save_dir, 'scaler_y_input.pkl'))
-            joblib.dump(self.scaler_y_target, os.path.join(save_dir, 'scaler_y_target.pkl'))
+            joblib.dump(self.landmark_scalers_input, os.path.join(save_dir, 'landmark_scalers_input.pkl'))
+            joblib.dump(self.landmark_scalers_target, os.path.join(save_dir, 'landmark_scalers_target.pkl'))
             
-            logger.info(f'[ConcurrentMLPTrainingHook] Scalers saved to {save_dir}')
+            logger.info(f'[ConcurrentMLPTrainingHook] Landmark-wise scalers saved to {save_dir}')
 
-        # Normalize data using the consistent scalers
-        preds_x_scaled = self.scaler_x_input.transform(preds_x)
-        gts_x_scaled = self.scaler_x_target.transform(gts_x)
-        preds_y_scaled = self.scaler_y_input.transform(preds_y)
-        gts_y_scaled = self.scaler_y_target.transform(gts_y)
-
-        # -----------------------------------------------------------------
-        # Step 2: Train MLPs for fixed number of epochs (GPU-optimized)
-        # -----------------------------------------------------------------
-        logger.info('[ConcurrentMLPTrainingHook] Training MLPs on GPU…')
+        # Apply landmark-wise normalization
+        preds_normalized = np.zeros_like(all_preds)
+        gts_normalized = np.zeros_like(all_gts)
         
-        # Calculate initial loss before refinement for logging
-        initial_loss_x = self.criterion(
-            torch.from_numpy(preds_x_scaled).float(), 
-            torch.from_numpy(gts_x_scaled).float()
+        for landmark_idx in range(19):
+            # Normalize predictions
+            pred_coords = all_preds[:, landmark_idx, :].reshape(-1, 2)
+            pred_coords_norm = self.landmark_scalers_input[landmark_idx].transform(pred_coords)
+            preds_normalized[:, landmark_idx, :] = pred_coords_norm.reshape(-1, 2)
+            
+            # Normalize ground truth
+            gt_coords = all_gts[:, landmark_idx, :].reshape(-1, 2)
+            gt_coords_norm = self.landmark_scalers_target[landmark_idx].transform(gt_coords)
+            gts_normalized[:, landmark_idx, :] = gt_coords_norm.reshape(-1, 2)
+
+        # Flatten to 38-D vectors for joint MLP
+        preds_flat = preds_normalized.reshape(-1, 38)  # [N, 38]
+        gts_flat = gts_normalized.reshape(-1, 38)      # [N, 38]
+
+        # -----------------------------------------------------------------
+        # Step 3: Train joint MLP
+        # -----------------------------------------------------------------
+        logger.info('[ConcurrentMLPTrainingHook] Training joint 38-D MLP...')
+        
+        # Calculate initial loss for logging
+        initial_loss = self.criterion(
+            torch.from_numpy(preds_flat).float(),
+            torch.from_numpy(gts_flat).float()
         ).item()
-        initial_loss_y = self.criterion(
-            torch.from_numpy(preds_y_scaled).float(), 
-            torch.from_numpy(gts_y_scaled).float()
-        ).item()
-
-        # Build datasets and loaders (on-the-fly) with normalized data
-        ds_x = _MLPDataset(preds_x_scaled, gts_x_scaled)
-        ds_y = _MLPDataset(preds_y_scaled, gts_y_scaled)
-        dl_x = data.DataLoader(ds_x, batch_size=self.mlp_batch_size, shuffle=True, pin_memory=True)
-        dl_y = data.DataLoader(ds_y, batch_size=self.mlp_batch_size, shuffle=True, pin_memory=True)
-
-        def _train_one(model: MLPRefinementModel, optimiser: optim.Optimizer, loader: data.DataLoader, name: str, initial_loss: float):
-            model.train()
-            total_loss = 0.0
-            for ep in range(self.mlp_epochs):
-                epoch_loss = 0.0
-                for preds_batch, gts_batch in loader:
-                    preds_batch = preds_batch.to(self.device, non_blocking=True)
-                    gts_batch = gts_batch.to(self.device, non_blocking=True)
-
-                    optimiser.zero_grad()
-                    outputs = model(preds_batch)
-                    loss = self.criterion(outputs, gts_batch)
-                    loss.backward()
-                    optimiser.step()
-
-                    epoch_loss += loss.item()
+        
+        # Create dataset and dataloader
+        dataset = _JointMLPDataset(preds_flat, gts_flat)
+        dataloader = data.DataLoader(dataset, batch_size=self.mlp_batch_size, shuffle=True, pin_memory=True)
+        
+        # Training loop
+        self.mlp_model.train()
+        for epoch in range(self.mlp_epochs):
+            epoch_loss = 0.0
+            
+            for batch_preds, batch_gts in dataloader:
+                batch_preds = batch_preds.to(self.device, non_blocking=True)
+                batch_gts = batch_gts.to(self.device, non_blocking=True)
                 
-                total_loss = epoch_loss / len(loader)
-                if (ep + 1) % 20 == 0:
-                    logger.info(f'[ConcurrentMLPTrainingHook] {name} epoch {ep+1}/{self.mlp_epochs} | MLP loss: {total_loss:.6f}, Initial loss: {initial_loss:.6f}')
+                self.optimizer.zero_grad()
+                outputs = self.mlp_model(batch_preds)
+                loss = self.criterion(outputs, batch_gts)
+                loss.backward()
+                self.optimizer.step()
+                
+                epoch_loss += loss.item()
+            
+            # Update learning rate
+            self.lr_scheduler.step(epoch)
+            
+            avg_loss = epoch_loss / len(dataloader)
+            current_lr = self.optimizer.param_groups[0]['lr']
+            
+            if (epoch + 1) % self.log_interval == 0:
+                logger.info(f'[ConcurrentMLPTrainingHook] Joint MLP epoch {epoch+1}/{self.mlp_epochs} | '
+                           f'Loss: {avg_loss:.6f}, Initial: {initial_loss:.6f}, LR: {current_lr:.2e}')
 
-        _train_one(self.mlp_x, self.opt_x, dl_x, 'MLP-X', initial_loss_x)
-        _train_one(self.mlp_y, self.opt_y, dl_y, 'MLP-Y', initial_loss_y)
-
-        logger.info('[ConcurrentMLPTrainingHook] Finished MLP update for this HRNet epoch.')
+        logger.info('[ConcurrentMLPTrainingHook] Finished joint MLP training.')
         
-        # Save MLP models after each epoch
+        # Save models
         save_dir = os.path.join(runner.work_dir, 'concurrent_mlp')
         os.makedirs(save_dir, exist_ok=True)
         
-        # Save current epoch models
-        current_epoch = runner.epoch + 1  # runner.epoch is 0-indexed
-        mlp_x_epoch_path = os.path.join(save_dir, f'mlp_x_epoch_{current_epoch}.pth')
-        mlp_y_epoch_path = os.path.join(save_dir, f'mlp_y_epoch_{current_epoch}.pth')
+        current_epoch = runner.epoch + 1
+        model_epoch_path = os.path.join(save_dir, f'joint_mlp_epoch_{current_epoch}.pth')
+        model_latest_path = os.path.join(save_dir, 'joint_mlp_latest.pth')
         
-        torch.save(self.mlp_x.state_dict(), mlp_x_epoch_path)
-        torch.save(self.mlp_y.state_dict(), mlp_y_epoch_path)
+        torch.save(self.mlp_model.state_dict(), model_epoch_path)
+        torch.save(self.mlp_model.state_dict(), model_latest_path)
         
-        # Also save as "latest" for easy access
-        mlp_x_latest_path = os.path.join(save_dir, 'mlp_x_latest.pth')
-        mlp_y_latest_path = os.path.join(save_dir, 'mlp_y_latest.pth')
-        
-        torch.save(self.mlp_x.state_dict(), mlp_x_latest_path)
-        torch.save(self.mlp_y.state_dict(), mlp_y_latest_path)
-        
-        logger.info(f'[ConcurrentMLPTrainingHook] MLP models saved for epoch {current_epoch}')
-        logger.info(f'[ConcurrentMLPTrainingHook] Latest models: {mlp_x_latest_path}, {mlp_y_latest_path}')
+        logger.info(f'[ConcurrentMLPTrainingHook] Joint MLP saved: {model_latest_path}')
 
-    # ---------------------------------------------------------------------
-    # Optional: save MLP weights at end of run
-    # ---------------------------------------------------------------------
     def after_run(self, runner: Runner):
         logger: MMLogger = runner.logger
-        if self.mlp_x is None or self.mlp_y is None:
+        if self.mlp_model is None:
             return
         save_dir = os.path.join(runner.work_dir, 'concurrent_mlp')
         os.makedirs(save_dir, exist_ok=True)
-        torch.save(self.mlp_x.state_dict(), os.path.join(save_dir, 'mlp_x_final.pth'))
-        torch.save(self.mlp_y.state_dict(), os.path.join(save_dir, 'mlp_y_final.pth'))
-        logger.info(f'[ConcurrentMLPTrainingHook] Saved final MLP weights to {save_dir}') 
+        torch.save(self.mlp_model.state_dict(), os.path.join(save_dir, 'joint_mlp_final.pth'))
+        logger.info(f'[ConcurrentMLPTrainingHook] Saved final joint MLP weights to {save_dir}') 

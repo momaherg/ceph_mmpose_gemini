@@ -55,7 +55,7 @@ model = dict(
 train_pipeline = [
     dict(type='LoadImageNumpy'), # Load from numpy array
     dict(type='GetBBoxCenterScale'),
-    # dict(type='RandomFlip', direction='horizontal'), # REMOVED: Flipping is not suitable for asymmetric landmarks
+    dict(type='RandomFlip', direction='horizontal'),
     dict(
         type='RandomBBoxTransform',
         shift_prob=0,
