@@ -155,9 +155,6 @@ custom_hooks = [
         mlp_lr=1e-5,                 # MLP learning rate (same as standalone training)
         mlp_weight_decay=1e-4,       # MLP weight decay
         hard_example_threshold=5.0,  # MRE threshold for hard-example oversampling (pixels)
-        log_interval=20,             # Log MLP training progress every 20 epochs
-        residual_learning=True,      # NEW: Use residual learning (predict corrections)
-        adaptive_scaling=True,       # NEW: Update scalers periodically as HRNet improves
-        scaler_update_freq=5         # NEW: Update scalers every 5 epochs
+        log_interval=20              # Log MLP training progress every 20 epochs
     )
 ] 
