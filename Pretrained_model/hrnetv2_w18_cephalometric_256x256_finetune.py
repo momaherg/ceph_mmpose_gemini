@@ -138,27 +138,23 @@ test_evaluator = val_evaluator
 #    visualization=dict(enable=True, type='PoseVisualizationHook')) 
 
 # =========================================================================
-# CONCURRENT JOINT MLP TRAINING HOOK - IMPROVED VERSION
+# CONCURRENT JOINT MLP TRAINING HOOK
 # =========================================================================
 # This hook trains a joint MLP refinement model on-the-fly during HRNetV2 training.
-# MAJOR IMPROVEMENTS:
-# • Residual learning (predicts gt - pred corrections)
-# • Single shared scaler for input and target normalization
-# • Batched GPU inference for 10x speedup
-# • Dynamic bounding boxes based on actual image dimensions
-# • Weighted loss instead of sample duplication
-# • Early stopping to prevent overfitting
+# After each HRNet epoch, it:
+# 1. Runs inference on training data using current HRNet weights
+# 2. Trains a joint 38-D MLP model (all coordinates together) for 100 epochs
+# 3. Implements hard-example oversampling for samples with high landmark errors
+# 4. Keeps MLP parameters independent (no gradient leakage to HRNet)
 
 custom_hooks = [
     dict(
         type='ConcurrentMLPTrainingHook',
-        mlp_epochs=20,                   # Reduced from 100 - most MLPs converge quickly
-        mlp_batch_size=32,               # Increased for better gradient estimates
-        mlp_lr=1e-4,                     # Higher learning rate for residual learning
-        mlp_weight_decay=1e-4,           # L2 regularization
-        hard_example_threshold=5.0,      # MRE threshold for hard-example weighting
-        early_stopping_patience=3,       # Stop if no improvement for 3 epochs
-        inference_batch_size=16,         # Batch size for HRNet inference speedup
-        log_interval=5                   # Log progress every 5 epochs
+        mlp_epochs=100,              # Train joint MLP for 100 epochs after each HRNet epoch
+        mlp_batch_size=16,           # MLP batch size
+        mlp_lr=1e-5,                 # MLP learning rate (same as standalone training)
+        mlp_weight_decay=1e-4,       # MLP weight decay
+        hard_example_threshold=5.0,  # MRE threshold for hard-example oversampling (pixels)
+        log_interval=20              # Log MLP training progress every 20 epochs
     )
 ] 
