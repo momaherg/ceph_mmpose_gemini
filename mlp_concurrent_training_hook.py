@@ -2,22 +2,26 @@
 """
 Concurrent MLP Training Hook for MMEngine / MMPose
 -------------------------------------------------
-This hook trains a joint MLP refinement model **concurrently** with HRNetV2 training.
+This hook trains a joint MLP refinement model **concurrently** with HRNetV2 training.  
 After every HRNet training epoch, the hook:
 
 1.  Runs inference on the entire *training* dataloader using the *current*
     HRNetV2 weights to obtain predicted landmark coordinates.
 2.  Creates an in-memory dataset of (predicted → ground-truth) coordinate pairs.
-3.  Trains a joint 38-D MLP for a fixed number of epochs (default: 100).
+3.  Trains a joint MLP for a fixed number of epochs (default: 100).
+4.  Implements hard-example oversampling for samples with high landmark errors.
 
-Key improvements:
-•   **Landmark-wise normalization** – Each landmark gets its own scaler for better handling of different coordinate ranges
-•   **Joint 38-D MLP** – Single model learns X,Y correlations instead of separate models
-•   **Cosine LR scheduling** – Better convergence than fixed learning rate
-•   **Curriculum augmentation** – Start with light augments, gradually increase intensity
-•   **Hard-example oversampling** – Oversample difficult samples with high error
-•   **One-time initialisation** – MLP weights, optimisers and scalers are created once and persist
-•   **No gradient leakage** – MLP training is completely detached from HRNetV2
+Important design decisions:
+•   **Joint 38-D model** – Single MLP that predicts all 38 coordinates (19 x,y pairs)
+    allowing the network to learn cross-correlations between X and Y axes.
+•   **Hard-example oversampling** – Samples with any landmark MRE > threshold get
+    duplicated in the training batch to focus learning on difficult cases.
+•   **One-time initialisation** – MLP weights, optimisers and scalers are created
+    once in `before_run` and *persist* across the whole HRNet training.
+•   **No gradient leakage** – MLP training is completely detached from the
+    HRNetV2 computation graph (`torch.no_grad()`), so gradients do **not**
+    propagate back.
+•   **CPU/GPU awareness** – Trains on GPU if available, else CPU.
 
 To enable this hook, add to your config:
 
@@ -27,12 +31,10 @@ custom_hooks = [
         type='ConcurrentMLPTrainingHook',
         mlp_epochs=100,
         mlp_batch_size=16,
-        mlp_lr=3e-4,  # Higher initial LR for cosine schedule
+        mlp_lr=1e-5,
         mlp_weight_decay=1e-4,
-        log_interval=20,
-        hard_example_threshold=6.0,  # MRE threshold for hard examples
-        curriculum_start_epoch=5,    # When to start curriculum augmentation
-        max_oversample_ratio=2.0     # Maximum oversampling ratio for hard examples
+        hard_example_threshold=5.0,  # MRE threshold for oversampling
+        log_interval=20
     )
 ]
 ```
@@ -44,9 +46,7 @@ workspace root).
 from __future__ import annotations
 
 import os
-from typing import List, Dict, Tuple
-import math
-import random
+from typing import List
 
 import torch
 import torch.nn as nn
@@ -65,94 +65,78 @@ from sklearn.preprocessing import StandardScaler
 import joblib
 
 # -----------------------------------------------------------------------------
-#  Joint 38-D MLP architecture with residual connections
+#  Joint MLP architecture for 38-D coordinate prediction
 # -----------------------------------------------------------------------------
 
 class JointMLPRefinementModel(nn.Module):
-    """
-    Joint MLP model for landmark coordinate refinement.
+    """Joint MLP model for landmark coordinate refinement.
+    
     Input: 38 predicted coordinates (19 landmarks × 2 coordinates)
-    Hidden: 512 neurons with residual connection
+    Hidden: 500 neurons with residual connection
     Output: 38 refined coordinates
+    
+    This allows the network to learn cross-correlations between X and Y axes
+    and between different landmarks.
     """
-    def __init__(self, input_dim=38, hidden_dim=512, output_dim=38):
+
+    def __init__(self, input_dim: int = 38, hidden_dim: int = 500, output_dim: int = 38):
         super().__init__()
         self.input_dim = input_dim
         self.hidden_dim = hidden_dim
         self.output_dim = output_dim
         
         # Main network with residual connection
-        self.fc1 = nn.Linear(input_dim, hidden_dim)
-        self.fc2 = nn.Linear(hidden_dim, hidden_dim)
-        self.fc3 = nn.Linear(hidden_dim, output_dim)
+        self.net = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.1),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.1),
+            nn.Linear(hidden_dim, output_dim)
+        )
         
-        # Residual connection (input -> output)
-        self.residual = nn.Linear(input_dim, output_dim)
-        
-        self.relu = nn.ReLU(inplace=True)
-        self.dropout = nn.Dropout(0.1)
-        
-        # Initialize weights
-        self._init_weights()
-        
-    def _init_weights(self):
-        for m in self.modules():
-            if isinstance(m, nn.Linear):
-                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
-                if m.bias is not None:
-                    nn.init.constant_(m.bias, 0)
-    
+        # Residual projection (if dimensions don't match)
+        self.residual_proj = None
+        if input_dim != output_dim:
+            self.residual_proj = nn.Linear(input_dim, output_dim)
+
     def forward(self, x):
-        # Main path
-        out = self.fc1(x)
-        out = self.relu(out)
-        out = self.dropout(out)
+        # Main forward pass
+        out = self.net(x)
         
-        out = self.fc2(out)
-        out = self.relu(out)
-        out = self.dropout(out)
-        
-        out = self.fc3(out)
-        
-        # Residual connection
-        residual = self.residual(x)
-        
-        # Combine main path and residual
-        out = out + residual
-        
-        return out
+        # Add residual connection
+        if self.residual_proj is not None:
+            residual = self.residual_proj(x)
+        else:
+            residual = x
+            
+        return out + 0.1 * residual  # Small residual weight to start
 
 
-class _JointMLPDataset(data.Dataset):
-    """In-memory dataset for joint 38-D MLP training with hard-example oversampling."""
+class _MLPDataset(data.Dataset):
+    """In-memory dataset with hard-example oversampling."""
 
     def __init__(self, preds: np.ndarray, gts: np.ndarray, sample_weights: np.ndarray = None):
-        # preds/gts shape: [N, 38] (19 landmarks × 2 coordinates)
+        # preds/gts shape: [N, 38] (flattened coordinates)
         assert preds.shape == gts.shape
-        assert preds.shape[1] == 38
         self.preds = torch.from_numpy(preds).float()
         self.gts = torch.from_numpy(gts).float()
         
-        # Handle sample weights for hard-example oversampling
+        # Create weighted sampling indices for hard examples
         if sample_weights is not None:
-            self.sample_weights = sample_weights
-            # Create oversampled indices based on weights
-            self.indices = self._create_oversampled_indices()
+            # Oversample hard examples by duplicating their indices
+            self.indices = []
+            for i, weight in enumerate(sample_weights):
+                # Add base sample
+                self.indices.append(i)
+                # Add extra copies for hard examples (weight > 1)
+                extra_copies = int(weight) - 1
+                for _ in range(extra_copies):
+                    self.indices.append(i)
+            self.indices = np.array(self.indices)
         else:
-            self.sample_weights = np.ones(len(preds))
-            self.indices = list(range(len(preds)))
-
-    def _create_oversampled_indices(self):
-        """Create indices with oversampling based on sample weights."""
-        indices = []
-        for i, weight in enumerate(self.sample_weights):
-            # Add original sample
-            indices.append(i)
-            # Add additional copies based on weight
-            additional_copies = int(weight - 1)
-            for _ in range(additional_copies):
-                indices.append(i)
-        return indices
+            self.indices = np.arange(len(self.preds))
 
     def __len__(self):
         return len(self.indices)
@@ -162,56 +146,13 @@ class _JointMLPDataset(data.Dataset):
         return self.preds[actual_idx], self.gts[actual_idx]
 
 
-class CosineAnnealingLR:
-    """Simple cosine annealing learning rate scheduler."""
-    
-    def __init__(self, optimizer, T_max, eta_min=1e-6):
-        self.optimizer = optimizer
-        self.T_max = T_max
-        self.eta_min = eta_min
-        self.base_lrs = [group['lr'] for group in optimizer.param_groups]
-        
-    def step(self, epoch):
-        for param_group, base_lr in zip(self.optimizer.param_groups, self.base_lrs):
-            param_group['lr'] = self.eta_min + (base_lr - self.eta_min) * (1 + math.cos(math.pi * epoch / self.T_max)) / 2
-
-
-class CurriculumAugmentation:
-    """Curriculum learning for data augmentation intensity."""
-    
-    def __init__(self, start_epoch=5, max_epochs=100):
-        self.start_epoch = start_epoch
-        self.max_epochs = max_epochs
-    
-    def get_augmentation_params(self, current_epoch):
-        """Get augmentation parameters based on current epoch."""
-        if current_epoch < self.start_epoch:
-            # No augmentation in early epochs
-            return {
-                'rotation_factor': 0,
-                'scale_factor': (1.0, 1.0),
-                'noise_std': 0.0,
-                'shift_factor': 0.0
-            }
-        
-        # Progressive augmentation intensity
-        progress = min(1.0, (current_epoch - self.start_epoch) / (self.max_epochs - self.start_epoch))
-        
-        return {
-            'rotation_factor': progress * 5.0,        # 0 -> 5 degrees
-            'scale_factor': (1.0 - progress * 0.05, 1.0 + progress * 0.05),  # 0.95 -> 1.05
-            'noise_std': progress * 0.5,             # 0 -> 0.5 pixel noise
-            'shift_factor': progress * 0.02           # 0 -> 2% shift
-        }
-
-
 # -----------------------------------------------------------------------------
 #  Hook implementation
 # -----------------------------------------------------------------------------
 
 @HOOKS.register_module()
 class ConcurrentMLPTrainingHook(Hook):
-    """MMEngine hook that performs concurrent joint MLP refinement training with curriculum learning."""
+    """MMEngine hook that performs concurrent joint MLP refinement training."""
 
     priority = 'LOW'  # Run after default hooks
 
@@ -219,43 +160,28 @@ class ConcurrentMLPTrainingHook(Hook):
         self,
         mlp_epochs: int = 100,
         mlp_batch_size: int = 16,
-        mlp_lr: float = 3e-4,  # Higher initial LR for cosine schedule
+        mlp_lr: float = 1e-5,
         mlp_weight_decay: float = 1e-4,
-        log_interval: int = 20,
-        hard_example_threshold: float = 6.0,  # MRE threshold for hard examples
-        curriculum_start_epoch: int = 5,      # When to start curriculum augmentation
-        max_oversample_ratio: float = 2.0,    # Maximum oversampling ratio
+        hard_example_threshold: float = 5.0,  # MRE threshold in pixels
+        log_interval: int = 50,
     ) -> None:
         self.mlp_epochs = mlp_epochs
         self.mlp_batch_size = mlp_batch_size
         self.mlp_lr = mlp_lr
         self.mlp_weight_decay = mlp_weight_decay
-        self.log_interval = log_interval
         self.hard_example_threshold = hard_example_threshold
-        self.curriculum_start_epoch = curriculum_start_epoch
-        self.max_oversample_ratio = max_oversample_ratio
+        self.log_interval = log_interval
 
         # These will be initialised in before_run
-        self.mlp_model: JointMLPRefinementModel | None = None
-        self.optimizer: optim.Optimizer | None = None
-        self.lr_scheduler: CosineAnnealingLR | None = None
+        self.mlp_joint: JointMLPRefinementModel | None = None
+        self.opt_joint: optim.Optimizer | None = None
         self.criterion = nn.MSELoss()
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         
-        # Landmark-wise normalization scalers (19 scalers each for input and target)
-        self.landmark_scalers_input: List[StandardScaler] = []
-        self.landmark_scalers_target: List[StandardScaler] = []
+        # Normalization scalers - initialized once and reused
+        self.scaler_input: StandardScaler | None = None
+        self.scaler_target: StandardScaler | None = None
         self.scalers_initialized = False
-        
-        # Hard-example tracking
-        self.sample_errors: Dict[int, float] = {}  # sample_id -> MRE
-        self.hard_examples: List[int] = []         # list of hard example indices
-        
-        # Curriculum augmentation
-        self.curriculum = CurriculumAugmentation(
-            start_epoch=curriculum_start_epoch,
-            max_epochs=mlp_epochs
-        )
 
     # ---------------------------------------------------------------------
     # MMEngine lifecycle methods
@@ -263,124 +189,31 @@ class ConcurrentMLPTrainingHook(Hook):
 
     def before_run(self, runner: Runner):
         logger: MMLogger = runner.logger
-        logger.info('[ConcurrentMLPTrainingHook] Initialising joint 38-D MLP model with curriculum learning…')
+        logger.info('[ConcurrentMLPTrainingHook] Initialising joint 38-D MLP model …')
 
-        # Initialize joint MLP model
-        self.mlp_model = JointMLPRefinementModel(input_dim=38, hidden_dim=512, output_dim=38).to(self.device)
-        self.optimizer = optim.Adam(self.mlp_model.parameters(), lr=self.mlp_lr, weight_decay=self.mlp_weight_decay)
-        self.lr_scheduler = CosineAnnealingLR(self.optimizer, T_max=self.mlp_epochs, eta_min=1e-6)
+        self.mlp_joint = JointMLPRefinementModel().to(self.device)
+        self.opt_joint = optim.Adam(self.mlp_joint.parameters(), lr=self.mlp_lr, weight_decay=self.mlp_weight_decay)
         
-        # Initialize landmark-wise scalers (19 for each coordinate type)
-        self.landmark_scalers_input = [StandardScaler() for _ in range(19)]
-        self.landmark_scalers_target = [StandardScaler() for _ in range(19)]
+        # Initialize scalers for 38-D input/output
+        self.scaler_input = StandardScaler()
+        self.scaler_target = StandardScaler()
         
-        logger.info(f'[ConcurrentMLPTrainingHook] Model architecture: 38 → 512 → 512 → 38 with residual connection')
-        logger.info(f'[ConcurrentMLPTrainingHook] Parameters: {sum(p.numel() for p in self.mlp_model.parameters()):,}')
+        logger.info(f'[ConcurrentMLPTrainingHook] Joint MLP initialized with {sum(p.numel() for p in self.mlp_joint.parameters()):,} parameters')
         logger.info(f'[ConcurrentMLPTrainingHook] Hard-example threshold: {self.hard_example_threshold} pixels')
-        logger.info(f'[ConcurrentMLPTrainingHook] Curriculum starts at epoch: {self.curriculum_start_epoch}')
-        logger.info(f'[ConcurrentMLPTrainingHook] Max oversample ratio: {self.max_oversample_ratio}x')
-
-    def _compute_sample_errors(self, predictions: np.ndarray, ground_truths: np.ndarray) -> np.ndarray:
-        """Compute per-sample MRE for hard-example identification."""
-        # predictions, ground_truths shape: [N, 19, 2]
-        errors = np.sqrt(np.sum((predictions - ground_truths)**2, axis=2))  # [N, 19]
-        sample_mres = np.mean(errors, axis=1)  # [N]
-        return sample_mres
-
-    def _identify_hard_examples(self, sample_errors: np.ndarray) -> Tuple[List[int], np.ndarray]:
-        """Identify hard examples and compute sample weights for oversampling."""
-        hard_indices = []
-        sample_weights = np.ones(len(sample_errors))
-        
-        for i, error in enumerate(sample_errors):
-            if error > self.hard_example_threshold:
-                hard_indices.append(i)
-                # Weight proportional to error, capped at max_oversample_ratio
-                weight = min(self.max_oversample_ratio, error / self.hard_example_threshold)
-                sample_weights[i] = weight
-        
-        return hard_indices, sample_weights
-
-    def _apply_curriculum_augmentation(self, predictions: np.ndarray, ground_truths: np.ndarray, 
-                                     current_epoch: int) -> Tuple[np.ndarray, np.ndarray]:
-        """Apply curriculum-based data augmentation."""
-        aug_params = self.curriculum.get_augmentation_params(current_epoch)
-        
-        if current_epoch < self.curriculum_start_epoch:
-            # No augmentation in early epochs
-            return predictions, ground_truths
-        
-        augmented_preds = []
-        augmented_gts = []
-        
-        for pred, gt in zip(predictions, ground_truths):
-            # Apply random transformations
-            if random.random() < 0.3:  # 30% chance of augmentation
-                # Small rotation (simulate head tilt variations)
-                if aug_params['rotation_factor'] > 0:
-                    angle = random.uniform(-aug_params['rotation_factor'], aug_params['rotation_factor'])
-                    angle_rad = np.radians(angle)
-                    cos_a, sin_a = np.cos(angle_rad), np.sin(angle_rad)
-                    
-                    # Center coordinates around image center for rotation
-                    center = np.array([112, 112])  # 224x224 image center
-                    pred_centered = pred - center
-                    gt_centered = gt - center
-                    
-                    # Apply rotation matrix
-                    rotation_matrix = np.array([[cos_a, -sin_a], [sin_a, cos_a]])
-                    pred_rotated = pred_centered @ rotation_matrix.T + center
-                    gt_rotated = gt_centered @ rotation_matrix.T + center
-                    
-                    pred = pred_rotated
-                    gt = gt_rotated
-                
-                # Small scale variation
-                scale_min, scale_max = aug_params['scale_factor']
-                if scale_min != 1.0 or scale_max != 1.0:
-                    scale = random.uniform(scale_min, scale_max)
-                    center = np.array([112, 112])
-                    pred = (pred - center) * scale + center
-                    gt = (gt - center) * scale + center
-                
-                # Small coordinate noise
-                if aug_params['noise_std'] > 0:
-                    noise = np.random.normal(0, aug_params['noise_std'], pred.shape)
-                    pred = pred + noise
-                    # Don't add noise to ground truth
-                
-                # Small shift
-                if aug_params['shift_factor'] > 0:
-                    shift_x = random.uniform(-aug_params['shift_factor'] * 224, aug_params['shift_factor'] * 224)
-                    shift_y = random.uniform(-aug_params['shift_factor'] * 224, aug_params['shift_factor'] * 224)
-                    shift = np.array([shift_x, shift_y])
-                    pred = pred + shift
-                    gt = gt + shift
-                
-                # Ensure coordinates stay within image bounds
-                pred = np.clip(pred, 0, 224)
-                gt = np.clip(gt, 0, 224)
-            
-            augmented_preds.append(pred)
-            augmented_gts.append(gt)
-        
-        return np.array(augmented_preds), np.array(augmented_gts)
 
     def after_train_epoch(self, runner: Runner):
         """After each HRNetV2 epoch, train joint MLP on-the-fly using current predictions."""
         logger: MMLogger = runner.logger
-        assert self.mlp_model is not None
-
-        current_hrnet_epoch = runner.epoch + 1
-        logger.info(f'[ConcurrentMLPTrainingHook] Starting MLP training for HRNet epoch {current_hrnet_epoch}')
+        assert self.mlp_joint is not None
 
         # -----------------------------------------------------------------
-        # Step 1: Generate predictions on training data
+        # Step 1: Generate predictions on training data (GPU-optimized)
         # -----------------------------------------------------------------
         
         # Get the actual model, handling potential wrapping
         model = runner.model
         if hasattr(model, 'module'):
+            # Handle DDP or other wrapped models
             actual_model = model.module
         else:
             actual_model = model
@@ -389,7 +222,7 @@ class ConcurrentMLPTrainingHook(Hook):
         if not hasattr(actual_model, 'cfg') and hasattr(runner, 'cfg'):
             actual_model.cfg = runner.cfg
             
-        # Set up dataset_meta if missing
+        # Set up dataset_meta if missing (required for inference_topdown)
         if not hasattr(actual_model, 'dataset_meta'):
             try:
                 import cephalometric_dataset_info
@@ -409,15 +242,15 @@ class ConcurrentMLPTrainingHook(Hook):
                 logger.warning(f'[ConcurrentMLPTrainingHook] Could not set dataset_meta: {e}')
         
         model.eval()
-        all_preds: List[np.ndarray] = []  # Will store [N, 19, 2] predictions
-        all_gts: List[np.ndarray] = []    # Will store [N, 19, 2] ground truths
-        sample_ids: List[int] = []        # Track sample IDs for hard-example identification
+        all_preds: List[np.ndarray] = []
+        all_gts: List[np.ndarray] = []
+        all_errors: List[np.ndarray] = []  # For hard-example detection
 
         train_dataset = runner.train_dataloader.dataset
-        logger.info('[ConcurrentMLPTrainingHook] Generating predictions for joint MLP...')
+        logger.info('[ConcurrentMLPTrainingHook] Generating predictions for joint MLP on GPU...')
 
         def tensor_to_numpy(data):
-            """Safely convert tensor to numpy."""
+            """Safely convert tensor to numpy, handling both tensor and numpy inputs."""
             if isinstance(data, torch.Tensor):
                 return data.cpu().numpy()
             elif isinstance(data, np.ndarray):
@@ -425,26 +258,29 @@ class ConcurrentMLPTrainingHook(Hook):
             else:
                 return np.array(data)
 
-        # Generate training data
+        # Access training data more robustly
         try:
             from tqdm import tqdm
             
+            # Method 1: Try to access the raw annotation file
             if hasattr(train_dataset, 'ann_file') and train_dataset.ann_file:
-                logger.info(f'[ConcurrentMLPTrainingHook] Loading data from: {train_dataset.ann_file}')
+                logger.info(f'[ConcurrentMLPTrainingHook] Loading data from annotation file: {train_dataset.ann_file}')
+                import pandas as pd
                 
                 try:
                     df = pd.read_json(train_dataset.ann_file)
-                    logger.info(f'[ConcurrentMLPTrainingHook] Loaded {len(df)} samples')
+                    logger.info(f'[ConcurrentMLPTrainingHook] Loaded {len(df)} samples from annotation file')
                     
+                    # Import landmark info
                     import cephalometric_dataset_info
                     landmark_names = cephalometric_dataset_info.landmark_names_in_order
                     landmark_cols = cephalometric_dataset_info.original_landmark_cols
                     
                     processed_count = 0
                     
-                    for idx, row in tqdm(df.iterrows(), total=len(df), disable=runner.rank != 0, desc="Generating joint MLP data"):
+                    for idx, row in tqdm(df.iterrows(), total=len(df), disable=runner.rank != 0, desc="GPU Inference from File"):
                         try:
-                            # Get image
+                            # Get image from row
                             img_array = np.array(row['Image'], dtype=np.uint8).reshape((224, 224, 3))
                             
                             # Get ground truth keypoints
@@ -459,40 +295,114 @@ class ConcurrentMLPTrainingHook(Hook):
                                     gt_keypoints.append([0, 0])
                                     valid_gt = False
                             
+                            # Skip samples with invalid ground truth
                             if not valid_gt:
                                 continue
                                 
-                            gt_keypoints = np.array(gt_keypoints)  # Shape: [19, 2]
+                            gt_keypoints = np.array(gt_keypoints)
                             
-                            # Run inference
+                            # Run inference with the standard mmpose API
                             bbox = np.array([[0, 0, 224, 224]], dtype=np.float32)
                             results = inference_topdown(model, img_array, bboxes=bbox, bbox_format='xyxy')
                             
                             if results and len(results) > 0:
                                 pred_keypoints = results[0].pred_instances.keypoints[0]
-                                pred_keypoints = tensor_to_numpy(pred_keypoints)  # Shape: [19, 2]
+                                pred_keypoints = tensor_to_numpy(pred_keypoints)
                             else:
                                 continue
                             
                             if pred_keypoints is None or pred_keypoints.shape[0] != 19:
                                 continue
                             
-                            # Store predictions and ground truths
-                            all_preds.append(pred_keypoints)
-                            all_gts.append(gt_keypoints)
-                            sample_ids.append(idx)
+                            # Flatten coordinates to 38-D vectors
+                            pred_flat = pred_keypoints.flatten()  # [x1, y1, x2, y2, ..., x19, y19]
+                            gt_flat = gt_keypoints.flatten()
+                            
+                            # Calculate per-landmark radial errors for hard-example detection
+                            landmark_errors = np.sqrt(np.sum((pred_keypoints - gt_keypoints)**2, axis=1))
+                            
+                            # Store data
+                            all_preds.append(pred_flat)
+                            all_gts.append(gt_flat)
+                            all_errors.append(landmark_errors)
+                            
                             processed_count += 1
                             
                         except Exception as e:
-                            if processed_count < 5:  # Only log first few errors
-                                logger.warning(f'[ConcurrentMLPTrainingHook] Failed to process sample {idx}: {e}')
+                            logger.warning(f'[ConcurrentMLPTrainingHook] Failed to process sample {idx}: {e}')
                             continue
                     
-                    logger.info(f'[ConcurrentMLPTrainingHook] Successfully processed {processed_count} samples')
+                    logger.info(f'[ConcurrentMLPTrainingHook] Successfully processed {processed_count} samples from file')
                     
                 except Exception as e:
-                    logger.error(f'[ConcurrentMLPTrainingHook] Failed to load annotation file: {e}')
-                    return
+                    logger.warning(f'[ConcurrentMLPTrainingHook] Failed to load from annotation file: {e}')
+                    df = None
+            
+            # Method 2: Fallback to dataset iteration if file method fails
+            if not all_preds:  # No predictions from file method
+                logger.info('[ConcurrentMLPTrainingHook] Using dataset iteration method')
+                
+                processed_count = 0
+                
+                for idx in tqdm(range(len(train_dataset)), disable=runner.rank != 0, desc="Dataset Inference"):
+                    try:
+                        data_sample = train_dataset[idx]
+                        
+                        # Extract image - handle different possible formats
+                        if 'inputs' in data_sample:
+                            img = data_sample['inputs']
+                            if isinstance(img, torch.Tensor):
+                                # Convert from (C, H, W) tensor to (H, W, C) numpy
+                                img_np = tensor_to_numpy(img.permute(1, 2, 0) * 255).astype(np.uint8)
+                            else:
+                                img_np = np.array(img, dtype=np.uint8)
+                        else:
+                            continue
+                        
+                        # Extract ground truth keypoints with robust handling
+                        if 'data_samples' in data_sample and hasattr(data_sample['data_samples'], 'gt_instances'):
+                            gt_instances = data_sample['data_samples'].gt_instances
+                            if hasattr(gt_instances, 'keypoints') and len(gt_instances.keypoints) > 0:
+                                gt_kpts = tensor_to_numpy(gt_instances.keypoints[0])
+                            else:
+                                continue
+                        else:
+                            continue
+                        
+                        # Run inference with the standard mmpose API
+                        bbox = np.array([[0, 0, 224, 224]], dtype=np.float32)
+                        results = inference_topdown(model, img_np, bboxes=bbox, bbox_format='xyxy')
+                        
+                        if results and len(results) > 0:
+                            pred_kpts = results[0].pred_instances.keypoints[0]
+                            pred_kpts = tensor_to_numpy(pred_kpts)
+                        else:
+                            continue
+                        
+                        if pred_kpts is None or pred_kpts.shape[0] != 19:
+                            continue
+                        
+                        # Flatten coordinates to 38-D vectors
+                        pred_flat = pred_kpts.flatten()
+                        gt_flat = gt_kpts.flatten()
+                        
+                        # Calculate per-landmark radial errors
+                        landmark_errors = np.sqrt(np.sum((pred_kpts - gt_kpts)**2, axis=1))
+                        
+                        # Store data
+                        all_preds.append(pred_flat)
+                        all_gts.append(gt_flat)
+                        all_errors.append(landmark_errors)
+                        
+                        processed_count += 1
+                        
+                    except Exception as e:
+                        # Only log every 100th error to avoid spam
+                        if idx % 100 == 0:
+                            logger.warning(f'[ConcurrentMLPTrainingHook] Failed to process sample {idx}: {e}')
+                        continue
+                
+                logger.info(f'[ConcurrentMLPTrainingHook] Successfully processed {processed_count} samples via dataset iteration')
 
         except Exception as e:
             logger.error(f'[ConcurrentMLPTrainingHook] Critical error during data processing: {e}')
@@ -502,167 +412,121 @@ class ConcurrentMLPTrainingHook(Hook):
             logger.warning('[ConcurrentMLPTrainingHook] No predictions generated; skipping MLP update.')
             return
 
-        # Convert to numpy arrays
-        all_preds = np.array(all_preds)  # Shape: [N, 19, 2]
-        all_gts = np.array(all_gts)      # Shape: [N, 19, 2]
+        all_preds = np.stack(all_preds)  # [N, 38]
+        all_gts = np.stack(all_gts)      # [N, 38]
+        all_errors = np.stack(all_errors)  # [N, 19]
         
-        logger.info(f'[ConcurrentMLPTrainingHook] Generated data: {all_preds.shape[0]} samples, {all_preds.shape[1]} landmarks')
+        logger.info(f'[ConcurrentMLPTrainingHook] Generated predictions for {len(all_preds)} samples')
 
         # -----------------------------------------------------------------
-        # Step 1.5: Hard-example identification and curriculum augmentation
+        # Step 1.5: Compute hard-example weights
         # -----------------------------------------------------------------
+        # Determine sample weights based on maximum landmark error per sample
+        max_errors_per_sample = np.max(all_errors, axis=1)  # [N,] - worst landmark per sample
+        hard_examples = max_errors_per_sample > self.hard_example_threshold
         
-        # Compute sample errors for hard-example identification
-        sample_errors = self._compute_sample_errors(all_preds, all_gts)
-        hard_indices, sample_weights = self._identify_hard_examples(sample_errors)
+        # Create sample weights: 1.0 for normal, 2.0 for hard examples
+        sample_weights = np.ones(len(all_preds))
+        sample_weights[hard_examples] = 2.0
         
-        logger.info(f'[ConcurrentMLPTrainingHook] Identified {len(hard_indices)} hard examples (>{self.hard_example_threshold:.1f}px MRE)')
-        if hard_indices:
-            avg_hard_error = np.mean([sample_errors[i] for i in hard_indices])
-            max_weight = np.max(sample_weights)
-            logger.info(f'[ConcurrentMLPTrainingHook] Hard examples avg MRE: {avg_hard_error:.2f}px, max weight: {max_weight:.2f}x')
+        num_hard_examples = np.sum(hard_examples)
+        logger.info(f'[ConcurrentMLPTrainingHook] Hard examples (>{self.hard_example_threshold}px): {num_hard_examples}/{len(all_preds)} ({num_hard_examples/len(all_preds)*100:.1f}%)')
         
-        # Apply curriculum augmentation
-        if current_hrnet_epoch >= self.curriculum_start_epoch:
-            aug_params = self.curriculum.get_augmentation_params(current_hrnet_epoch)
-            logger.info(f'[ConcurrentMLPTrainingHook] Curriculum augmentation active - rotation: ±{aug_params["rotation_factor"]:.1f}°, '
-                       f'scale: {aug_params["scale_factor"][0]:.3f}-{aug_params["scale_factor"][1]:.3f}, '
-                       f'noise: {aug_params["noise_std"]:.2f}px')
-            
-            all_preds, all_gts = self._apply_curriculum_augmentation(all_preds, all_gts, current_hrnet_epoch)
-        else:
-            logger.info(f'[ConcurrentMLPTrainingHook] Curriculum augmentation inactive (epoch {current_hrnet_epoch} < {self.curriculum_start_epoch})')
+        if num_hard_examples > 0:
+            logger.info(f'[ConcurrentMLPTrainingHook] Hard example errors: min={np.min(max_errors_per_sample[hard_examples]):.2f}, max={np.max(max_errors_per_sample[hard_examples]):.2f}, mean={np.mean(max_errors_per_sample[hard_examples]):.2f}')
 
         # -----------------------------------------------------------------
-        # Step 2: Landmark-wise normalization
+        # Step 2: Initialize normalization scalers (only once)
         # -----------------------------------------------------------------
-        
         if not self.scalers_initialized:
-            logger.info('[ConcurrentMLPTrainingHook] Initializing landmark-wise scalers...')
+            logger.info('[ConcurrentMLPTrainingHook] Initializing normalization scalers for 38-D data...')
             
-            # Fit scalers for each landmark separately
-            for landmark_idx in range(19):
-                # Input scalers (predictions)
-                pred_coords = all_preds[:, landmark_idx, :].reshape(-1, 2)  # [N, 2]
-                self.landmark_scalers_input[landmark_idx].fit(pred_coords)
-                
-                # Target scalers (ground truth)
-                gt_coords = all_gts[:, landmark_idx, :].reshape(-1, 2)  # [N, 2]
-                self.landmark_scalers_target[landmark_idx].fit(gt_coords)
+            # Fit scalers on the first batch of data
+            self.scaler_input.fit(all_preds)
+            self.scaler_target.fit(all_gts)
             
             self.scalers_initialized = True
-            logger.info('[ConcurrentMLPTrainingHook] Landmark-wise scalers initialized')
+            logger.info('[ConcurrentMLPTrainingHook] Normalization scalers initialized')
             
-            # Save scalers
+            # Save scalers for evaluation
             save_dir = os.path.join(runner.work_dir, 'concurrent_mlp')
             os.makedirs(save_dir, exist_ok=True)
             
-            joblib.dump(self.landmark_scalers_input, os.path.join(save_dir, 'landmark_scalers_input.pkl'))
-            joblib.dump(self.landmark_scalers_target, os.path.join(save_dir, 'landmark_scalers_target.pkl'))
+            joblib.dump(self.scaler_input, os.path.join(save_dir, 'scaler_joint_input.pkl'))
+            joblib.dump(self.scaler_target, os.path.join(save_dir, 'scaler_joint_target.pkl'))
             
-            logger.info(f'[ConcurrentMLPTrainingHook] Landmark-wise scalers saved to {save_dir}')
+            logger.info(f'[ConcurrentMLPTrainingHook] Joint scalers saved to {save_dir}')
 
-        # Apply landmark-wise normalization
-        preds_normalized = np.zeros_like(all_preds)
-        gts_normalized = np.zeros_like(all_gts)
-        
-        for landmark_idx in range(19):
-            # Normalize predictions
-            pred_coords = all_preds[:, landmark_idx, :].reshape(-1, 2)
-            pred_coords_norm = self.landmark_scalers_input[landmark_idx].transform(pred_coords)
-            preds_normalized[:, landmark_idx, :] = pred_coords_norm.reshape(-1, 2)
-            
-            # Normalize ground truth
-            gt_coords = all_gts[:, landmark_idx, :].reshape(-1, 2)
-            gt_coords_norm = self.landmark_scalers_target[landmark_idx].transform(gt_coords)
-            gts_normalized[:, landmark_idx, :] = gt_coords_norm.reshape(-1, 2)
-
-        # Flatten to 38-D vectors for joint MLP
-        preds_flat = preds_normalized.reshape(-1, 38)  # [N, 38]
-        gts_flat = gts_normalized.reshape(-1, 38)      # [N, 38]
+        # Normalize data using the consistent scalers
+        preds_scaled = self.scaler_input.transform(all_preds)
+        gts_scaled = self.scaler_target.transform(all_gts)
 
         # -----------------------------------------------------------------
-        # Step 3: Train joint MLP with hard-example oversampling
+        # Step 3: Train joint MLP for fixed number of epochs (GPU-optimized)
         # -----------------------------------------------------------------
-        logger.info('[ConcurrentMLPTrainingHook] Training joint 38-D MLP with hard-example oversampling...')
+        logger.info('[ConcurrentMLPTrainingHook] Training joint 38-D MLP on GPU…')
         
-        # Calculate initial loss for logging
+        # Calculate initial loss before refinement for logging
         initial_loss = self.criterion(
-            torch.from_numpy(preds_flat).float(),
-            torch.from_numpy(gts_flat).float()
+            torch.from_numpy(preds_scaled).float(), 
+            torch.from_numpy(gts_scaled).float()
         ).item()
-        
-        # Create dataset and dataloader with sample weights for oversampling
-        dataset = _JointMLPDataset(preds_flat, gts_flat, sample_weights)
-        dataloader = data.DataLoader(dataset, batch_size=self.mlp_batch_size, shuffle=True, pin_memory=True)
-        
-        logger.info(f'[ConcurrentMLPTrainingHook] Dataset size after oversampling: {len(dataset)} (original: {len(preds_flat)})')
-        
-        # Training loop
-        self.mlp_model.train()
-        for epoch in range(self.mlp_epochs):
-            epoch_loss = 0.0
-            
-            for batch_preds, batch_gts in dataloader:
-                batch_preds = batch_preds.to(self.device, non_blocking=True)
-                batch_gts = batch_gts.to(self.device, non_blocking=True)
-                
-                self.optimizer.zero_grad()
-                outputs = self.mlp_model(batch_preds)
-                loss = self.criterion(outputs, batch_gts)
-                loss.backward()
-                self.optimizer.step()
-                
-                epoch_loss += loss.item()
-            
-            # Update learning rate
-            self.lr_scheduler.step(epoch)
-            
-            avg_loss = epoch_loss / len(dataloader)
-            current_lr = self.optimizer.param_groups[0]['lr']
-            
-            if (epoch + 1) % self.log_interval == 0:
-                logger.info(f'[ConcurrentMLPTrainingHook] Joint MLP epoch {epoch+1}/{self.mlp_epochs} | '
-                           f'Loss: {avg_loss:.6f}, Initial: {initial_loss:.6f}, LR: {current_lr:.2e}, '
-                           f'Hard examples: {len(hard_indices)}')
 
-        logger.info('[ConcurrentMLPTrainingHook] Finished joint MLP training.')
+        # Build dataset with hard-example oversampling
+        ds_joint = _MLPDataset(preds_scaled, gts_scaled, sample_weights)
+        dl_joint = data.DataLoader(ds_joint, batch_size=self.mlp_batch_size, shuffle=True, pin_memory=True)
+
+        def _train_joint(model: JointMLPRefinementModel, optimiser: optim.Optimizer, loader: data.DataLoader, initial_loss: float):
+            model.train()
+            total_loss = 0.0
+            for ep in range(self.mlp_epochs):
+                epoch_loss = 0.0
+                for preds_batch, gts_batch in loader:
+                    preds_batch = preds_batch.to(self.device, non_blocking=True)
+                    gts_batch = gts_batch.to(self.device, non_blocking=True)
+
+                    optimiser.zero_grad()
+                    outputs = model(preds_batch)
+                    loss = self.criterion(outputs, gts_batch)
+                    loss.backward()
+                    optimiser.step()
+
+                    epoch_loss += loss.item()
+                
+                total_loss = epoch_loss / len(loader)
+                if (ep + 1) % 20 == 0:
+                    improvement = ((initial_loss - total_loss) / initial_loss * 100) if initial_loss > 0 else 0
+                    logger.info(f'[ConcurrentMLPTrainingHook] Joint-MLP epoch {ep+1}/{self.mlp_epochs} | MLP loss: {total_loss:.6f}, Initial loss: {initial_loss:.6f} ({improvement:+.1f}%)')
+
+        _train_joint(self.mlp_joint, self.opt_joint, dl_joint, initial_loss)
+
+        logger.info('[ConcurrentMLPTrainingHook] Finished joint MLP update for this HRNet epoch.')
         
-        # Save models
+        # Save MLP models after each epoch
         save_dir = os.path.join(runner.work_dir, 'concurrent_mlp')
         os.makedirs(save_dir, exist_ok=True)
         
-        current_epoch = runner.epoch + 1
-        model_epoch_path = os.path.join(save_dir, f'joint_mlp_epoch_{current_epoch}.pth')
-        model_latest_path = os.path.join(save_dir, 'joint_mlp_latest.pth')
+        # Save current epoch models
+        current_epoch = runner.epoch + 1  # runner.epoch is 0-indexed
+        mlp_joint_epoch_path = os.path.join(save_dir, f'mlp_joint_epoch_{current_epoch}.pth')
         
-        torch.save(self.mlp_model.state_dict(), model_epoch_path)
-        torch.save(self.mlp_model.state_dict(), model_latest_path)
+        torch.save(self.mlp_joint.state_dict(), mlp_joint_epoch_path)
         
-        # Save hard-example statistics
-        hard_example_stats = {
-            'epoch': current_epoch,
-            'total_samples': len(all_preds),
-            'hard_examples': len(hard_indices),
-            'hard_example_ratio': len(hard_indices) / len(all_preds),
-            'avg_sample_error': float(np.mean(sample_errors)),
-            'hard_example_threshold': self.hard_example_threshold,
-            'curriculum_active': current_hrnet_epoch >= self.curriculum_start_epoch
-        }
+        # Also save as "latest" for easy access
+        mlp_joint_latest_path = os.path.join(save_dir, 'mlp_joint_latest.pth')
+        torch.save(self.mlp_joint.state_dict(), mlp_joint_latest_path)
         
-        import json
-        stats_path = os.path.join(save_dir, f'hard_example_stats_epoch_{current_epoch}.json')
-        with open(stats_path, 'w') as f:
-            json.dump(hard_example_stats, f, indent=2)
-        
-        logger.info(f'[ConcurrentMLPTrainingHook] Joint MLP saved: {model_latest_path}')
-        logger.info(f'[ConcurrentMLPTrainingHook] Hard-example stats saved: {stats_path}')
+        logger.info(f'[ConcurrentMLPTrainingHook] Joint MLP model saved for epoch {current_epoch}')
+        logger.info(f'[ConcurrentMLPTrainingHook] Latest model: {mlp_joint_latest_path}')
 
+    # ---------------------------------------------------------------------
+    # Optional: save MLP weights at end of run
+    # ---------------------------------------------------------------------
     def after_run(self, runner: Runner):
         logger: MMLogger = runner.logger
-        if self.mlp_model is None:
+        if self.mlp_joint is None:
             return
         save_dir = os.path.join(runner.work_dir, 'concurrent_mlp')
         os.makedirs(save_dir, exist_ok=True)
-        torch.save(self.mlp_model.state_dict(), os.path.join(save_dir, 'joint_mlp_final.pth'))
+        torch.save(self.mlp_joint.state_dict(), os.path.join(save_dir, 'mlp_joint_final.pth'))
         logger.info(f'[ConcurrentMLPTrainingHook] Saved final joint MLP weights to {save_dir}') 

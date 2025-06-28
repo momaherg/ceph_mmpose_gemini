@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Concurrent Joint MLP Performance Evaluation Script
-This script evaluates the performance improvement from joint 38-D MLP refinement
+This script evaluates the performance improvement from joint MLP refinement
 trained concurrently with HRNetV2.
 """
 
@@ -39,90 +39,62 @@ def safe_torch_load(*args, **kwargs):
 torch.load = safe_torch_load
 
 class JointMLPRefinementModel(nn.Module):
-    """
-    Joint MLP model for landmark coordinate refinement.
-    Input: 38 predicted coordinates (19 landmarks × 2 coordinates)
-    Hidden: 512 neurons with residual connection
-    Output: 38 refined coordinates
-    """
-    def __init__(self, input_dim=38, hidden_dim=512, output_dim=38):
-        super().__init__()
+    """Joint MLP model for landmark coordinate refinement - same as in hook."""
+    def __init__(self, input_dim=38, hidden_dim=500, output_dim=38):
+        super(JointMLPRefinementModel, self).__init__()
         self.input_dim = input_dim
         self.hidden_dim = hidden_dim
         self.output_dim = output_dim
         
         # Main network with residual connection
-        self.fc1 = nn.Linear(input_dim, hidden_dim)
-        self.fc2 = nn.Linear(hidden_dim, hidden_dim)
-        self.fc3 = nn.Linear(hidden_dim, output_dim)
+        self.net = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.1),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.1),
+            nn.Linear(hidden_dim, output_dim)
+        )
         
-        # Residual connection (input -> output)
-        self.residual = nn.Linear(input_dim, output_dim)
-        
-        self.relu = nn.ReLU(inplace=True)
-        self.dropout = nn.Dropout(0.1)
-        
-        # Initialize weights
-        self._init_weights()
-        
-    def _init_weights(self):
-        for m in self.modules():
-            if isinstance(m, nn.Linear):
-                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
-                if m.bias is not None:
-                    nn.init.constant_(m.bias, 0)
-    
-    def forward(self, x):
-        # Main path
-        out = self.fc1(x)
-        out = self.relu(out)
-        out = self.dropout(out)
-        
-        out = self.fc2(out)
-        out = self.relu(out)
-        out = self.dropout(out)
-        
-        out = self.fc3(out)
-        
-        # Residual connection
-        residual = self.residual(x)
-        
-        # Combine main path and residual
-        out = out + residual
-        
-        return out
+        # Residual projection (if dimensions don't match)
+        self.residual_proj = None
+        if input_dim != output_dim:
+            self.residual_proj = nn.Linear(input_dim, output_dim)
 
-def apply_joint_mlp_refinement(predictions, joint_mlp, landmark_scalers_input, landmark_scalers_target, device):
-    """Apply joint MLP refinement to predictions using landmark-wise scalers."""
+    def forward(self, x):
+        # Main forward pass
+        out = self.net(x)
+        
+        # Add residual connection
+        if self.residual_proj is not None:
+            residual = self.residual_proj(x)
+        else:
+            residual = x
+            
+        return out + 0.1 * residual  # Small residual weight to start
+
+def apply_joint_mlp_refinement(predictions, mlp_joint, scaler_input, scaler_target, device):
+    """Apply joint MLP refinement to predictions."""
     try:
-        # predictions shape: [19, 2]
-        predictions = predictions.reshape(19, 2)
+        # Flatten predictions to 38-D vector [x1, y1, x2, y2, ..., x19, y19]
+        pred_flat = predictions.flatten().reshape(1, -1)
         
-        # Apply landmark-wise normalization
-        preds_normalized = np.zeros_like(predictions)
-        for landmark_idx in range(19):
-            pred_coords = predictions[landmark_idx:landmark_idx+1, :]  # [1, 2]
-            pred_coords_norm = landmark_scalers_input[landmark_idx].transform(pred_coords)
-            preds_normalized[landmark_idx, :] = pred_coords_norm.flatten()
+        # Normalize input predictions
+        pred_scaled = scaler_input.transform(pred_flat)
         
-        # Flatten to 38-D vector
-        preds_flat = preds_normalized.flatten()  # [38]
+        # Convert to tensor
+        pred_tensor = torch.FloatTensor(pred_scaled).to(device)
         
-        # Convert to tensor and apply MLP
-        preds_tensor = torch.FloatTensor(preds_flat).unsqueeze(0).to(device)  # [1, 38]
-        
+        # Apply joint MLP refinement
         with torch.no_grad():
-            refined_flat = joint_mlp(preds_tensor).cpu().numpy().flatten()  # [38]
+            refined_scaled = mlp_joint(pred_tensor).cpu().numpy()
         
-        # Reshape back to [19, 2]
-        refined_normalized = refined_flat.reshape(19, 2)
+        # Denormalize outputs
+        refined_flat = scaler_target.inverse_transform(refined_scaled).flatten()
         
-        # Apply inverse landmark-wise normalization
-        refined_coords = np.zeros_like(refined_normalized)
-        for landmark_idx in range(19):
-            refined_coords_norm = refined_normalized[landmark_idx:landmark_idx+1, :]  # [1, 2]
-            refined_coords_denorm = landmark_scalers_target[landmark_idx].inverse_transform(refined_coords_norm)
-            refined_coords[landmark_idx, :] = refined_coords_denorm.flatten()
+        # Reshape back to [19, 2] format
+        refined_coords = refined_flat.reshape(19, 2)
         
         return refined_coords
         
@@ -226,33 +198,33 @@ def main():
     
     # Check for joint MLP models
     mlp_dir = os.path.join(args.work_dir, "concurrent_mlp")
-    joint_mlp_path = os.path.join(mlp_dir, "joint_mlp_final.pth")
+    mlp_joint_path = os.path.join(mlp_dir, "mlp_joint_final.pth")
     
-    # Check for final model first, then latest, then epoch-specific
-    if os.path.exists(joint_mlp_path):
-        print(f"✓ Found final joint MLP model: {joint_mlp_path}")
+    # Check for final models first, then latest, then epoch-specific
+    if os.path.exists(mlp_joint_path):
+        print(f"✓ Found final joint MLP model: {mlp_joint_path}")
         model_type = "final"
     else:
         # Try latest model
-        joint_mlp_latest = os.path.join(mlp_dir, "joint_mlp_latest.pth")
+        mlp_joint_latest = os.path.join(mlp_dir, "mlp_joint_latest.pth")
         
-        if os.path.exists(joint_mlp_latest):
-            joint_mlp_path = joint_mlp_latest
-            print(f"✓ Found latest joint MLP model: {joint_mlp_path}")
+        if os.path.exists(mlp_joint_latest):
+            mlp_joint_path = mlp_joint_latest
+            print(f"✓ Found latest joint MLP model: {mlp_joint_path}")
             model_type = "latest"
         else:
             # Try to find epoch-specific models
-            epoch_models = glob.glob(os.path.join(mlp_dir, "joint_mlp_epoch_*.pth"))
+            epoch_models = glob.glob(os.path.join(mlp_dir, "mlp_joint_epoch_*.pth"))
             if epoch_models:
                 # Get the latest epoch model
-                latest_model = max(epoch_models, key=lambda x: int(x.split('_epoch_')[1].split('.')[0]))
-                epoch_num = latest_model.split('_epoch_')[1].split('.')[0]
+                latest_joint_model = max(epoch_models, key=lambda x: int(x.split('_epoch_')[1].split('.')[0]))
+                epoch_num = latest_joint_model.split('_epoch_')[1].split('.')[0]
                 
-                joint_mlp_path = latest_model
-                print(f"✓ Found epoch {epoch_num} joint MLP model: {joint_mlp_path}")
+                mlp_joint_path = latest_joint_model
+                print(f"✓ Found epoch {epoch_num} joint MLP model: {mlp_joint_path}")
                 model_type = f"epoch_{epoch_num}"
             else:
-                print("ERROR: No joint MLP models found.")
+                print("ERROR: Joint MLP model not found.")
                 print(f"Searched in: {mlp_dir}")
                 print("Available files:")
                 if os.path.exists(mlp_dir):
@@ -260,7 +232,7 @@ def main():
                         print(f"  - {file}")
                 else:
                     print("  MLP directory does not exist")
-                print("\nTip: Make sure concurrent training is running and has completed at least one epoch.")
+                print("\nTip: Make sure concurrent joint training is running and has completed at least one epoch.")
                 return
     
     # Load models
@@ -272,9 +244,9 @@ def main():
     print("✓ HRNetV2 model loaded")
     
     # Load joint MLP model
-    joint_mlp = JointMLPRefinementModel().to(device)
-    joint_mlp.load_state_dict(torch.load(joint_mlp_path, map_location=device))
-    joint_mlp.eval()
+    mlp_joint = JointMLPRefinementModel().to(device)
+    mlp_joint.load_state_dict(torch.load(mlp_joint_path, map_location=device))
+    mlp_joint.eval()
     print("✓ Joint MLP model loaded")
     
     # Load test data
@@ -305,32 +277,30 @@ def main():
     landmark_names = cephalometric_dataset_info.landmark_names_in_order
     landmark_cols = cephalometric_dataset_info.original_landmark_cols
     
-    # Load saved landmark-wise scalers
-    print("Loading saved landmark-wise scalers...")
+    # Load saved joint normalization scalers
+    print("Loading saved joint normalization scalers...")
     scaler_dir = os.path.join(args.work_dir, "concurrent_mlp")
     
-    landmark_scalers_input_path = os.path.join(scaler_dir, "landmark_scalers_input.pkl")
-    landmark_scalers_target_path = os.path.join(scaler_dir, "landmark_scalers_target.pkl")
+    scaler_input_path = os.path.join(scaler_dir, "scaler_joint_input.pkl")
+    scaler_target_path = os.path.join(scaler_dir, "scaler_joint_target.pkl")
     
     # Check if scalers exist
-    scaler_files = [landmark_scalers_input_path, landmark_scalers_target_path]
+    scaler_files = [scaler_input_path, scaler_target_path]
     missing_scalers = [f for f in scaler_files if not os.path.exists(f)]
     
     if missing_scalers:
-        print(f"ERROR: Missing scaler files: {missing_scalers}")
+        print(f"ERROR: Missing joint scaler files: {missing_scalers}")
         print("This indicates that concurrent joint MLP training hasn't run yet or scalers weren't saved.")
-        print("Please run concurrent training first.")
+        print("Please run concurrent joint training first.")
         return
     
     # Load scalers
     try:
-        landmark_scalers_input = joblib.load(landmark_scalers_input_path)
-        landmark_scalers_target = joblib.load(landmark_scalers_target_path)
-        print("✓ Landmark-wise scalers loaded successfully")
-        print(f"  Input scalers: {len(landmark_scalers_input)} landmarks")
-        print(f"  Target scalers: {len(landmark_scalers_target)} landmarks")
+        scaler_input = joblib.load(scaler_input_path)
+        scaler_target = joblib.load(scaler_target_path)
+        print("✓ Joint normalization scalers loaded successfully")
     except Exception as e:
-        print(f"ERROR: Failed to load scalers: {e}")
+        print(f"ERROR: Failed to load joint scalers: {e}")
         return
     
     # Evaluation on test set
@@ -380,7 +350,7 @@ def main():
             
             # Apply joint MLP refinement
             refined_keypoints = apply_joint_mlp_refinement(
-                pred_keypoints, joint_mlp, landmark_scalers_input, landmark_scalers_target, device
+                pred_keypoints, mlp_joint, scaler_input, scaler_target, device
             )
             
             # Store results
@@ -411,7 +381,7 @@ def main():
     
     # Print results
     print("\n" + "="*80)
-    print("EVALUATION RESULTS")
+    print("JOINT MLP EVALUATION RESULTS")
     print("="*80)
     print(f"📊 Evaluated using {model_type} joint MLP model")
     print(f"📈 HRNetV2 checkpoint: {os.path.basename(hrnet_checkpoint)}")
@@ -546,9 +516,9 @@ def main():
     print(f"   - Per-landmark comparison: per_landmark_comparison.csv")
     print(f"   - Visualization: joint_mlp_evaluation_results.png")
     
-    print(f"\n🎉 Evaluation completed!")
+    print(f"\n🎉 Joint MLP evaluation completed!")
     print(f"📈 Overall improvement: {improvement_mre:.1f}% reduction in MRE")
-    print(f"🎯 Joint 38-D MLP with landmark-wise scalers and cosine LR")
+    print(f"🎯 Joint model captures cross-correlations between landmarks")
     print(f"🔧 Evaluated using: {model_type} joint MLP model")
     
     if model_type == "latest":
