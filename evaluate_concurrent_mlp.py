@@ -39,14 +39,14 @@ def safe_torch_load(*args, **kwargs):
 torch.load = safe_torch_load
 
 class JointMLPRefinementModel(nn.Module):
-    """Joint MLP model for landmark coordinate residual refinement - same as in hook."""
+    """Joint MLP model for landmark coordinate refinement - same as in hook."""
     def __init__(self, input_dim=38, hidden_dim=500, output_dim=38):
         super(JointMLPRefinementModel, self).__init__()
         self.input_dim = input_dim
         self.hidden_dim = hidden_dim
         self.output_dim = output_dim
         
-        # Network for predicting coordinate corrections (residuals)
+        # Main network with residual connection
         self.net = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
             nn.ReLU(inplace=True),
@@ -57,19 +57,25 @@ class JointMLPRefinementModel(nn.Module):
             nn.Linear(hidden_dim, output_dim)
         )
         
-        # Initialize final layer with small weights for stable residual learning
-        nn.init.xavier_normal_(self.net[-1].weight, gain=0.1)
-        nn.init.zeros_(self.net[-1].bias)
+        # Residual projection (if dimensions don't match)
+        self.residual_proj = None
+        if input_dim != output_dim:
+            self.residual_proj = nn.Linear(input_dim, output_dim)
 
     def forward(self, x):
-        # Predict coordinate corrections (residuals)
-        corrections = self.net(x)
+        # Main forward pass
+        out = self.net(x)
         
-        # Return the corrections (to be added to input coordinates)
-        return corrections
+        # Add residual connection
+        if self.residual_proj is not None:
+            residual = self.residual_proj(x)
+        else:
+            residual = x
+            
+        return out + 0.1 * residual  # Small residual weight to start
 
-def apply_joint_mlp_refinement(predictions, mlp_joint, scaler_input, device):
-    """Apply joint MLP residual refinement to predictions."""
+def apply_joint_mlp_refinement(predictions, mlp_joint, scaler_input, scaler_target, device, residual_learning=True):
+    """Apply joint MLP refinement to predictions."""
     try:
         # Flatten predictions to 38-D vector [x1, y1, x2, y2, ..., x19, y19]
         pred_flat = predictions.flatten().reshape(1, -1)
@@ -80,12 +86,18 @@ def apply_joint_mlp_refinement(predictions, mlp_joint, scaler_input, device):
         # Convert to tensor
         pred_tensor = torch.FloatTensor(pred_scaled).to(device)
         
-        # Apply joint MLP to get residual corrections
+        # Apply joint MLP refinement
         with torch.no_grad():
-            predicted_corrections = mlp_joint(pred_tensor).cpu().numpy().flatten()
-        
-        # Add corrections to original predictions (residual learning)
-        refined_flat = pred_flat.flatten() + predicted_corrections
+            if residual_learning:
+                # MLP predicts corrections (residuals)
+                corrections = mlp_joint(pred_tensor).cpu().numpy().flatten()
+                # Apply corrections directly (no denormalization needed for residuals)
+                refined_flat = pred_flat.flatten() + corrections
+            else:
+                # MLP predicts absolute coordinates
+                refined_scaled = mlp_joint(pred_tensor).cpu().numpy()
+                # Denormalize outputs
+                refined_flat = scaler_target.inverse_transform(refined_scaled).flatten()
         
         # Reshape back to [19, 2] format
         refined_coords = refined_flat.reshape(19, 2)
@@ -93,7 +105,7 @@ def apply_joint_mlp_refinement(predictions, mlp_joint, scaler_input, device):
         return refined_coords
         
     except Exception as e:
-        print(f"Joint MLP residual refinement failed: {e}")
+        print(f"Joint MLP refinement failed: {e}")
         return predictions
 
 def compute_metrics(pred_coords, gt_coords, landmark_names):
@@ -271,25 +283,52 @@ def main():
     landmark_names = cephalometric_dataset_info.landmark_names_in_order
     landmark_cols = cephalometric_dataset_info.original_landmark_cols
     
-    # Load saved joint normalization scalers
-    print("Loading saved joint normalization scaler for residual learning...")
+    # Load saved joint normalization scalers and configuration
+    print("Loading saved joint normalization scalers and configuration...")
     scaler_dir = os.path.join(args.work_dir, "concurrent_mlp")
     
-    scaler_input_path = os.path.join(scaler_dir, "scaler_joint_input.pkl")
+    # Load MLP configuration
+    config_path = os.path.join(scaler_dir, "mlp_config.json")
+    residual_learning = True  # Default to residual learning
     
-    # Check if scaler exists
-    if not os.path.exists(scaler_input_path):
-        print(f"ERROR: Missing joint scaler file: {scaler_input_path}")
-        print("This indicates that concurrent joint MLP training hasn't run yet or scaler wasn't saved.")
+    if os.path.exists(config_path):
+        try:
+            import json
+            with open(config_path, 'r') as f:
+                mlp_config = json.load(f)
+            residual_learning = mlp_config.get('residual_learning', True)
+            print(f"✓ MLP configuration loaded: residual_learning={residual_learning}")
+        except Exception as e:
+            print(f"Warning: Could not load MLP config: {e}")
+            print("Using default: residual_learning=True")
+    else:
+        print("Warning: MLP config file not found, using default: residual_learning=True")
+    
+    scaler_input_path = os.path.join(scaler_dir, "scaler_joint_input.pkl")
+    scaler_target_path = os.path.join(scaler_dir, "scaler_joint_target.pkl")
+    
+    # Check if scalers exist
+    scaler_files = [scaler_input_path]
+    if not residual_learning:
+        scaler_files.append(scaler_target_path)
+    
+    missing_scalers = [f for f in scaler_files if not os.path.exists(f)]
+    
+    if missing_scalers:
+        print(f"ERROR: Missing joint scaler files: {missing_scalers}")
+        print("This indicates that concurrent joint MLP training hasn't run yet or scalers weren't saved.")
         print("Please run concurrent joint training first.")
         return
     
-    # Load scaler
+    # Load scalers
     try:
         scaler_input = joblib.load(scaler_input_path)
-        print("✓ Joint normalization scaler loaded successfully for residual learning")
+        scaler_target = None
+        if not residual_learning:
+            scaler_target = joblib.load(scaler_target_path)
+        print("✓ Joint normalization scalers loaded successfully")
     except Exception as e:
-        print(f"ERROR: Failed to load joint scaler: {e}")
+        print(f"ERROR: Failed to load joint scalers: {e}")
         return
     
     # Evaluation on test set
@@ -339,7 +378,7 @@ def main():
             
             # Apply joint MLP refinement
             refined_keypoints = apply_joint_mlp_refinement(
-                pred_keypoints, mlp_joint, scaler_input, device
+                pred_keypoints, mlp_joint, scaler_input, scaler_target, device, residual_learning
             )
             
             # Store results
