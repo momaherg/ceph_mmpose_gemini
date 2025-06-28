@@ -279,6 +279,17 @@ class ConcurrentMLPTrainingHook(Hook):
                             if not isinstance(inputs, torch.Tensor):
                                 inputs = torch.stack([inp for inp in inputs])
                             
+                            # Ensure proper dtype and normalization
+                            if inputs.dtype == torch.uint8:
+                                # Convert from uint8 [0, 255] to float32 [0, 1] and then normalize
+                                inputs = inputs.float() / 255.0
+                                
+                                # Apply ImageNet normalization (same as training pipeline)
+                                # Mean: [0.485, 0.456, 0.406], Std: [0.229, 0.224, 0.225]
+                                mean = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1).to(inputs.device)
+                                std = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1).to(inputs.device)
+                                inputs = (inputs - mean) / std
+                            
                             # Move to device if needed
                             if inputs.device != self.device:
                                 inputs = inputs.to(self.device, non_blocking=True)
