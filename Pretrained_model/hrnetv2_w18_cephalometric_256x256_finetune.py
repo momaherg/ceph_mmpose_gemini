@@ -11,17 +11,17 @@ optim_wrapper = dict(
                    norm_type=2)
 )
 
-# Learning rate scheduler with warm-up and step decay
+# Learning rate scheduler with warm-up and cosine annealing
 param_scheduler = [
     dict(type='LinearLR', begin=0, end=500, start_factor=1e-3, by_epoch=False),  # Warm-up
-    # dict(type='CosineAnnealingLR', T_max=100, eta_min=1e-6, by_epoch=True)  # Cosine annealing - updated T_max to match max_epochs
-    dict(
-        type='MultiStepLR',
-        begin=0,
-        end=100,
-        by_epoch=True,
-        milestones=[70, 90],  # Decay LR at epoch 70 and 90
-        gamma=0.1)
+    dict(type='CosineAnnealingLR', begin=0, end=100, T_max=100, eta_min=1e-6, by_epoch=True)  # Cosine annealing for the main training
+    # dict(
+    #     type='MultiStepLR',
+    #     begin=0,
+    #     end=100,
+    #     by_epoch=True,
+    #     milestones=[70, 90],  # Decay LR at epoch 70 and 90
+    #     gamma=0.1)
 ]
 
 # Dataset settings

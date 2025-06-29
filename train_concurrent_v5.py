@@ -227,10 +227,12 @@ def main():
     
     print(f"\n⚙️  Training Parameters:")
     print(f"   • HRNet epochs: {cfg.train_cfg.max_epochs}")
+    print(f"   • HRNet LR scheduler: Cosine Annealing")
     print(f"   • MLP epochs per cycle: 100")
     print(f"   • MLP batch size: 16")
-    print(f"   • MLP learning rate: 1e-5")
+    print(f"   • MLP learning rate: 1e-4 with Cosine Annealing scheduler")
     print(f"   • MLP weight decay: 1e-4")
+    print(f"   • MLP loss function: SmoothL1Loss (robust for residuals)")
     
     print(f"\n🔒 Independence:")
     print(f"   • MLP gradients do NOT propagate back to HRNet")

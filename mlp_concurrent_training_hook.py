@@ -43,7 +43,7 @@ custom_hooks = [
         type='ConcurrentMLPTrainingHook',
         mlp_epochs=100,
         mlp_batch_size=16,
-        mlp_lr=1e-5,
+        mlp_lr=1e-4,  # Increased LR for residual learning
         mlp_weight_decay=1e-4,
         hard_example_threshold=5.0,  # MRE threshold for oversampling
         log_interval=20
@@ -166,7 +166,7 @@ class ConcurrentMLPTrainingHook(Hook):
         self,
         mlp_epochs: int = 100,
         mlp_batch_size: int = 16,
-        mlp_lr: float = 1e-5,
+        mlp_lr: float = 1e-4,  # Increased default LR for residual learning
         mlp_weight_decay: float = 1e-4,
         hard_example_threshold: float = 5.0,  # MRE threshold in pixels
         log_interval: int = 50,
@@ -181,7 +181,8 @@ class ConcurrentMLPTrainingHook(Hook):
         # These will be initialised in before_run
         self.mlp_joint: JointMLPRefinementModel | None = None
         self.opt_joint: optim.Optimizer | None = None
-        self.criterion = nn.MSELoss()
+        self.scheduler_joint: optim.lr_scheduler.LRScheduler | None = None # Cosine scheduler for MLP
+        self.criterion = nn.SmoothL1Loss()  # Switched to SmoothL1Loss for robust residual training
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         
         # Normalization scalers - updated incrementally with partial_fit
@@ -198,6 +199,7 @@ class ConcurrentMLPTrainingHook(Hook):
 
         self.mlp_joint = JointMLPRefinementModel().to(self.device)
         self.opt_joint = optim.Adam(self.mlp_joint.parameters(), lr=self.mlp_lr, weight_decay=self.mlp_weight_decay)
+        self.scheduler_joint = optim.lr_scheduler.CosineAnnealingLR(self.opt_joint, T_max=self.mlp_epochs, eta_min=1e-7)
         
         # Note: Scalers will be initialized incrementally with partial_fit during first epoch
         
@@ -612,7 +614,7 @@ class ConcurrentMLPTrainingHook(Hook):
         ds_joint = _MLPDataset(preds_scaled, residuals_scaled, sample_weights)
         dl_joint = data.DataLoader(ds_joint, batch_size=self.mlp_batch_size, shuffle=True, pin_memory=True)
 
-        def _train_joint(model: JointMLPRefinementModel, optimiser: optim.Optimizer, loader: data.DataLoader, initial_mre: float):
+        def _train_joint(model: JointMLPRefinementModel, optimiser: optim.Optimizer, scheduler: optim.lr_scheduler.LRScheduler, loader: data.DataLoader, initial_mre: float):
             model.train()
             total_loss = 0.0
             for ep in range(self.mlp_epochs):
@@ -629,11 +631,14 @@ class ConcurrentMLPTrainingHook(Hook):
 
                     epoch_loss += loss.item()
                 
+                scheduler.step() # Update learning rate
+                
                 total_loss = epoch_loss / len(loader)
                 if (ep + 1) % 20 == 0:
-                    logger.info(f'[ConcurrentMLPTrainingHook] Joint-MLP epoch {ep+1}/{self.mlp_epochs} | Residual loss: {total_loss:.6f}, Initial MRE: {initial_mre:.3f} pixels')
+                    current_lr = scheduler.get_last_lr()[0]
+                    logger.info(f'[ConcurrentMLPTrainingHook] Joint-MLP epoch {ep+1}/{self.mlp_epochs} | Loss: {total_loss:.6f} | LR: {current_lr:.2e} | Initial MRE: {initial_mre:.3f}px')
 
-        _train_joint(self.mlp_joint, self.opt_joint, dl_joint, initial_mre)
+        _train_joint(self.mlp_joint, self.opt_joint, self.scheduler_joint, dl_joint, initial_mre)
 
         logger.info('[ConcurrentMLPTrainingHook] Finished joint MLP residual prediction update for this HRNet epoch.')
         
