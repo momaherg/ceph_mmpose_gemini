@@ -79,6 +79,11 @@ def main():
         default=None,
         help='Path to a text file containing patient IDs for the test set, one ID per line.'
     )
+    parser.add_argument(
+        '--enable-hrnet-oversampling',
+        action='store_true',
+        help='Enable hard-example oversampling for the main HRNetV2 model.'
+    )
     args = parser.parse_args()
     
     print("="*80)
@@ -116,6 +121,26 @@ def main():
     except Exception as e:
         print(f"✗ Failed to load config: {e}")
         return
+    
+    # Configure the concurrent training hook
+    if args.enable_hrnet_oversampling:
+        print("🚀 ENABLING HRNetv2 hard-example oversampling.")
+    else:
+        print("ℹ️  HRNetv2 hard-example oversampling is DISABLED. To enable, use --enable-hrnet-oversampling.")
+
+    cfg.custom_hooks = [
+        dict(
+            type='ConcurrentMLPTrainingHook',
+            mlp_epochs=100,
+            mlp_batch_size=16,
+            mlp_lr=1e-4,
+            mlp_weight_decay=1e-4,
+            hard_example_threshold=5.0,
+            log_interval=50,
+            enable_hrnet_oversampling=args.enable_hrnet_oversampling,
+            hrnet_oversample_weight=2.0
+        )
+    ]
     
     # Set work directory
     cfg.work_dir = os.path.abspath(work_dir)
