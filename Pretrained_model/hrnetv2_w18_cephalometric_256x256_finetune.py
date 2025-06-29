@@ -155,6 +155,7 @@ custom_hooks = [
         mlp_lr=1e-5,                 # MLP learning rate (same as standalone training)
         mlp_weight_decay=1e-4,       # MLP weight decay
         hard_example_threshold=5.0,  # MRE threshold for hard-example oversampling (pixels)
-        log_interval=20              # Log MLP training progress every 20 epochs
+        log_interval=20,             # Log MLP training progress every 20 epochs
+        inference_batch_size=80      # Batch size for HRNet inference step
     )
 ] 

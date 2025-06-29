@@ -34,7 +34,8 @@ custom_hooks = [
         mlp_lr=1e-5,
         mlp_weight_decay=1e-4,
         hard_example_threshold=5.0,  # MRE threshold for oversampling
-        log_interval=20
+        log_interval=20,
+        inference_batch_size=80
     )
 ]
 ```
@@ -164,6 +165,7 @@ class ConcurrentMLPTrainingHook(Hook):
         mlp_weight_decay: float = 1e-4,
         hard_example_threshold: float = 5.0,  # MRE threshold in pixels
         log_interval: int = 50,
+        inference_batch_size: int = 80,
     ) -> None:
         self.mlp_epochs = mlp_epochs
         self.mlp_batch_size = mlp_batch_size
@@ -171,6 +173,7 @@ class ConcurrentMLPTrainingHook(Hook):
         self.mlp_weight_decay = mlp_weight_decay
         self.hard_example_threshold = hard_example_threshold
         self.log_interval = log_interval
+        self.inference_batch_size = inference_batch_size
 
         # These will be initialised in before_run
         self.mlp_joint: JointMLPRefinementModel | None = None
@@ -277,6 +280,8 @@ class ConcurrentMLPTrainingHook(Hook):
                     landmark_cols = cephalometric_dataset_info.original_landmark_cols
                     
                     processed_count = 0
+                    img_batch = []
+                    gt_batch = []
                     
                     for idx, row in tqdm(df.iterrows(), total=len(df), disable=runner.rank != 0, desc="GPU Inference from File"):
                         try:
@@ -300,38 +305,48 @@ class ConcurrentMLPTrainingHook(Hook):
                                 continue
                                 
                             gt_keypoints = np.array(gt_keypoints)
+                            img_batch.append(img_array)
+                            gt_batch.append(gt_keypoints)
                             
-                            # Run inference with the standard mmpose API
-                            bbox = np.array([[0, 0, 224, 224]], dtype=np.float32)
-                            results = inference_topdown(model, img_array, bboxes=bbox, bbox_format='xyxy')
-                            
-                            if results and len(results) > 0:
-                                pred_keypoints = results[0].pred_instances.keypoints[0]
-                                pred_keypoints = tensor_to_numpy(pred_keypoints)
-                            else:
-                                continue
-                            
-                            if pred_keypoints is None or pred_keypoints.shape[0] != 19:
-                                continue
-                            
-                            # Flatten coordinates to 38-D vectors
-                            pred_flat = pred_keypoints.flatten()  # [x1, y1, x2, y2, ..., x19, y19]
-                            gt_flat = gt_keypoints.flatten()
-                            
-                            # Calculate per-landmark radial errors for hard-example detection
-                            landmark_errors = np.sqrt(np.sum((pred_keypoints - gt_keypoints)**2, axis=1))
-                            
-                            # Store data
-                            all_preds.append(pred_flat)
-                            all_gts.append(gt_flat)
-                            all_errors.append(landmark_errors)
-                            
-                            processed_count += 1
-                            
+                            # Process batch when full or at the end
+                            if len(img_batch) >= self.inference_batch_size or idx == len(df) - 1:
+                                if not img_batch: continue
+                                
+                                # Run batch inference
+                                bboxes = np.array([[0, 0, 224, 224]] * len(img_batch), dtype=np.float32)
+                                results = inference_topdown(model, img_batch, bboxes=bboxes, bbox_format='xyxy')
+                                
+                                for i, res_datasample in enumerate(results):
+                                    if res_datasample and hasattr(res_datasample, 'pred_instances') and len(res_datasample.pred_instances.keypoints) > 0:
+                                        pred_keypoints = tensor_to_numpy(res_datasample.pred_instances.keypoints[0])
+                                        current_gt_keypoints = gt_batch[i]
+
+                                        if pred_keypoints is None or pred_keypoints.shape[0] != 19:
+                                            continue
+                                        
+                                        # Flatten coordinates to 38-D vectors
+                                        pred_flat = pred_keypoints.flatten()
+                                        gt_flat = current_gt_keypoints.flatten()
+                                        
+                                        # Calculate per-landmark radial errors
+                                        landmark_errors = np.sqrt(np.sum((pred_keypoints - current_gt_keypoints)**2, axis=1))
+                                        
+                                        # Store data
+                                        all_preds.append(pred_flat)
+                                        all_gts.append(gt_flat)
+                                        all_errors.append(landmark_errors)
+                                
+                                # Clear batches for next iteration
+                                img_batch.clear()
+                                gt_batch.clear()
+
                         except Exception as e:
                             logger.warning(f'[ConcurrentMLPTrainingHook] Failed to process sample {idx}: {e}')
+                            img_batch.clear()
+                            gt_batch.clear()
                             continue
                     
+                    processed_count = len(all_preds)
                     logger.info(f'[ConcurrentMLPTrainingHook] Successfully processed {processed_count} samples from file')
                     
                 except Exception as e:
@@ -343,6 +358,8 @@ class ConcurrentMLPTrainingHook(Hook):
                 logger.info('[ConcurrentMLPTrainingHook] Using dataset iteration method')
                 
                 processed_count = 0
+                img_batch = []
+                gt_batch = []
                 
                 for idx in tqdm(range(len(train_dataset)), disable=runner.rank != 0, desc="Dataset Inference"):
                     try:
@@ -368,40 +385,51 @@ class ConcurrentMLPTrainingHook(Hook):
                                 continue
                         else:
                             continue
+                            
+                        img_batch.append(img_np)
+                        gt_batch.append(gt_kpts)
                         
-                        # Run inference with the standard mmpose API
-                        bbox = np.array([[0, 0, 224, 224]], dtype=np.float32)
-                        results = inference_topdown(model, img_np, bboxes=bbox, bbox_format='xyxy')
+                        # Process batch when full or at the end
+                        if len(img_batch) >= self.inference_batch_size or idx == len(train_dataset) - 1:
+                            if not img_batch: continue
                         
-                        if results and len(results) > 0:
-                            pred_kpts = results[0].pred_instances.keypoints[0]
-                            pred_kpts = tensor_to_numpy(pred_kpts)
-                        else:
-                            continue
-                        
-                        if pred_kpts is None or pred_kpts.shape[0] != 19:
-                            continue
-                        
-                        # Flatten coordinates to 38-D vectors
-                        pred_flat = pred_kpts.flatten()
-                        gt_flat = gt_kpts.flatten()
-                        
-                        # Calculate per-landmark radial errors
-                        landmark_errors = np.sqrt(np.sum((pred_kpts - gt_kpts)**2, axis=1))
-                        
-                        # Store data
-                        all_preds.append(pred_flat)
-                        all_gts.append(gt_flat)
-                        all_errors.append(landmark_errors)
-                        
-                        processed_count += 1
+                            # Run inference with the standard mmpose API
+                            bboxes = np.array([[0, 0, 224, 224]] * len(img_batch), dtype=np.float32)
+                            results = inference_topdown(model, img_batch, bboxes=bboxes, bbox_format='xyxy')
+                            
+                            for i, res_datasample in enumerate(results):
+                                if res_datasample and hasattr(res_datasample, 'pred_instances') and len(res_datasample.pred_instances.keypoints) > 0:
+                                    pred_kpts = tensor_to_numpy(res_datasample.pred_instances.keypoints[0])
+                                    current_gt_kpts = gt_batch[i]
+
+                                    if pred_kpts is None or pred_kpts.shape[0] != 19:
+                                        continue
+                                    
+                                    # Flatten coordinates to 38-D vectors
+                                    pred_flat = pred_kpts.flatten()
+                                    gt_flat = current_gt_kpts.flatten()
+                                    
+                                    # Calculate per-landmark radial errors
+                                    landmark_errors = np.sqrt(np.sum((pred_kpts - current_gt_kpts)**2, axis=1))
+                                    
+                                    # Store data
+                                    all_preds.append(pred_flat)
+                                    all_gts.append(gt_flat)
+                                    all_errors.append(landmark_errors)
+
+                            # Clear batches for next iteration
+                            img_batch.clear()
+                            gt_batch.clear()
                         
                     except Exception as e:
                         # Only log every 100th error to avoid spam
                         if idx % 100 == 0:
                             logger.warning(f'[ConcurrentMLPTrainingHook] Failed to process sample {idx}: {e}')
+                        img_batch.clear()
+                        gt_batch.clear()
                         continue
                 
+                processed_count = len(all_preds)
                 logger.info(f'[ConcurrentMLPTrainingHook] Successfully processed {processed_count} samples via dataset iteration')
 
         except Exception as e:
