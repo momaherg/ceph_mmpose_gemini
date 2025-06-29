@@ -48,7 +48,7 @@ custom_hooks = [
         hard_example_threshold=5.0,  # MRE threshold for oversampling
         log_interval=20,
         enable_hrnet_oversampling=True,
-        hrnet_oversample_weight=2.0
+        max_oversample_weight=5.0
     )
 ]
 ```
@@ -122,38 +122,6 @@ class JointMLPRefinementModel(nn.Module):
         return residuals
 
 
-class _MLPDataset(data.Dataset):
-    """In-memory dataset with hard-example oversampling for residual learning."""
-
-    def __init__(self, preds: np.ndarray, residuals: np.ndarray, sample_weights: np.ndarray = None):
-        # preds: [N, 38] (input predictions), residuals: [N, 38] (target corrections)
-        assert preds.shape == residuals.shape
-        self.preds = torch.from_numpy(preds).float()
-        self.residuals = torch.from_numpy(residuals).float()
-        
-        # Create weighted sampling indices for hard examples
-        if sample_weights is not None:
-            # Oversample hard examples by duplicating their indices
-            self.indices = []
-            for i, weight in enumerate(sample_weights):
-                # Add base sample
-                self.indices.append(i)
-                # Add extra copies for hard examples (weight > 1)
-                extra_copies = int(weight) - 1
-                for _ in range(extra_copies):
-                    self.indices.append(i)
-            self.indices = np.array(self.indices)
-        else:
-            self.indices = np.arange(len(self.preds))
-
-    def __len__(self):
-        return len(self.indices)
-
-    def __getitem__(self, idx):
-        actual_idx = self.indices[idx]
-        return self.preds[actual_idx], self.residuals[actual_idx]
-
-
 # -----------------------------------------------------------------------------
 #  Hook implementation
 # -----------------------------------------------------------------------------
@@ -173,7 +141,7 @@ class ConcurrentMLPTrainingHook(Hook):
         hard_example_threshold: float = 5.0,  # MRE threshold in pixels
         log_interval: int = 50,
         enable_hrnet_oversampling: bool = False,
-        hrnet_oversample_weight: float = 2.0,
+        max_oversample_weight: float = 5.0,
     ) -> None:
         self.mlp_epochs = mlp_epochs
         self.mlp_batch_size = mlp_batch_size
@@ -182,7 +150,7 @@ class ConcurrentMLPTrainingHook(Hook):
         self.hard_example_threshold = hard_example_threshold
         self.log_interval = log_interval
         self.enable_hrnet_oversampling = enable_hrnet_oversampling
-        self.hrnet_oversample_weight = hrnet_oversample_weight
+        self.max_oversample_weight = max_oversample_weight
 
         # These will be initialised in before_run
         self.mlp_joint: JointMLPRefinementModel | None = None
@@ -195,8 +163,8 @@ class ConcurrentMLPTrainingHook(Hook):
         self.scaler_input: StandardScaler | None = None
         self.scaler_residual: StandardScaler | None = None
         
-        # To store hard example indices for HRNet oversampling in the next epoch
-        self.hard_example_indices: Optional[List[int]] = None
+        # To store sample weights for HRNet oversampling in the next epoch
+        self.hrnet_next_epoch_sample_weights: Optional[torch.Tensor] = None
 
     # ---------------------------------------------------------------------
     # MMEngine lifecycle methods
@@ -218,7 +186,7 @@ class ConcurrentMLPTrainingHook(Hook):
 
         if self.enable_hrnet_oversampling:
             logger.info('[ConcurrentMLPTrainingHook] HRNet hard-example oversampling is ENABLED.')
-            logger.info(f'[ConcurrentMLPTrainingHook] HRNet oversample weight: {self.hrnet_oversample_weight}')
+            logger.info(f'[ConcurrentMLPTrainingHook] HRNet dynamic oversample weight capped at: {self.max_oversample_weight}')
         else:
             logger.info('[ConcurrentMLPTrainingHook] HRNet hard-example oversampling is DISABLED.')
 
@@ -229,20 +197,17 @@ class ConcurrentMLPTrainingHook(Hook):
 
         logger: MMLogger = runner.logger
         
-        if self.hard_example_indices is None:
-            logger.info('[ConcurrentMLPTrainingHook] No hard examples identified from a previous epoch. Training on original dataset.')
+        if self.hrnet_next_epoch_sample_weights is None:
+            logger.info('[ConcurrentMLPTrainingHook] No sample weights from previous epoch. Training on original dataset.')
             return
 
-        logger.info(f'[ConcurrentMLPTrainingHook] Recreating HRNet dataloader to oversample {len(self.hard_example_indices)} hard examples from the previous epoch.')
+        logger.info(f'[ConcurrentMLPTrainingHook] Recreating HRNet dataloader with dynamic sample weights from the previous epoch.')
 
         original_loader = runner.train_dataloader
         dataset = original_loader.dataset
         
-        # Create weights for sampling: higher weight for hard examples
-        weights = torch.ones(len(dataset))
-        if self.hard_example_indices:
-            # Use torch.LongTensor to index the weights tensor
-            weights[torch.LongTensor(self.hard_example_indices)] = self.hrnet_oversample_weight
+        # The weights are pre-computed from the previous epoch's `after_train_epoch`
+        weights = self.hrnet_next_epoch_sample_weights
         
         # Create a new weighted random sampler. replacement=True is important for oversampling.
         sampler = torch.utils.data.WeightedRandomSampler(
@@ -606,22 +571,28 @@ class ConcurrentMLPTrainingHook(Hook):
         # -----------------------------------------------------------------
         # Determine sample weights based on maximum landmark error per sample
         max_errors_per_sample = np.max(all_errors, axis=1)  # [N,] - worst landmark per sample
-        hard_examples = max_errors_per_sample > self.hard_example_threshold
         
-        # Create sample weights: 1.0 for normal, 2.0 for hard examples
-        sample_weights = np.ones(len(all_preds))
-        sample_weights[hard_examples] = 2.0
+        # Calculate dynamic weights: 1.0 for easy examples, >1.0 for hard examples
+        # The weight is proportional to how much the error exceeds the threshold.
+        sample_weights = np.maximum(1.0, max_errors_per_sample / self.hard_example_threshold)
         
-        num_hard_examples = np.sum(hard_examples)
+        # Cap the weights to prevent extreme outliers from dominating
+        sample_weights = np.minimum(sample_weights, self.max_oversample_weight)
+        
+        num_hard_examples = np.sum(max_errors_per_sample > self.hard_example_threshold)
         logger.info(f'[ConcurrentMLPTrainingHook] Hard examples (>{self.hard_example_threshold}px): {num_hard_examples}/{len(all_preds)} ({num_hard_examples/len(all_preds)*100:.1f}%)')
         
-        # Store hard example indices for HRNet oversampling in the *next* epoch
+        # Store sample weights for HRNet oversampling in the *next* epoch
         if self.enable_hrnet_oversampling:
-            self.hard_example_indices = np.where(hard_examples)[0].tolist()
-            logger.info(f'[ConcurrentMLPTrainingHook] Stored {len(self.hard_example_indices)} hard example indices for next HRNet epoch.')
+            self.hrnet_next_epoch_sample_weights = torch.from_numpy(sample_weights).double()
+            logger.info(f'[ConcurrentMLPTrainingHook] Stored {len(self.hrnet_next_epoch_sample_weights)} dynamic sample weights for next HRNet epoch.')
 
         if num_hard_examples > 0:
-            logger.info(f'[ConcurrentMLPTrainingHook] Hard example errors: min={np.min(max_errors_per_sample[hard_examples]):.2f}, max={np.max(max_errors_per_sample[hard_examples]):.2f}, mean={np.mean(max_errors_per_sample[hard_examples]):.2f}')
+            hard_example_errors = max_errors_per_sample[max_errors_per_sample > self.hard_example_threshold]
+            logger.info(f'[ConcurrentMLPTrainingHook] Hard example errors: min={np.min(hard_example_errors):.2f}, max={np.max(hard_example_errors):.2f}, mean={np.mean(hard_example_errors):.2f}')
+            
+            hard_example_weights = sample_weights[max_errors_per_sample > self.hard_example_threshold]
+            logger.info(f'[ConcurrentMLPTrainingHook] Corresponding sample weights: min={np.min(hard_example_weights):.2f}, max={np.max(hard_example_weights):.2f}, mean={np.mean(hard_example_weights):.2f}')
 
         # -----------------------------------------------------------------
         # Step 2: Calculate residuals and update scalers incrementally
@@ -677,9 +648,10 @@ class ConcurrentMLPTrainingHook(Hook):
         # Calculate initial MRE in pixels before MLP refinement for meaningful logging
         initial_mre = self._calculate_mre_pixels(all_preds, all_gts)
 
-        # Build dataset with hard-example oversampling (using residuals as targets)
-        ds_joint = _MLPDataset(preds_scaled, residuals_scaled, sample_weights)
-        dl_joint = data.DataLoader(ds_joint, batch_size=self.mlp_batch_size, shuffle=True, pin_memory=True)
+        # Build dataset and dataloader with weighted sampling for the MLP
+        ds_joint = data.TensorDataset(torch.from_numpy(preds_scaled).float(), torch.from_numpy(residuals_scaled).float())
+        sampler_joint = data.WeightedRandomSampler(sample_weights, num_samples=len(ds_joint), replacement=True)
+        dl_joint = data.DataLoader(ds_joint, batch_size=self.mlp_batch_size, sampler=sampler_joint, pin_memory=True, num_workers=4)
 
         def _train_joint(model: JointMLPRefinementModel, optimiser: optim.Optimizer, scheduler: optim.lr_scheduler.LRScheduler, loader: data.DataLoader, initial_mre: float):
             model.train()

@@ -84,6 +84,12 @@ def main():
         action='store_true',
         help='Enable hard-example oversampling for the main HRNetV2 model.'
     )
+    parser.add_argument(
+        '--max-oversample-weight',
+        type=float,
+        default=5.0,
+        help='The maximum weight cap for a single sample during hard-example oversampling.'
+    )
     args = parser.parse_args()
     
     print("="*80)
@@ -138,7 +144,7 @@ def main():
             hard_example_threshold=5.0,
             log_interval=50,
             enable_hrnet_oversampling=args.enable_hrnet_oversampling,
-            hrnet_oversample_weight=2.0
+            max_oversample_weight=args.max_oversample_weight
         )
     ]
     
