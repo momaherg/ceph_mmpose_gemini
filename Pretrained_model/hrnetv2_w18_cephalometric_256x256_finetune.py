@@ -11,17 +11,17 @@ optim_wrapper = dict(
                    norm_type=2)
 )
 
-# Learning rate scheduler with warm-up and cosine annealing
+# Learning rate scheduler with warm-up and step decay
 param_scheduler = [
     dict(type='LinearLR', begin=0, end=500, start_factor=1e-3, by_epoch=False),  # Warm-up
-    dict(type='CosineAnnealingLR', begin=0, end=100, T_max=100, eta_min=1e-6, by_epoch=True)  # Cosine annealing for the main training
-    # dict(
-    #     type='MultiStepLR',
-    #     begin=0,
-    #     end=100,
-    #     by_epoch=True,
-    #     milestones=[70, 90],  # Decay LR at epoch 70 and 90
-    #     gamma=0.1)
+    # dict(type='CosineAnnealingLR', T_max=100, eta_min=1e-6, by_epoch=True)  # Cosine annealing - updated T_max to match max_epochs
+    dict(
+        type='MultiStepLR',
+        begin=0,
+        end=100,
+        by_epoch=True,
+        milestones=[70, 90],  # Decay LR at epoch 70 and 90
+        gamma=0.1)
 ]
 
 # Dataset settings
@@ -138,23 +138,21 @@ test_evaluator = val_evaluator
 #    visualization=dict(enable=True, type='PoseVisualizationHook')) 
 
 # =========================================================================
-# CONCURRENT JOINT MLP TRAINING HOOK
+# CONCURRENT MLP TRAINING HOOK
 # =========================================================================
-# This hook trains a joint MLP refinement model on-the-fly during HRNetV2 training.
+# This hook trains MLP refinement models on-the-fly during HRNetV2 training.
 # After each HRNet epoch, it:
 # 1. Runs inference on training data using current HRNet weights
-# 2. Trains a joint 38-D MLP model (all coordinates together) for 100 epochs
-# 3. Implements hard-example oversampling for samples with high landmark errors
-# 4. Keeps MLP parameters independent (no gradient leakage to HRNet)
+# 2. Trains separate MLP models (X and Y coordinates) for 100 epochs
+# 3. Keeps MLP parameters independent (no gradient leakage to HRNet)
 
 custom_hooks = [
     dict(
         type='ConcurrentMLPTrainingHook',
-        mlp_epochs=100,              # Train joint MLP for 100 epochs after each HRNet epoch
+        mlp_epochs=100,              # Train MLPs for 100 epochs after each HRNet epoch
         mlp_batch_size=16,           # MLP batch size
         mlp_lr=1e-5,                 # MLP learning rate (same as standalone training)
         mlp_weight_decay=1e-4,       # MLP weight decay
-        hard_example_threshold=5.0,  # MRE threshold for hard-example oversampling (pixels)
         log_interval=20              # Log MLP training progress every 20 epochs
     )
 ] 

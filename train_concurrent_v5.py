@@ -79,17 +79,6 @@ def main():
         default=None,
         help='Path to a text file containing patient IDs for the test set, one ID per line.'
     )
-    parser.add_argument(
-        '--enable-hrnet-oversampling',
-        action='store_true',
-        help='Enable hard-example oversampling for the main HRNetV2 model.'
-    )
-    parser.add_argument(
-        '--max-oversample-weight',
-        type=float,
-        default=5.0,
-        help='The maximum weight cap for a single sample during hard-example oversampling.'
-    )
     args = parser.parse_args()
     
     print("="*80)
@@ -127,26 +116,6 @@ def main():
     except Exception as e:
         print(f"✗ Failed to load config: {e}")
         return
-    
-    # Configure the concurrent training hook
-    if args.enable_hrnet_oversampling:
-        print("🚀 ENABLING HRNetv2 hard-example oversampling.")
-    else:
-        print("ℹ️  HRNetv2 hard-example oversampling is DISABLED. To enable, use --enable-hrnet-oversampling.")
-
-    cfg.custom_hooks = [
-        dict(
-            type='ConcurrentMLPTrainingHook',
-            mlp_epochs=100,
-            mlp_batch_size=16,
-            mlp_lr=1e-4,
-            mlp_weight_decay=1e-4,
-            hard_example_threshold=5.0,
-            log_interval=50,
-            enable_hrnet_oversampling=args.enable_hrnet_oversampling,
-            max_oversample_weight=args.max_oversample_weight
-        )
-    ]
     
     # Set work directory
     cfg.work_dir = os.path.abspath(work_dir)
@@ -258,12 +227,10 @@ def main():
     
     print(f"\n⚙️  Training Parameters:")
     print(f"   • HRNet epochs: {cfg.train_cfg.max_epochs}")
-    print(f"   • HRNet LR scheduler: Cosine Annealing")
     print(f"   • MLP epochs per cycle: 100")
     print(f"   • MLP batch size: 16")
-    print(f"   • MLP learning rate: 1e-4 with Cosine Annealing scheduler")
+    print(f"   • MLP learning rate: 1e-5")
     print(f"   • MLP weight decay: 1e-4")
-    print(f"   • MLP loss function: SmoothL1Loss (robust for residuals)")
     
     print(f"\n🔒 Independence:")
     print(f"   • MLP gradients do NOT propagate back to HRNet")
