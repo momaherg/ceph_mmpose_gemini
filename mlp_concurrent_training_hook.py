@@ -2,23 +2,26 @@
 """
 Concurrent MLP Training Hook for MMEngine / MMPose
 -------------------------------------------------
-This hook trains two MLP refinement models (one for X, one for Y) **concurrently**
-with HRNetV2 training.  After every HRNet training epoch, the hook:
+This hook trains a joint MLP refinement model **concurrently** with HRNetV2 training.  
+After every HRNet training epoch, the hook:
 
 1.  Runs inference on the entire *training* dataloader using the *current*
     HRNetV2 weights to obtain predicted landmark coordinates.
 2.  Creates an in-memory dataset of (predicted → ground-truth) coordinate pairs.
-3.  Trains each MLP for a fixed number of epochs (default: 100).
+3.  Trains a joint MLP for a fixed number of epochs (default: 100).
+4.  Implements hard-example oversampling for samples with high landmark errors.
 
 Important design decisions:
+•   **Joint 38-D model** – Single MLP that predicts all 38 coordinates (19 x,y pairs)
+    allowing the network to learn cross-correlations between X and Y axes.
+•   **Hard-example oversampling** – Samples with any landmark MRE > threshold get
+    duplicated in the training batch to focus learning on difficult cases.
 •   **One-time initialisation** – MLP weights, optimisers and scalers are created
     once in `before_run` and *persist* across the whole HRNet training.
 •   **No gradient leakage** – MLP training is completely detached from the
     HRNetV2 computation graph (`torch.no_grad()`), so gradients do **not**
     propagate back.
 •   **CPU/GPU awareness** – Trains on GPU if available, else CPU.
-•   **Lightweight aggregation** – Keeps everything in RAM; suitable for ≈1.5k
-    images.
 
 To enable this hook, add to your config:
 
@@ -30,7 +33,8 @@ custom_hooks = [
         mlp_batch_size=16,
         mlp_lr=1e-5,
         mlp_weight_decay=1e-4,
-        log_interval=20  # optional
+        hard_example_threshold=5.0,  # MRE threshold for oversampling
+        log_interval=20
     )
 ]
 ```
@@ -61,39 +65,85 @@ from sklearn.preprocessing import StandardScaler
 import joblib
 
 # -----------------------------------------------------------------------------
-#  MLP architecture (identical to the one used in train_mlp_refinement.py)
+#  Joint MLP architecture for 38-D coordinate prediction
 # -----------------------------------------------------------------------------
 
-class MLPRefinementModel(nn.Module):
-    """Simple 19→500→19 fully connected network with ReLU + dropout."""
+class JointMLPRefinementModel(nn.Module):
+    """Joint MLP model for landmark coordinate refinement.
+    
+    Input: 38 predicted coordinates (19 landmarks × 2 coordinates)
+    Hidden: 500 neurons with residual connection
+    Output: 38 refined coordinates
+    
+    This allows the network to learn cross-correlations between X and Y axes
+    and between different landmarks.
+    """
 
-    def __init__(self, input_dim: int = 19, hidden_dim: int = 500, output_dim: int = 19):
+    def __init__(self, input_dim: int = 38, hidden_dim: int = 500, output_dim: int = 38):
         super().__init__()
+        self.input_dim = input_dim
+        self.hidden_dim = hidden_dim
+        self.output_dim = output_dim
+        
+        # Main network with residual connection
         self.net = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
             nn.ReLU(inplace=True),
             nn.Dropout(0.1),
-            nn.Linear(hidden_dim, output_dim),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.1),
+            nn.Linear(hidden_dim, output_dim)
         )
+        
+        # Residual projection (if dimensions don't match)
+        self.residual_proj = None
+        if input_dim != output_dim:
+            self.residual_proj = nn.Linear(input_dim, output_dim)
 
     def forward(self, x):
-        return self.net(x)
+        # Main forward pass
+        out = self.net(x)
+        
+        # Add residual connection
+        if self.residual_proj is not None:
+            residual = self.residual_proj(x)
+        else:
+            residual = x
+            
+        return out + 0.1 * residual  # Small residual weight to start
 
 
 class _MLPDataset(data.Dataset):
-    """In-memory dataset of predicted → ground-truth coordinates."""
+    """In-memory dataset with hard-example oversampling."""
 
-    def __init__(self, preds: np.ndarray, gts: np.ndarray):
-        # preds/gts shape: [N, 19]
+    def __init__(self, preds: np.ndarray, gts: np.ndarray, sample_weights: np.ndarray = None):
+        # preds/gts shape: [N, 38] (flattened coordinates)
         assert preds.shape == gts.shape
         self.preds = torch.from_numpy(preds).float()
         self.gts = torch.from_numpy(gts).float()
+        
+        # Create weighted sampling indices for hard examples
+        if sample_weights is not None:
+            # Oversample hard examples by duplicating their indices
+            self.indices = []
+            for i, weight in enumerate(sample_weights):
+                # Add base sample
+                self.indices.append(i)
+                # Add extra copies for hard examples (weight > 1)
+                extra_copies = int(weight) - 1
+                for _ in range(extra_copies):
+                    self.indices.append(i)
+            self.indices = np.array(self.indices)
+        else:
+            self.indices = np.arange(len(self.preds))
 
     def __len__(self):
-        return self.preds.shape[0]
+        return len(self.indices)
 
     def __getitem__(self, idx):
-        return self.preds[idx], self.gts[idx]
+        actual_idx = self.indices[idx]
+        return self.preds[actual_idx], self.gts[actual_idx]
 
 
 # -----------------------------------------------------------------------------
@@ -102,7 +152,7 @@ class _MLPDataset(data.Dataset):
 
 @HOOKS.register_module()
 class ConcurrentMLPTrainingHook(Hook):
-    """MMEngine hook that performs concurrent MLP refinement training."""
+    """MMEngine hook that performs concurrent joint MLP refinement training."""
 
     priority = 'LOW'  # Run after default hooks
 
@@ -112,27 +162,25 @@ class ConcurrentMLPTrainingHook(Hook):
         mlp_batch_size: int = 16,
         mlp_lr: float = 1e-5,
         mlp_weight_decay: float = 1e-4,
+        hard_example_threshold: float = 5.0,  # MRE threshold in pixels
         log_interval: int = 50,
     ) -> None:
         self.mlp_epochs = mlp_epochs
         self.mlp_batch_size = mlp_batch_size
         self.mlp_lr = mlp_lr
         self.mlp_weight_decay = mlp_weight_decay
+        self.hard_example_threshold = hard_example_threshold
         self.log_interval = log_interval
 
         # These will be initialised in before_run
-        self.mlp_x: MLPRefinementModel | None = None
-        self.mlp_y: MLPRefinementModel | None = None
-        self.opt_x: optim.Optimizer | None = None
-        self.opt_y: optim.Optimizer | None = None
+        self.mlp_joint: JointMLPRefinementModel | None = None
+        self.opt_joint: optim.Optimizer | None = None
         self.criterion = nn.MSELoss()
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         
         # Normalization scalers - initialized once and reused
-        self.scaler_x_input: StandardScaler | None = None
-        self.scaler_x_target: StandardScaler | None = None
-        self.scaler_y_input: StandardScaler | None = None
-        self.scaler_y_target: StandardScaler | None = None
+        self.scaler_input: StandardScaler | None = None
+        self.scaler_target: StandardScaler | None = None
         self.scalers_initialized = False
 
     # ---------------------------------------------------------------------
@@ -141,23 +189,22 @@ class ConcurrentMLPTrainingHook(Hook):
 
     def before_run(self, runner: Runner):
         logger: MMLogger = runner.logger
-        logger.info('[ConcurrentMLPTrainingHook] Initialising MLP models …')
+        logger.info('[ConcurrentMLPTrainingHook] Initialising joint 38-D MLP model …')
 
-        self.mlp_x = MLPRefinementModel().to(self.device)
-        self.mlp_y = MLPRefinementModel().to(self.device)
-        self.opt_x = optim.Adam(self.mlp_x.parameters(), lr=self.mlp_lr, weight_decay=self.mlp_weight_decay)
-        self.opt_y = optim.Adam(self.mlp_y.parameters(), lr=self.mlp_lr, weight_decay=self.mlp_weight_decay)
+        self.mlp_joint = JointMLPRefinementModel().to(self.device)
+        self.opt_joint = optim.Adam(self.mlp_joint.parameters(), lr=self.mlp_lr, weight_decay=self.mlp_weight_decay)
         
-        # Initialize scalers
-        self.scaler_x_input = StandardScaler()
-        self.scaler_x_target = StandardScaler()
-        self.scaler_y_input = StandardScaler()
-        self.scaler_y_target = StandardScaler()
+        # Initialize scalers for 38-D input/output
+        self.scaler_input = StandardScaler()
+        self.scaler_target = StandardScaler()
+        
+        logger.info(f'[ConcurrentMLPTrainingHook] Joint MLP initialized with {sum(p.numel() for p in self.mlp_joint.parameters()):,} parameters')
+        logger.info(f'[ConcurrentMLPTrainingHook] Hard-example threshold: {self.hard_example_threshold} pixels')
 
     def after_train_epoch(self, runner: Runner):
-        """After each HRNetV2 epoch, train MLP on-the-fly using current predictions."""
+        """After each HRNetV2 epoch, train joint MLP on-the-fly using current predictions."""
         logger: MMLogger = runner.logger
-        assert self.mlp_x is not None and self.mlp_y is not None
+        assert self.mlp_joint is not None
 
         # -----------------------------------------------------------------
         # Step 1: Generate predictions on training data (GPU-optimized)
@@ -195,13 +242,12 @@ class ConcurrentMLPTrainingHook(Hook):
                 logger.warning(f'[ConcurrentMLPTrainingHook] Could not set dataset_meta: {e}')
         
         model.eval()
-        preds_x: List[np.ndarray] = []
-        preds_y: List[np.ndarray] = []
-        gts_x:   List[np.ndarray] = []
-        gts_y:   List[np.ndarray] = []
+        all_preds: List[np.ndarray] = []
+        all_gts: List[np.ndarray] = []
+        all_errors: List[np.ndarray] = []  # For hard-example detection
 
         train_dataset = runner.train_dataloader.dataset
-        logger.info('[ConcurrentMLPTrainingHook] Generating predictions for MLP on GPU...')
+        logger.info('[ConcurrentMLPTrainingHook] Generating predictions for joint MLP on GPU...')
 
         def tensor_to_numpy(data):
             """Safely convert tensor to numpy, handling both tensor and numpy inputs."""
@@ -268,11 +314,17 @@ class ConcurrentMLPTrainingHook(Hook):
                             if pred_keypoints is None or pred_keypoints.shape[0] != 19:
                                 continue
                             
-                            # Store coordinates
-                            preds_x.append(pred_keypoints[:, 0])
-                            preds_y.append(pred_keypoints[:, 1])
-                            gts_x.append(gt_keypoints[:, 0])
-                            gts_y.append(gt_keypoints[:, 1])
+                            # Flatten coordinates to 38-D vectors
+                            pred_flat = pred_keypoints.flatten()  # [x1, y1, x2, y2, ..., x19, y19]
+                            gt_flat = gt_keypoints.flatten()
+                            
+                            # Calculate per-landmark radial errors for hard-example detection
+                            landmark_errors = np.sqrt(np.sum((pred_keypoints - gt_keypoints)**2, axis=1))
+                            
+                            # Store data
+                            all_preds.append(pred_flat)
+                            all_gts.append(gt_flat)
+                            all_errors.append(landmark_errors)
                             
                             processed_count += 1
                             
@@ -287,7 +339,7 @@ class ConcurrentMLPTrainingHook(Hook):
                     df = None
             
             # Method 2: Fallback to dataset iteration if file method fails
-            if not preds_x:  # No predictions from file method
+            if not all_preds:  # No predictions from file method
                 logger.info('[ConcurrentMLPTrainingHook] Using dataset iteration method')
                 
                 processed_count = 0
@@ -330,11 +382,17 @@ class ConcurrentMLPTrainingHook(Hook):
                         if pred_kpts is None or pred_kpts.shape[0] != 19:
                             continue
                         
-                        # Store coordinates
-                        preds_x.append(pred_kpts[:, 0])
-                        preds_y.append(pred_kpts[:, 1])
-                        gts_x.append(gt_kpts[:, 0])
-                        gts_y.append(gt_kpts[:, 1])
+                        # Flatten coordinates to 38-D vectors
+                        pred_flat = pred_kpts.flatten()
+                        gt_flat = gt_kpts.flatten()
+                        
+                        # Calculate per-landmark radial errors
+                        landmark_errors = np.sqrt(np.sum((pred_kpts - gt_kpts)**2, axis=1))
+                        
+                        # Store data
+                        all_preds.append(pred_flat)
+                        all_gts.append(gt_flat)
+                        all_errors.append(landmark_errors)
                         
                         processed_count += 1
                         
@@ -350,28 +408,42 @@ class ConcurrentMLPTrainingHook(Hook):
             logger.error(f'[ConcurrentMLPTrainingHook] Critical error during data processing: {e}')
             return
 
-        if not preds_x:
+        if not all_preds:
             logger.warning('[ConcurrentMLPTrainingHook] No predictions generated; skipping MLP update.')
             return
 
-        preds_x = np.stack(preds_x)
-        preds_y = np.stack(preds_y)
-        gts_x = np.stack(gts_x)
-        gts_y = np.stack(gts_y)
+        all_preds = np.stack(all_preds)  # [N, 38]
+        all_gts = np.stack(all_gts)      # [N, 38]
+        all_errors = np.stack(all_errors)  # [N, 19]
         
-        logger.info(f'[ConcurrentMLPTrainingHook] Generated predictions for {len(preds_x)} samples')
+        logger.info(f'[ConcurrentMLPTrainingHook] Generated predictions for {len(all_preds)} samples')
 
         # -----------------------------------------------------------------
-        # Step 1.5: Initialize normalization scalers (only once)
+        # Step 1.5: Compute hard-example weights
+        # -----------------------------------------------------------------
+        # Determine sample weights based on maximum landmark error per sample
+        max_errors_per_sample = np.max(all_errors, axis=1)  # [N,] - worst landmark per sample
+        hard_examples = max_errors_per_sample > self.hard_example_threshold
+        
+        # Create sample weights: 1.0 for normal, 2.0 for hard examples
+        sample_weights = np.ones(len(all_preds))
+        sample_weights[hard_examples] = 2.0
+        
+        num_hard_examples = np.sum(hard_examples)
+        logger.info(f'[ConcurrentMLPTrainingHook] Hard examples (>{self.hard_example_threshold}px): {num_hard_examples}/{len(all_preds)} ({num_hard_examples/len(all_preds)*100:.1f}%)')
+        
+        if num_hard_examples > 0:
+            logger.info(f'[ConcurrentMLPTrainingHook] Hard example errors: min={np.min(max_errors_per_sample[hard_examples]):.2f}, max={np.max(max_errors_per_sample[hard_examples]):.2f}, mean={np.mean(max_errors_per_sample[hard_examples]):.2f}')
+
+        # -----------------------------------------------------------------
+        # Step 2: Initialize normalization scalers (only once)
         # -----------------------------------------------------------------
         if not self.scalers_initialized:
-            logger.info('[ConcurrentMLPTrainingHook] Initializing normalization scalers...')
+            logger.info('[ConcurrentMLPTrainingHook] Initializing normalization scalers for 38-D data...')
             
             # Fit scalers on the first batch of data
-            self.scaler_x_input.fit(preds_x)
-            self.scaler_x_target.fit(gts_x)
-            self.scaler_y_input.fit(preds_y)
-            self.scaler_y_target.fit(gts_y)
+            self.scaler_input.fit(all_preds)
+            self.scaler_target.fit(all_gts)
             
             self.scalers_initialized = True
             logger.info('[ConcurrentMLPTrainingHook] Normalization scalers initialized')
@@ -380,41 +452,31 @@ class ConcurrentMLPTrainingHook(Hook):
             save_dir = os.path.join(runner.work_dir, 'concurrent_mlp')
             os.makedirs(save_dir, exist_ok=True)
             
-            joblib.dump(self.scaler_x_input, os.path.join(save_dir, 'scaler_x_input.pkl'))
-            joblib.dump(self.scaler_x_target, os.path.join(save_dir, 'scaler_x_target.pkl'))
-            joblib.dump(self.scaler_y_input, os.path.join(save_dir, 'scaler_y_input.pkl'))
-            joblib.dump(self.scaler_y_target, os.path.join(save_dir, 'scaler_y_target.pkl'))
+            joblib.dump(self.scaler_input, os.path.join(save_dir, 'scaler_joint_input.pkl'))
+            joblib.dump(self.scaler_target, os.path.join(save_dir, 'scaler_joint_target.pkl'))
             
-            logger.info(f'[ConcurrentMLPTrainingHook] Scalers saved to {save_dir}')
+            logger.info(f'[ConcurrentMLPTrainingHook] Joint scalers saved to {save_dir}')
 
         # Normalize data using the consistent scalers
-        preds_x_scaled = self.scaler_x_input.transform(preds_x)
-        gts_x_scaled = self.scaler_x_target.transform(gts_x)
-        preds_y_scaled = self.scaler_y_input.transform(preds_y)
-        gts_y_scaled = self.scaler_y_target.transform(gts_y)
+        preds_scaled = self.scaler_input.transform(all_preds)
+        gts_scaled = self.scaler_target.transform(all_gts)
 
         # -----------------------------------------------------------------
-        # Step 2: Train MLPs for fixed number of epochs (GPU-optimized)
+        # Step 3: Train joint MLP for fixed number of epochs (GPU-optimized)
         # -----------------------------------------------------------------
-        logger.info('[ConcurrentMLPTrainingHook] Training MLPs on GPU…')
+        logger.info('[ConcurrentMLPTrainingHook] Training joint 38-D MLP on GPU…')
         
         # Calculate initial loss before refinement for logging
-        initial_loss_x = self.criterion(
-            torch.from_numpy(preds_x_scaled).float(), 
-            torch.from_numpy(gts_x_scaled).float()
-        ).item()
-        initial_loss_y = self.criterion(
-            torch.from_numpy(preds_y_scaled).float(), 
-            torch.from_numpy(gts_y_scaled).float()
+        initial_loss = self.criterion(
+            torch.from_numpy(preds_scaled).float(), 
+            torch.from_numpy(gts_scaled).float()
         ).item()
 
-        # Build datasets and loaders (on-the-fly) with normalized data
-        ds_x = _MLPDataset(preds_x_scaled, gts_x_scaled)
-        ds_y = _MLPDataset(preds_y_scaled, gts_y_scaled)
-        dl_x = data.DataLoader(ds_x, batch_size=self.mlp_batch_size, shuffle=True, pin_memory=True)
-        dl_y = data.DataLoader(ds_y, batch_size=self.mlp_batch_size, shuffle=True, pin_memory=True)
+        # Build dataset with hard-example oversampling
+        ds_joint = _MLPDataset(preds_scaled, gts_scaled, sample_weights)
+        dl_joint = data.DataLoader(ds_joint, batch_size=self.mlp_batch_size, shuffle=True, pin_memory=True)
 
-        def _train_one(model: MLPRefinementModel, optimiser: optim.Optimizer, loader: data.DataLoader, name: str, initial_loss: float):
+        def _train_joint(model: JointMLPRefinementModel, optimiser: optim.Optimizer, loader: data.DataLoader, initial_loss: float):
             model.train()
             total_loss = 0.0
             for ep in range(self.mlp_epochs):
@@ -433,12 +495,12 @@ class ConcurrentMLPTrainingHook(Hook):
                 
                 total_loss = epoch_loss / len(loader)
                 if (ep + 1) % 20 == 0:
-                    logger.info(f'[ConcurrentMLPTrainingHook] {name} epoch {ep+1}/{self.mlp_epochs} | MLP loss: {total_loss:.6f}, Initial loss: {initial_loss:.6f}')
+                    improvement = ((initial_loss - total_loss) / initial_loss * 100) if initial_loss > 0 else 0
+                    logger.info(f'[ConcurrentMLPTrainingHook] Joint-MLP epoch {ep+1}/{self.mlp_epochs} | MLP loss: {total_loss:.6f}, Initial loss: {initial_loss:.6f} ({improvement:+.1f}%)')
 
-        _train_one(self.mlp_x, self.opt_x, dl_x, 'MLP-X', initial_loss_x)
-        _train_one(self.mlp_y, self.opt_y, dl_y, 'MLP-Y', initial_loss_y)
+        _train_joint(self.mlp_joint, self.opt_joint, dl_joint, initial_loss)
 
-        logger.info('[ConcurrentMLPTrainingHook] Finished MLP update for this HRNet epoch.')
+        logger.info('[ConcurrentMLPTrainingHook] Finished joint MLP update for this HRNet epoch.')
         
         # Save MLP models after each epoch
         save_dir = os.path.join(runner.work_dir, 'concurrent_mlp')
@@ -446,31 +508,25 @@ class ConcurrentMLPTrainingHook(Hook):
         
         # Save current epoch models
         current_epoch = runner.epoch + 1  # runner.epoch is 0-indexed
-        mlp_x_epoch_path = os.path.join(save_dir, f'mlp_x_epoch_{current_epoch}.pth')
-        mlp_y_epoch_path = os.path.join(save_dir, f'mlp_y_epoch_{current_epoch}.pth')
+        mlp_joint_epoch_path = os.path.join(save_dir, f'mlp_joint_epoch_{current_epoch}.pth')
         
-        torch.save(self.mlp_x.state_dict(), mlp_x_epoch_path)
-        torch.save(self.mlp_y.state_dict(), mlp_y_epoch_path)
+        torch.save(self.mlp_joint.state_dict(), mlp_joint_epoch_path)
         
         # Also save as "latest" for easy access
-        mlp_x_latest_path = os.path.join(save_dir, 'mlp_x_latest.pth')
-        mlp_y_latest_path = os.path.join(save_dir, 'mlp_y_latest.pth')
+        mlp_joint_latest_path = os.path.join(save_dir, 'mlp_joint_latest.pth')
+        torch.save(self.mlp_joint.state_dict(), mlp_joint_latest_path)
         
-        torch.save(self.mlp_x.state_dict(), mlp_x_latest_path)
-        torch.save(self.mlp_y.state_dict(), mlp_y_latest_path)
-        
-        logger.info(f'[ConcurrentMLPTrainingHook] MLP models saved for epoch {current_epoch}')
-        logger.info(f'[ConcurrentMLPTrainingHook] Latest models: {mlp_x_latest_path}, {mlp_y_latest_path}')
+        logger.info(f'[ConcurrentMLPTrainingHook] Joint MLP model saved for epoch {current_epoch}')
+        logger.info(f'[ConcurrentMLPTrainingHook] Latest model: {mlp_joint_latest_path}')
 
     # ---------------------------------------------------------------------
     # Optional: save MLP weights at end of run
     # ---------------------------------------------------------------------
     def after_run(self, runner: Runner):
         logger: MMLogger = runner.logger
-        if self.mlp_x is None or self.mlp_y is None:
+        if self.mlp_joint is None:
             return
         save_dir = os.path.join(runner.work_dir, 'concurrent_mlp')
         os.makedirs(save_dir, exist_ok=True)
-        torch.save(self.mlp_x.state_dict(), os.path.join(save_dir, 'mlp_x_final.pth'))
-        torch.save(self.mlp_y.state_dict(), os.path.join(save_dir, 'mlp_y_final.pth'))
-        logger.info(f'[ConcurrentMLPTrainingHook] Saved final MLP weights to {save_dir}') 
+        torch.save(self.mlp_joint.state_dict(), os.path.join(save_dir, 'mlp_joint_final.pth'))
+        logger.info(f'[ConcurrentMLPTrainingHook] Saved final joint MLP weights to {save_dir}') 
