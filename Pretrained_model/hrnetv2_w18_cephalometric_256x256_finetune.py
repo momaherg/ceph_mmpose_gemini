@@ -150,12 +150,14 @@ test_evaluator = val_evaluator
 custom_hooks = [
     dict(
         type='ConcurrentMLPTrainingHook',
-        mlp_epochs=100,              # Train joint MLP for 100 epochs after each HRNet epoch
-        mlp_batch_size=16,           # MLP batch size
-        mlp_lr=1e-5,                 # MLP learning rate (same as standalone training)
-        mlp_weight_decay=1e-4,       # MLP weight decay
-        hard_example_threshold=5.0,  # MRE threshold for hard-example oversampling (pixels)
-        log_interval=20,             # Log MLP training progress every 20 epochs
-        inference_batch_size=80      # Batch size for HRNet inference step
+        mlp_epochs=100,                      # Train joint MLP for 100 epochs after each HRNet epoch
+        mlp_batch_size=16,                   # MLP batch size
+        mlp_lr=1e-5,                         # MLP learning rate (same as standalone training)
+        mlp_weight_decay=1e-4,               # MLP weight decay
+        hard_example_threshold=5.0,          # MRE threshold for hard-example oversampling (pixels)
+        log_interval=20,                     # Log MLP training progress every 20 epochs
+        inference_batch_size=80,             # Batch size for HRNet inference step
+        enable_hrnet_hard_sampling=True,     # Enable hard example oversampling for HRNetV2 
+        hrnet_hard_sampling_ratio=1.5        # Increase dataset size by this factor for hard sampling
     )
 ] 

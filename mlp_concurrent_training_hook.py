@@ -64,6 +64,7 @@ import numpy as np
 import pandas as pd
 from sklearn.preprocessing import StandardScaler
 import joblib
+import pickle
 
 # -----------------------------------------------------------------------------
 #  Joint MLP architecture for 38-D coordinate prediction
@@ -148,6 +149,32 @@ class _MLPDataset(data.Dataset):
 
 
 # -----------------------------------------------------------------------------
+#  Custom Weighted Sampler for Hard Example Oversampling
+# -----------------------------------------------------------------------------
+
+class HardExampleWeightedSampler(torch.utils.data.Sampler):
+    """Custom sampler that oversamples hard examples for HRNetV2 training."""
+    
+    def __init__(self, dataset, sample_weights=None, num_samples=None):
+        self.dataset = dataset
+        self.num_samples = num_samples if num_samples is not None else len(dataset)
+        
+        if sample_weights is not None and len(sample_weights) == len(dataset):
+            self.weights = torch.as_tensor(sample_weights, dtype=torch.double)
+        else:
+            # Default to uniform sampling if no weights provided
+            self.weights = torch.ones(len(dataset), dtype=torch.double)
+    
+    def __iter__(self):
+        # Sample with replacement based on weights
+        indices = torch.multinomial(self.weights, self.num_samples, replacement=True)
+        return iter(indices.tolist())
+    
+    def __len__(self):
+        return self.num_samples
+
+
+# -----------------------------------------------------------------------------
 #  Hook implementation
 # -----------------------------------------------------------------------------
 
@@ -166,6 +193,8 @@ class ConcurrentMLPTrainingHook(Hook):
         hard_example_threshold: float = 5.0,  # MRE threshold in pixels
         log_interval: int = 50,
         inference_batch_size: int = 80,
+        enable_hrnet_hard_sampling: bool = True,  # Enable hard example sampling for HRNet
+        hrnet_hard_sampling_ratio: float = 1.5,  # Increase dataset size by this factor for hard sampling
     ) -> None:
         self.mlp_epochs = mlp_epochs
         self.mlp_batch_size = mlp_batch_size
@@ -174,6 +203,8 @@ class ConcurrentMLPTrainingHook(Hook):
         self.hard_example_threshold = hard_example_threshold
         self.log_interval = log_interval
         self.inference_batch_size = inference_batch_size
+        self.enable_hrnet_hard_sampling = enable_hrnet_hard_sampling
+        self.hrnet_hard_sampling_ratio = hrnet_hard_sampling_ratio
 
         # These will be initialised in before_run
         self.mlp_joint: JointMLPRefinementModel | None = None
@@ -185,6 +216,70 @@ class ConcurrentMLPTrainingHook(Hook):
         self.scaler_input: StandardScaler | None = None
         self.scaler_target: StandardScaler | None = None
         self.scalers_initialized = False
+        
+        # Hard example tracking
+        self.current_sample_weights = None
+        self.sample_index_mapping = {}  # Maps processed sample indices to original dataset indices
+
+    # ---------------------------------------------------------------------
+    # Hard Example Management for HRNetV2
+    # ---------------------------------------------------------------------
+    
+    def _save_hard_example_weights(self, sample_weights, save_dir):
+        """Save hard example weights for the next HRNetV2 epoch."""
+        if not self.enable_hrnet_hard_sampling:
+            return
+            
+        weights_path = os.path.join(save_dir, 'hard_example_weights.pkl')
+        mapping_path = os.path.join(save_dir, 'sample_index_mapping.pkl')
+        
+        with open(weights_path, 'wb') as f:
+            pickle.dump(sample_weights, f)
+        
+        with open(mapping_path, 'wb') as f:
+            pickle.dump(self.sample_index_mapping, f)
+    
+    def _update_hrnet_dataloader_with_hard_sampling(self, runner: Runner):
+        """Update the HRNetV2 dataloader to use hard example sampling."""
+        if not self.enable_hrnet_hard_sampling or self.current_sample_weights is None:
+            return
+        
+        logger: MMLogger = runner.logger
+        train_dataloader = runner.train_dataloader
+        
+        try:
+            # Create sample weights for the entire dataset
+            dataset_size = len(train_dataloader.dataset)
+            full_weights = np.ones(dataset_size)
+            
+            # Apply hard example weights based on mapping
+            for processed_idx, weight in enumerate(self.current_sample_weights):
+                if processed_idx in self.sample_index_mapping:
+                    original_idx = self.sample_index_mapping[processed_idx]
+                    if 0 <= original_idx < dataset_size:
+                        full_weights[original_idx] = weight
+            
+            # Calculate number of samples for the next epoch (oversample hard examples)
+            num_samples = int(dataset_size * self.hrnet_hard_sampling_ratio)
+            
+            # Create weighted sampler
+            weighted_sampler = HardExampleWeightedSampler(
+                train_dataloader.dataset, 
+                sample_weights=full_weights,
+                num_samples=num_samples
+            )
+            
+            # Update the dataloader's sampler
+            runner.train_dataloader.sampler = weighted_sampler
+            runner.train_dataloader._DataLoader__initialized = False  # Reset initialization
+            
+            # Count hard examples for logging
+            hard_examples = np.sum(full_weights > 1.0)
+            logger.info(f'[ConcurrentMLPTrainingHook] Updated HRNetV2 sampler: {hard_examples}/{dataset_size} hard examples')
+            logger.info(f'[ConcurrentMLPTrainingHook] Next epoch will use {num_samples} samples (oversampling ratio: {self.hrnet_hard_sampling_ratio:.1f}x)')
+            
+        except Exception as e:
+            logger.warning(f'[ConcurrentMLPTrainingHook] Failed to update HRNetV2 sampler: {e}')
 
     # ---------------------------------------------------------------------
     # MMEngine lifecycle methods
@@ -202,7 +297,13 @@ class ConcurrentMLPTrainingHook(Hook):
         self.scaler_target = StandardScaler()
         
         logger.info(f'[ConcurrentMLPTrainingHook] Joint MLP initialized with {sum(p.numel() for p in self.mlp_joint.parameters()):,} parameters')
+        logger.info(f'[ConcurrentMLPTrainingHook] Joint model captures cross-correlations between landmarks')
         logger.info(f'[ConcurrentMLPTrainingHook] Hard-example threshold: {self.hard_example_threshold} pixels')
+
+    def before_train_epoch(self, runner: Runner):
+        """Update HRNetV2 dataloader with hard example sampling before each epoch."""
+        if runner.epoch > 0:  # Skip first epoch (no hard examples identified yet)
+            self._update_hrnet_dataloader_with_hard_sampling(runner)
 
     def after_train_epoch(self, runner: Runner):
         """After each HRNetV2 epoch, train joint MLP on-the-fly using current predictions."""
@@ -282,6 +383,7 @@ class ConcurrentMLPTrainingHook(Hook):
                     processed_count = 0
                     img_batch = []
                     gt_batch = []
+                    batch_indices = []  # Track original indices for hard example mapping
                     
                     for idx, row in tqdm(df.iterrows(), total=len(df), disable=runner.rank != 0, desc="GPU Inference from File"):
                         try:
@@ -307,6 +409,7 @@ class ConcurrentMLPTrainingHook(Hook):
                             gt_keypoints = np.array(gt_keypoints)
                             img_batch.append(img_array)
                             gt_batch.append(gt_keypoints)
+                            batch_indices.append(idx)  # Store original DataFrame index
                             
                             # Process batch when full or at the end
                             if len(img_batch) >= self.inference_batch_size or idx == len(df) - 1:
@@ -335,6 +438,11 @@ class ConcurrentMLPTrainingHook(Hook):
                                             all_preds.append(pred_flat)
                                             all_gts.append(gt_flat)
                                             all_errors.append(landmark_errors)
+                                            
+                                            # Map processed sample index to original index
+                                            processed_sample_idx = len(all_preds) - 1
+                                            original_idx = batch_indices[i]
+                                            self.sample_index_mapping[processed_sample_idx] = original_idx
                                     
                                     except Exception as e:
                                         logger.warning(f'[ConcurrentMLPTrainingHook] Failed to process batch item {i}: {e}')
@@ -343,11 +451,13 @@ class ConcurrentMLPTrainingHook(Hook):
                                 # Clear batches for next iteration
                                 img_batch.clear()
                                 gt_batch.clear()
+                                batch_indices.clear()
 
                         except Exception as e:
                             logger.warning(f'[ConcurrentMLPTrainingHook] Failed to process sample {idx}: {e}')
                             img_batch.clear()
                             gt_batch.clear()
+                            batch_indices.clear()
                             continue
                     
                     processed_count = len(all_preds)
@@ -364,6 +474,7 @@ class ConcurrentMLPTrainingHook(Hook):
                 processed_count = 0
                 img_batch = []
                 gt_batch = []
+                batch_indices = []  # Track original indices for hard example mapping
                 
                 for idx in tqdm(range(len(train_dataset)), disable=runner.rank != 0, desc="Dataset Inference"):
                     try:
@@ -392,6 +503,7 @@ class ConcurrentMLPTrainingHook(Hook):
                             
                         img_batch.append(img_np)
                         gt_batch.append(gt_kpts)
+                        batch_indices.append(idx)  # Store original dataset index
                         
                         # Process batch when full or at the end
                         if len(img_batch) >= self.inference_batch_size or idx == len(train_dataset) - 1:
@@ -420,6 +532,11 @@ class ConcurrentMLPTrainingHook(Hook):
                                         all_preds.append(pred_flat)
                                         all_gts.append(gt_flat)
                                         all_errors.append(landmark_errors)
+                                        
+                                        # Map processed sample index to original index
+                                        processed_sample_idx = len(all_preds) - 1
+                                        original_idx = batch_indices[i]
+                                        self.sample_index_mapping[processed_sample_idx] = original_idx
                                 
                                 except Exception as e:
                                     logger.warning(f'[ConcurrentMLPTrainingHook] Failed to process dataset batch item {i}: {e}')
@@ -428,6 +545,7 @@ class ConcurrentMLPTrainingHook(Hook):
                             # Clear batches for next iteration
                             img_batch.clear()
                             gt_batch.clear()
+                            batch_indices.clear()
                         
                     except Exception as e:
                         # Only log every 100th error to avoid spam
@@ -435,6 +553,7 @@ class ConcurrentMLPTrainingHook(Hook):
                             logger.warning(f'[ConcurrentMLPTrainingHook] Failed to process sample {idx}: {e}')
                         img_batch.clear()
                         gt_batch.clear()
+                        batch_indices.clear()
                         continue
                 
                 processed_count = len(all_preds)
@@ -465,11 +584,17 @@ class ConcurrentMLPTrainingHook(Hook):
         sample_weights = np.ones(len(all_preds))
         sample_weights[hard_examples] = 2.0
         
+        # Store sample weights for HRNetV2 hard sampling
+        self.current_sample_weights = sample_weights.copy()
+        
         num_hard_examples = np.sum(hard_examples)
         logger.info(f'[ConcurrentMLPTrainingHook] Hard examples (>{self.hard_example_threshold}px): {num_hard_examples}/{len(all_preds)} ({num_hard_examples/len(all_preds)*100:.1f}%)')
         
         if num_hard_examples > 0:
             logger.info(f'[ConcurrentMLPTrainingHook] Hard example errors: min={np.min(max_errors_per_sample[hard_examples]):.2f}, max={np.max(max_errors_per_sample[hard_examples]):.2f}, mean={np.mean(max_errors_per_sample[hard_examples]):.2f}')
+            
+            if self.enable_hrnet_hard_sampling:
+                logger.info(f'[ConcurrentMLPTrainingHook] Hard examples will be oversampled in next HRNetV2 epoch (ratio: {self.hrnet_hard_sampling_ratio:.1f}x)')
 
         # -----------------------------------------------------------------
         # Step 2: Initialize normalization scalers (only once)
@@ -554,6 +679,12 @@ class ConcurrentMLPTrainingHook(Hook):
         
         logger.info(f'[ConcurrentMLPTrainingHook] Joint MLP model saved for epoch {current_epoch}')
         logger.info(f'[ConcurrentMLPTrainingHook] Latest model: {mlp_joint_latest_path}')
+
+        # -----------------------------------------------------------------
+        # Step 4: Save hard example weights and update HRNetV2 dataloader
+        # -----------------------------------------------------------------
+        self._save_hard_example_weights(sample_weights, save_dir)
+        self._update_hrnet_dataloader_with_hard_sampling(runner)
 
     # ---------------------------------------------------------------------
     # Optional: save MLP weights at end of run
