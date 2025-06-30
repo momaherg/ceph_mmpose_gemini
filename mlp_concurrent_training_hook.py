@@ -272,10 +272,19 @@ class ConcurrentMLPTrainingHook(Hook):
                     return 0  # nothing to do
 
                 try:
+                    # Ensure images are properly formatted as numpy arrays
+                    processed_imgs = []
+                    for img in batch_imgs:
+                        if isinstance(img, np.ndarray):
+                            processed_imgs.append(img)
+                        else:
+                            # Convert to numpy array if needed
+                            processed_imgs.append(np.array(img, dtype=np.uint8))
+                    
                     # Run batched inference
                     results = inference_topdown(
                         model,
-                        batch_imgs,
+                        processed_imgs,
                         bboxes=np.array(batch_bboxes, dtype=np.float32),
                         bbox_format='xyxy'
                     )
