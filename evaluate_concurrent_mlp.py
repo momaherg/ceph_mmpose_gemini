@@ -389,42 +389,81 @@ def main():
     
     # Check for joint MLP models
     mlp_dir = os.path.join(args.work_dir, "concurrent_mlp")
-    mlp_joint_path = os.path.join(mlp_dir, "mlp_joint_final.pth")
     
-    # Check for final models first, then latest, then epoch-specific
-    if os.path.exists(mlp_joint_path):
+    # Priority order: best model (matching best HRNet), final, latest, then epoch-specific
+    mlp_joint_best = os.path.join(mlp_dir, "mlp_joint_best.pth")
+    mlp_joint_final = os.path.join(mlp_dir, "mlp_joint_final.pth")
+    mlp_joint_latest = os.path.join(mlp_dir, "mlp_joint_latest.pth")
+    
+    # Check for best model first (corresponds to best HRNetV2 checkpoint)
+    if os.path.exists(mlp_joint_best):
+        mlp_joint_path = mlp_joint_best
+        print(f"✓ Found best joint MLP model: {mlp_joint_path}")
+        model_type = "best"
+        
+        # Try to read best model summary for additional info
+        summary_path = os.path.join(mlp_dir, "best_model_summary.txt")
+        if os.path.exists(summary_path):
+            try:
+                with open(summary_path, 'r') as f:
+                    summary_content = f.read()
+                    # Extract epoch and NME from summary
+                    for line in summary_content.split('\n'):
+                        if 'Best Epoch:' in line:
+                            best_epoch = line.split(':')[1].strip()
+                            print(f"✓ Best model from epoch: {best_epoch}")
+                        elif 'Best NME:' in line:
+                            best_nme = line.split(':')[1].strip()
+                            print(f"✓ Best validation NME: {best_nme}")
+            except Exception as e:
+                print(f"⚠️  Could not read best model summary: {e}")
+    
+    elif os.path.exists(mlp_joint_final):
+        mlp_joint_path = mlp_joint_final
         print(f"✓ Found final joint MLP model: {mlp_joint_path}")
         model_type = "final"
+        print("ℹ️  Using final model (best model not available)")
+    
+    elif os.path.exists(mlp_joint_latest):
+        mlp_joint_path = mlp_joint_latest
+        print(f"✓ Found latest joint MLP model: {mlp_joint_path}")
+        model_type = "latest"
+        print("ℹ️  Using latest model (final model not available)")
+    
     else:
-        # Try latest model
-        mlp_joint_latest = os.path.join(mlp_dir, "mlp_joint_latest.pth")
+        # Try to find epoch-specific models
+        epoch_models = glob.glob(os.path.join(mlp_dir, "mlp_joint_epoch_*.pth"))
+        best_epoch_models = glob.glob(os.path.join(mlp_dir, "mlp_joint_best_NME_epoch_*.pth"))
         
-        if os.path.exists(mlp_joint_latest):
-            mlp_joint_path = mlp_joint_latest
-            print(f"✓ Found latest joint MLP model: {mlp_joint_path}")
-            model_type = "latest"
+        if best_epoch_models:
+            # Prefer best epoch models
+            latest_best_model = max(best_epoch_models, key=lambda x: int(x.split('_epoch_')[1].split('.')[0]))
+            epoch_num = latest_best_model.split('_epoch_')[1].split('.')[0]
+            
+            mlp_joint_path = latest_best_model
+            print(f"✓ Found best epoch {epoch_num} joint MLP model: {mlp_joint_path}")
+            model_type = f"best_epoch_{epoch_num}"
+            
+        elif epoch_models:
+            # Fall back to regular epoch models
+            latest_joint_model = max(epoch_models, key=lambda x: int(x.split('_epoch_')[1].split('.')[0]))
+            epoch_num = latest_joint_model.split('_epoch_')[1].split('.')[0]
+            
+            mlp_joint_path = latest_joint_model
+            print(f"✓ Found epoch {epoch_num} joint MLP model: {mlp_joint_path}")
+            model_type = f"epoch_{epoch_num}"
+            
         else:
-            # Try to find epoch-specific models
-            epoch_models = glob.glob(os.path.join(mlp_dir, "mlp_joint_epoch_*.pth"))
-            if epoch_models:
-                # Get the latest epoch model
-                latest_joint_model = max(epoch_models, key=lambda x: int(x.split('_epoch_')[1].split('.')[0]))
-                epoch_num = latest_joint_model.split('_epoch_')[1].split('.')[0]
-                
-                mlp_joint_path = latest_joint_model
-                print(f"✓ Found epoch {epoch_num} joint MLP model: {mlp_joint_path}")
-                model_type = f"epoch_{epoch_num}"
+            print("ERROR: Joint MLP model not found.")
+            print(f"Searched in: {mlp_dir}")
+            print("Available files:")
+            if os.path.exists(mlp_dir):
+                for file in os.listdir(mlp_dir):
+                    print(f"  - {file}")
             else:
-                print("ERROR: Joint MLP model not found.")
-                print(f"Searched in: {mlp_dir}")
-                print("Available files:")
-                if os.path.exists(mlp_dir):
-                    for file in os.listdir(mlp_dir):
-                        print(f"  - {file}")
-                else:
-                    print("  MLP directory does not exist")
-                print("\nTip: Make sure concurrent joint training is running and has completed at least one epoch.")
-                return
+                print("  MLP directory does not exist")
+            print("\nTip: Make sure concurrent joint training is running and has completed at least one epoch.")
+            return
     
     # Load models
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
@@ -1165,6 +1204,11 @@ def main():
     print(f"🎯 Joint model captures cross-correlations between landmarks")
     print(f"🔧 Evaluated using: {model_type} joint MLP model")
     
+    if model_type == "best":
+        print(f"✅ Using best MLP model synchronized with best HRNetV2 checkpoint")
+    elif "best_epoch" in model_type:
+        print(f"✅ Using best epoch MLP model synchronized with HRNetV2 performance")
+    
     if len(gt_anb_angles) > 0:
         print(f"📐 ANB angle improvement: {anb_improvement:.1f}% reduction in MAE")
         print(f"   ({len(gt_anb_angles)} samples with valid ANB calculations)")
@@ -1185,7 +1229,15 @@ def main():
     print(f"   - Red crosses = Model predictions")
     print(f"   - Numbers indicate landmark indices (see cephalometric_dataset_info.py)")
     
-    if model_type == "latest":
+    if model_type == "best":
+        print("\n💡 Note: Using best MLP model synchronized with best HRNetV2 checkpoint.")
+        print("     This provides the most reliable evaluation of concurrent training benefits.")
+    elif "best_epoch" in model_type:
+        print("\n💡 Note: Using best epoch MLP model. Results reflect peak performance.")
+    elif model_type == "final":
+        print("\n💡 Note: Using final MLP model from last training epoch.")
+        print("     Best model may have been from an earlier epoch.")
+    elif model_type == "latest":
         print("\n💡 Note: Training is likely still in progress. Final results may differ.")
     elif "epoch_" in model_type:
         print("\n💡 Note: Using intermediate checkpoint. Final results may differ.")

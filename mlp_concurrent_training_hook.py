@@ -227,6 +227,11 @@ class ConcurrentMLPTrainingHook(Hook):
         
         # Prediction caching to avoid double processing
         self.cached_predictions = {}  # {sample_idx: (pred_keypoints, gt_keypoints)}
+        
+        # Best checkpoint tracking for MLP models
+        self.best_metric = float('inf')  # Track best validation metric (NME)
+        self.best_epoch = 0
+        self.best_mlp_state = None  # Store best MLP state dict
 
     # ---------------------------------------------------------------------
     # Hard Example Management for HRNetV2
@@ -317,6 +322,56 @@ class ConcurrentMLPTrainingHook(Hook):
             self.cached_predictions.clear()
             logger: MMLogger = runner.logger
             logger.info(f'[ConcurrentMLPTrainingHook] Cleared prediction cache for epoch {runner.epoch}')
+
+    def after_val_epoch(self, runner: Runner, metrics: dict = None):
+        """Track best validation performance and save corresponding MLP models."""
+        if metrics is None or self.mlp_joint is None:
+            return
+            
+        logger: MMLogger = runner.logger
+        
+        # Extract validation NME (the key metric for pose estimation)
+        current_nme = None
+        if 'NME' in metrics:
+            current_nme = metrics['NME']
+        elif 'val/NME' in metrics:
+            current_nme = metrics['val/NME']
+        elif 'coco/NME' in metrics:
+            current_nme = metrics['coco/NME']
+        else:
+            # Try to find any metric with 'NME' in the name
+            for key, value in metrics.items():
+                if 'NME' in key.upper():
+                    current_nme = value
+                    break
+        
+        if current_nme is None:
+            logger.warning('[ConcurrentMLPTrainingHook] Could not find NME metric for best model tracking')
+            return
+        
+        current_epoch = runner.epoch + 1  # runner.epoch is 0-indexed
+        
+        # Check if this is the best performance so far
+        if current_nme < self.best_metric:
+            self.best_metric = current_nme
+            self.best_epoch = current_epoch
+            
+            # Save the current MLP state as the best
+            self.best_mlp_state = self.mlp_joint.state_dict().copy()
+            
+            logger.info(f'[ConcurrentMLPTrainingHook] New best NME: {current_nme:.6f} at epoch {current_epoch}')
+            logger.info(f'[ConcurrentMLPTrainingHook] Saved best MLP state (will be written to disk at training end)')
+            
+            # Also save immediately to disk
+            save_dir = os.path.join(runner.work_dir, 'concurrent_mlp')
+            os.makedirs(save_dir, exist_ok=True)
+            
+            best_mlp_path = os.path.join(save_dir, f'mlp_joint_best_NME_epoch_{current_epoch}.pth')
+            torch.save(self.best_mlp_state, best_mlp_path)
+            
+            logger.info(f'[ConcurrentMLPTrainingHook] Best MLP model saved: {best_mlp_path}')
+        else:
+            logger.info(f'[ConcurrentMLPTrainingHook] Current NME: {current_nme:.6f}, Best: {self.best_metric:.6f} (epoch {self.best_epoch})')
 
     def _cache_prediction_during_training(self, sample_idx, pred_keypoints, gt_keypoints):
         """Cache predictions during normal HRNetV2 training to avoid double processing."""
@@ -761,7 +816,41 @@ class ConcurrentMLPTrainingHook(Hook):
         logger: MMLogger = runner.logger
         if self.mlp_joint is None:
             return
+            
         save_dir = os.path.join(runner.work_dir, 'concurrent_mlp')
         os.makedirs(save_dir, exist_ok=True)
-        torch.save(self.mlp_joint.state_dict(), os.path.join(save_dir, 'mlp_joint_final.pth'))
-        logger.info(f'[ConcurrentMLPTrainingHook] Saved final joint MLP weights to {save_dir}') 
+        
+        # Save final (latest) MLP model
+        final_mlp_path = os.path.join(save_dir, 'mlp_joint_final.pth')
+        torch.save(self.mlp_joint.state_dict(), final_mlp_path)
+        logger.info(f'[ConcurrentMLPTrainingHook] Saved final joint MLP weights: {final_mlp_path}')
+        
+        # Save best MLP model (corresponding to best HRNetV2 checkpoint)
+        if self.best_mlp_state is not None:
+            best_mlp_path = os.path.join(save_dir, 'mlp_joint_best.pth')
+            torch.save(self.best_mlp_state, best_mlp_path)
+            logger.info(f'[ConcurrentMLPTrainingHook] Saved best joint MLP weights: {best_mlp_path}')
+            logger.info(f'[ConcurrentMLPTrainingHook] Best MLP corresponds to epoch {self.best_epoch} with NME: {self.best_metric:.6f}')
+            
+            # Create a summary file with best model information
+            summary_path = os.path.join(save_dir, 'best_model_summary.txt')
+            with open(summary_path, 'w') as f:
+                f.write(f"Best MLP Model Summary\n")
+                f.write(f"=====================\n")
+                f.write(f"Best Epoch: {self.best_epoch}\n")
+                f.write(f"Best NME: {self.best_metric:.6f}\n")
+                f.write(f"MLP Model: mlp_joint_best.pth\n")
+                f.write(f"Corresponding HRNet: best_NME_epoch_{self.best_epoch}.pth\n")
+            
+            logger.info(f'[ConcurrentMLPTrainingHook] Best model summary saved: {summary_path}')
+        else:
+            logger.warning('[ConcurrentMLPTrainingHook] No best MLP state available - validation may not have run')
+        
+        # Summary of all saved models
+        logger.info(f'[ConcurrentMLPTrainingHook] === MLP MODELS SUMMARY ===')
+        logger.info(f'[ConcurrentMLPTrainingHook] Final model: mlp_joint_final.pth (latest epoch)')
+        logger.info(f'[ConcurrentMLPTrainingHook] Latest model: mlp_joint_latest.pth (same as final)')
+        if self.best_mlp_state is not None:
+            logger.info(f'[ConcurrentMLPTrainingHook] Best model: mlp_joint_best.pth (epoch {self.best_epoch}, NME: {self.best_metric:.6f})')
+            logger.info(f'[ConcurrentMLPTrainingHook] Best epoch model: mlp_joint_best_NME_epoch_{self.best_epoch}.pth')
+        logger.info(f'[ConcurrentMLPTrainingHook] All models saved to: {save_dir}') 

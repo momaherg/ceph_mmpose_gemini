@@ -268,12 +268,34 @@ def main():
         # Check for saved MLP models
         mlp_dir = os.path.join(cfg.work_dir, "concurrent_mlp")
         if os.path.exists(mlp_dir):
-            mlp_x_path = os.path.join(mlp_dir, "mlp_x_final.pth")
-            mlp_y_path = os.path.join(mlp_dir, "mlp_y_final.pth")
-            if os.path.exists(mlp_x_path) and os.path.exists(mlp_y_path):
-                print(f"✓ Concurrent MLP models saved:")
-                print(f"   X-coordinate model: {mlp_x_path}")
-                print(f"   Y-coordinate model: {mlp_y_path}")
+            mlp_final_path = os.path.join(mlp_dir, "mlp_joint_final.pth")
+            mlp_best_path = os.path.join(mlp_dir, "mlp_joint_best.pth")
+            summary_path = os.path.join(mlp_dir, "best_model_summary.txt")
+            
+            if os.path.exists(mlp_final_path):
+                print(f"✓ Concurrent joint MLP models saved:")
+                print(f"   Final model: {mlp_final_path}")
+                
+                if os.path.exists(mlp_best_path):
+                    print(f"   Best model: {mlp_best_path}")
+                    
+                    if os.path.exists(summary_path):
+                        try:
+                            with open(summary_path, 'r') as f:
+                                summary = f.read()
+                                for line in summary.split('\n'):
+                                    if 'Best Epoch:' in line:
+                                        epoch = line.split(':')[1].strip()
+                                        print(f"   Best epoch: {epoch}")
+                                    elif 'Best NME:' in line:
+                                        nme = line.split(':')[1].strip()
+                                        print(f"   Best NME: {nme}")
+                        except:
+                            pass
+                    
+                    print(f"✅ Best MLP model synchronized with best HRNetV2 checkpoint!")
+                else:
+                    print(f"⚠️  Best MLP model not found (validation may not have run)")
             else:
                 print("⚠️  MLP models not found. Check hook execution.")
         else:
