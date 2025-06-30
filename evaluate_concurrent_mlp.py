@@ -117,6 +117,54 @@ def classify_anb_angle(anb_angle):
     else:  # anb_angle < 2.0
         return 'Class III'  # Protruding lower jaw
 
+def classify_snb_angle(snb_angle):
+    """
+    Classify SNB angle according to orthodontic standards for mandibular position.
+    
+    Args:
+        snb_angle: SNB angle in degrees
+    Returns:
+        Classification string: 'Normal', 'Retrognathic', or 'Prognathic'
+    """
+    if np.isnan(snb_angle):
+        return 'Invalid'
+    elif snb_angle >= 74.6 and snb_angle <= 78.7:
+        return 'Normal'  # Normal mandibular position
+    elif snb_angle < 74.6:
+        return 'Retrognathic'  # Lower jaw positioned further back
+    else:  # snb_angle > 78.7
+        return 'Prognathic'  # Lower jaw positioned further forward
+
+def calculate_snb_angle(landmarks):
+    """
+    Calculate SNB angle from cephalometric landmarks.
+    SNB = angle at Nasion formed by Sella-Nasion-B point
+    
+    Args:
+        landmarks: numpy array of shape (19, 2) with landmark coordinates
+    Returns:
+        SNB angle in degrees
+    """
+    # Get landmark indices
+    sella_idx = 0    # sella
+    nasion_idx = 1   # nasion  
+    b_point_idx = 3  # B_point
+    
+    # Get landmark coordinates
+    sella = landmarks[sella_idx]
+    nasion = landmarks[nasion_idx]
+    b_point = landmarks[b_point_idx]
+    
+    # Check if landmarks are valid (not [0,0])
+    if (np.array_equal(sella, [0, 0]) or np.array_equal(nasion, [0, 0]) or 
+        np.array_equal(b_point, [0, 0])):
+        return np.nan
+    
+    # Calculate SNB angle (Sella-Nasion-B point)
+    snb_angle = calculate_angle(sella, nasion, b_point)
+    
+    return snb_angle
+
 def calculate_anb_angle(landmarks):
     """
     Calculate ANB angle from cephalometric landmarks.
@@ -526,29 +574,52 @@ def main():
     hrnet_overall, hrnet_per_landmark = compute_metrics(hrnet_coords, gt_coords, landmark_names)
     mlp_overall, mlp_per_landmark = compute_metrics(mlp_coords, gt_coords, landmark_names)
     
-    # Calculate ANB angles for all samples
-    print("\n📐 Computing ANB angles...")
+    # Calculate ANB and SNB angles for all samples
+    print("\n📐 Computing ANB and SNB angles...")
     hrnet_anb_angles = []
     mlp_anb_angles = []
     gt_anb_angles = []
+    hrnet_snb_angles = []
+    mlp_snb_angles = []
+    gt_snb_angles = []
     
     for i in range(len(ground_truths)):
+        # ANB angles
         gt_anb = calculate_anb_angle(gt_coords[i])
         hrnet_anb = calculate_anb_angle(hrnet_coords[i])
         mlp_anb = calculate_anb_angle(mlp_coords[i])
         
+        # SNB angles
+        gt_snb = calculate_snb_angle(gt_coords[i])
+        hrnet_snb = calculate_snb_angle(hrnet_coords[i])
+        mlp_snb = calculate_snb_angle(mlp_coords[i])
+        
+        # Store ANB angles if valid
         if not (np.isnan(gt_anb) or np.isnan(hrnet_anb) or np.isnan(mlp_anb)):
             gt_anb_angles.append(gt_anb)
             hrnet_anb_angles.append(hrnet_anb)
             mlp_anb_angles.append(mlp_anb)
+        
+        # Store SNB angles if valid
+        if not (np.isnan(gt_snb) or np.isnan(hrnet_snb) or np.isnan(mlp_snb)):
+            gt_snb_angles.append(gt_snb)
+            hrnet_snb_angles.append(hrnet_snb)
+            mlp_snb_angles.append(mlp_snb)
     
     gt_anb_angles = np.array(gt_anb_angles)
     hrnet_anb_angles = np.array(hrnet_anb_angles)
     mlp_anb_angles = np.array(mlp_anb_angles)
+    gt_snb_angles = np.array(gt_snb_angles)
+    hrnet_snb_angles = np.array(hrnet_snb_angles)
+    mlp_snb_angles = np.array(mlp_snb_angles)
     
     # Compute ANB angle errors
     hrnet_anb_errors = np.abs(hrnet_anb_angles - gt_anb_angles)
     mlp_anb_errors = np.abs(mlp_anb_angles - gt_anb_angles)
+    
+    # Compute SNB angle errors
+    hrnet_snb_errors = np.abs(hrnet_snb_angles - gt_snb_angles)
+    mlp_snb_errors = np.abs(mlp_snb_angles - gt_snb_angles)
     
     # Compute ANB angle classifications
     print("📊 Computing ANB angle classifications...")
@@ -582,6 +653,42 @@ def main():
             hrnet_confusion[class_to_idx[gt], class_to_idx[hrnet_pred]] += 1
         if gt in class_to_idx and mlp_pred in class_to_idx:
             mlp_confusion[class_to_idx[gt], class_to_idx[mlp_pred]] += 1
+    
+    # Compute SNB angle classifications
+    gt_snb_classifications = []
+    hrnet_snb_classifications = []
+    mlp_snb_classifications = []
+    
+    if len(gt_snb_angles) > 0:
+        gt_snb_classifications = [classify_snb_angle(angle) for angle in gt_snb_angles]
+        hrnet_snb_classifications = [classify_snb_angle(angle) for angle in hrnet_snb_angles]
+        mlp_snb_classifications = [classify_snb_angle(angle) for angle in mlp_snb_angles]
+        
+        # Calculate SNB classification accuracy
+        hrnet_snb_correct = sum(1 for gt, pred in zip(gt_snb_classifications, hrnet_snb_classifications) if gt == pred)
+        mlp_snb_correct = sum(1 for gt, pred in zip(gt_snb_classifications, mlp_snb_classifications) if gt == pred)
+        
+        total_snb_valid = len(gt_snb_classifications)
+        hrnet_snb_accuracy = (hrnet_snb_correct / total_snb_valid) * 100 if total_snb_valid > 0 else 0
+        mlp_snb_accuracy = (mlp_snb_correct / total_snb_valid) * 100 if total_snb_valid > 0 else 0
+        
+        # Calculate per-class metrics for SNB
+        gt_snb_class_counts = Counter(gt_snb_classifications)
+        hrnet_snb_class_counts = Counter(hrnet_snb_classifications)
+        mlp_snb_class_counts = Counter(mlp_snb_classifications)
+        
+        # Calculate SNB confusion matrices
+        snb_classes = ['Normal', 'Retrognathic', 'Prognathic']
+        hrnet_snb_confusion = np.zeros((3, 3), dtype=int)
+        mlp_snb_confusion = np.zeros((3, 3), dtype=int)
+        
+        snb_class_to_idx = {'Normal': 0, 'Retrognathic': 1, 'Prognathic': 2}
+        
+        for gt, hrnet_pred, mlp_pred in zip(gt_snb_classifications, hrnet_snb_classifications, mlp_snb_classifications):
+            if gt in snb_class_to_idx and hrnet_pred in snb_class_to_idx:
+                hrnet_snb_confusion[snb_class_to_idx[gt], snb_class_to_idx[hrnet_pred]] += 1
+            if gt in snb_class_to_idx and mlp_pred in snb_class_to_idx:
+                mlp_snb_confusion[snb_class_to_idx[gt], snb_class_to_idx[mlp_pred]] += 1
     
     # Find best and worst examples based on overall MRE
     sample_errors = []
@@ -675,6 +782,61 @@ def main():
             print(row_str)
     else:
         print(f"\n⚠️  No valid ANB angles could be computed (missing landmarks)")
+    
+    # SNB angle results
+    if len(gt_snb_angles) > 0:
+        print(f"\n📐 SNB ANGLE ANALYSIS:")
+        print(f"{'Metric':<20} {'HRNetV2':<15} {'Joint MLP':<15} {'Improvement':<15}")
+        print("-" * 70)
+        
+        hrnet_snb_mae = np.mean(hrnet_snb_errors)
+        mlp_snb_mae = np.mean(mlp_snb_errors)
+        snb_improvement = (hrnet_snb_mae - mlp_snb_mae) / hrnet_snb_mae * 100
+        
+        hrnet_snb_std = np.std(hrnet_snb_errors)
+        mlp_snb_std = np.std(mlp_snb_errors)
+        
+        print(f"{'Mean Abs Error (°)':<20} {hrnet_snb_mae:<15.2f} {mlp_snb_mae:<15.2f} {snb_improvement:<15.1f}%")
+        print(f"{'Std Dev (°)':<20} {hrnet_snb_std:<15.2f} {mlp_snb_std:<15.2f}")
+        print(f"{'Max Error (°)':<20} {np.max(hrnet_snb_errors):<15.2f} {np.max(mlp_snb_errors):<15.2f}")
+        print(f"{'Samples Analyzed':<20} {len(gt_snb_angles)}")
+        
+        # SNB Classification Results
+        print(f"\n🏷️  SNB CLASSIFICATION ACCURACY:")
+        print(f"{'Method':<15} {'Accuracy':<15} {'Correct/Total':<15}")
+        print("-" * 50)
+        print(f"{'HRNetV2':<15} {hrnet_snb_accuracy:<15.1f}% {hrnet_snb_correct}/{total_snb_valid}")
+        print(f"{'Joint MLP':<15} {mlp_snb_accuracy:<15.1f}% {mlp_snb_correct}/{total_snb_valid}")
+        
+        snb_accuracy_improvement = mlp_snb_accuracy - hrnet_snb_accuracy
+        print(f"{'Improvement':<15} {snb_accuracy_improvement:<15.1f}% {'(+' + str(mlp_snb_correct - hrnet_snb_correct) + ' samples)'}")
+        
+        # SNB Class distribution
+        print(f"\n📋 GROUND TRUTH SNB CLASS DISTRIBUTION:")
+        for class_name in snb_classes:
+            count = gt_snb_class_counts.get(class_name, 0)
+            percentage = (count / total_snb_valid) * 100 if total_snb_valid > 0 else 0
+            print(f"  {class_name}: {count} samples ({percentage:.1f}%)")
+        
+        # SNB Confusion matrix summary
+        print(f"\n🔍 SNB CLASSIFICATION ERRORS SUMMARY:")
+        print("HRNetV2 SNB Confusion Matrix:")
+        print("     Pred: Nor Ret Pro")
+        for i, true_class in enumerate(snb_classes):
+            row_str = f"GT {true_class[:3]:>3}: "
+            for j in range(3):
+                row_str += f"{hrnet_snb_confusion[i,j]:>3}"
+            print(row_str)
+        
+        print("\nJoint MLP SNB Confusion Matrix:")
+        print("     Pred: Nor Ret Pro")
+        for i, true_class in enumerate(snb_classes):
+            row_str = f"GT {true_class[:3]:>3}: "
+            for j in range(3):
+                row_str += f"{mlp_snb_confusion[i,j]:>3}"
+            print(row_str)
+    else:
+        print(f"\n⚠️  No valid SNB angles could be computed (missing landmarks)")
     
     # Per-landmark comparison for problematic landmarks
     print(f"\n🎯 PROBLEMATIC LANDMARKS COMPARISON:")
@@ -774,6 +936,25 @@ def main():
             'confusion_matrices': {
                 'hrnet': hrnet_confusion.tolist() if len(gt_anb_angles) > 0 else None,
                 'mlp': mlp_confusion.tolist() if len(gt_anb_angles) > 0 else None
+            }
+        },
+        'snb_analysis': {
+            'hrnet_snb_mae': hrnet_snb_mae if len(gt_snb_angles) > 0 else None,
+            'mlp_snb_mae': mlp_snb_mae if len(gt_snb_angles) > 0 else None,
+            'snb_improvement': snb_improvement if len(gt_snb_angles) > 0 else None,
+            'snb_samples': len(gt_snb_angles),
+            'snb_classification_accuracy': {
+                'hrnet_accuracy': hrnet_snb_accuracy if len(gt_snb_angles) > 0 else None,
+                'mlp_accuracy': mlp_snb_accuracy if len(gt_snb_angles) > 0 else None,
+                'accuracy_improvement': snb_accuracy_improvement if len(gt_snb_angles) > 0 else None,
+                'hrnet_correct': hrnet_snb_correct if len(gt_snb_angles) > 0 else None,
+                'mlp_correct': mlp_snb_correct if len(gt_snb_angles) > 0 else None,
+                'total_samples': total_snb_valid if len(gt_snb_angles) > 0 else None
+            },
+            'snb_class_distribution': dict(gt_snb_class_counts) if len(gt_snb_angles) > 0 else None,
+            'snb_confusion_matrices': {
+                'hrnet': hrnet_snb_confusion.tolist() if len(gt_snb_angles) > 0 else None,
+                'mlp': mlp_snb_confusion.tolist() if len(gt_snb_angles) > 0 else None
             }
         }
     }
@@ -904,6 +1085,69 @@ def main():
                  ha='center', va='center', transform=ax6.transAxes, fontsize=10)
         ax6.set_title('ANB Requirements')
     
+    # SNB angle comparison
+    if len(gt_snb_angles) > 0:
+        methods_snb = ['HRNetV2', 'Joint MLP']
+        snb_maes = [hrnet_snb_mae, mlp_snb_mae]
+        snb_stds = [hrnet_snb_std, mlp_snb_std]
+        
+        ax7.bar(methods_snb, snb_maes, yerr=snb_stds, capsize=5, alpha=0.7, 
+                color=['skyblue', 'lightcoral'])
+        ax7.set_ylabel('Mean Absolute Error (degrees)')
+        ax7.set_title('SNB Angle Error Comparison')
+        ax7.grid(True, alpha=0.3)
+        
+        # Add improvement percentage
+        ax7.text(1, mlp_snb_mae + mlp_snb_std + 0.1, 
+                 f'{snb_improvement:.1f}% improvement', ha='center', va='bottom', 
+                 fontsize=10, color='green' if snb_improvement > 0 else 'red', fontweight='bold')
+        
+        # SNB angle scatter plot
+        ax8.scatter(hrnet_snb_errors, mlp_snb_errors, alpha=0.6, color='orange')
+        
+        # Add diagonal line
+        max_snb_error = max(np.max(hrnet_snb_errors), np.max(mlp_snb_errors))
+        ax8.plot([0, max_snb_error], [0, max_snb_error], 'r--', alpha=0.8, 
+                 label='No improvement line')
+        ax8.set_xlabel('HRNetV2 SNB Error (degrees)')
+        ax8.set_ylabel('Joint MLP SNB Error (degrees)')
+        ax8.set_title('SNB Angle Error Correlation')
+        ax8.legend()
+        ax8.grid(True, alpha=0.3)
+        
+        # Classification accuracy comparison
+        if len(gt_anb_angles) > 0:
+            classification_methods = ['ANB\nHRNet', 'ANB\nMLP', 'SNB\nHRNet', 'SNB\nMLP']
+            classification_accuracies = [hrnet_accuracy, mlp_accuracy, hrnet_snb_accuracy, mlp_snb_accuracy]
+            colors = ['lightblue', 'lightcoral', 'lightgreen', 'orange']
+            
+            bars = ax9.bar(classification_methods, classification_accuracies, color=colors, alpha=0.7)
+            ax9.set_ylabel('Classification Accuracy (%)')
+            ax9.set_title('ANB vs SNB Classification Accuracy')
+            ax9.grid(True, alpha=0.3)
+            
+            # Add percentage labels on bars
+            for bar, acc in zip(bars, classification_accuracies):
+                height = bar.get_height()
+                ax9.text(bar.get_x() + bar.get_width()/2., height + 0.5,
+                        f'{acc:.1f}%', ha='center', va='bottom', fontsize=9)
+        else:
+            ax9.text(0.5, 0.5, 'SNB classification\naccuracy only', 
+                     ha='center', va='center', transform=ax9.transAxes, fontsize=12)
+            ax9.set_title('SNB Classification Only')
+    else:
+        ax7.text(0.5, 0.5, 'No valid SNB angles\ncould be computed', 
+                 ha='center', va='center', transform=ax7.transAxes, fontsize=12)
+        ax7.set_title('SNB Angle Analysis')
+        
+        ax8.text(0.5, 0.5, 'SNB angle analysis\nrequires valid\nSella, Nasion, B points', 
+                 ha='center', va='center', transform=ax8.transAxes, fontsize=10)
+        ax8.set_title('SNB Requirements')
+        
+        ax9.text(0.5, 0.5, 'No classification\nanalysis available', 
+                 ha='center', va='center', transform=ax9.transAxes, fontsize=10)
+        ax9.set_title('Classification Summary')
+    
     plt.tight_layout()
     plot_path = os.path.join(output_dir, "joint_mlp_evaluation_results.png")
     plt.savefig(plot_path, dpi=150, bbox_inches='tight')
@@ -924,8 +1168,16 @@ def main():
     if len(gt_anb_angles) > 0:
         print(f"📐 ANB angle improvement: {anb_improvement:.1f}% reduction in MAE")
         print(f"   ({len(gt_anb_angles)} samples with valid ANB calculations)")
+        print(f"🏷️  ANB classification improvement: {accuracy_improvement:.1f}% accuracy gain")
     else:
         print(f"⚠️  ANB angle analysis not available (missing required landmarks)")
+    
+    if len(gt_snb_angles) > 0:
+        print(f"📐 SNB angle improvement: {snb_improvement:.1f}% reduction in MAE")
+        print(f"   ({len(gt_snb_angles)} samples with valid SNB calculations)")
+        print(f"🏷️  SNB classification improvement: {snb_accuracy_improvement:.1f}% accuracy gain")
+    else:
+        print(f"⚠️  SNB angle analysis not available (missing required landmarks)")
     
     print(f"\n🖼️  Visual analysis available:")
     print(f"   - Compare HRNet vs MLP predictions on best/worst cases")
