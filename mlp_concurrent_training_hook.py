@@ -33,7 +33,6 @@ custom_hooks = [
         mlp_batch_size=16,
         mlp_lr=1e-5,
         mlp_weight_decay=1e-4,
-        inference_batch_size=80,
         hard_example_threshold=5.0,  # MRE threshold for oversampling
         log_interval=20
     )
@@ -163,7 +162,6 @@ class ConcurrentMLPTrainingHook(Hook):
         mlp_batch_size: int = 16,
         mlp_lr: float = 1e-5,
         mlp_weight_decay: float = 1e-4,
-        inference_batch_size: int = 80,
         hard_example_threshold: float = 5.0,  # MRE threshold in pixels
         log_interval: int = 50,
     ) -> None:
@@ -171,7 +169,6 @@ class ConcurrentMLPTrainingHook(Hook):
         self.mlp_batch_size = mlp_batch_size
         self.mlp_lr = mlp_lr
         self.mlp_weight_decay = mlp_weight_decay
-        self.inference_batch_size = inference_batch_size
         self.hard_example_threshold = hard_example_threshold
         self.log_interval = log_interval
 
@@ -210,7 +207,7 @@ class ConcurrentMLPTrainingHook(Hook):
         assert self.mlp_joint is not None
 
         # -----------------------------------------------------------------
-        # Step 1: Generate predictions on training data (GPU-optimized)
+        # Step 1: Generate predictions on training data (GPU-optimized with batching)
         # -----------------------------------------------------------------
         
         # Get the actual model, handling potential wrapping
@@ -248,9 +245,12 @@ class ConcurrentMLPTrainingHook(Hook):
         all_preds: List[np.ndarray] = []
         all_gts: List[np.ndarray] = []
         all_errors: List[np.ndarray] = []  # For hard-example detection
-
+        
+        # Batch processing parameters
+        BATCH_SIZE = 80  # Process 80 images at once for speed
+        
         train_dataset = runner.train_dataloader.dataset
-        logger.info('[ConcurrentMLPTrainingHook] Generating predictions for joint MLP on GPU...')
+        logger.info(f'[ConcurrentMLPTrainingHook] Generating predictions for joint MLP with batch size {BATCH_SIZE}...')
 
         def tensor_to_numpy(data):
             """Safely convert tensor to numpy, handling both tensor and numpy inputs."""
@@ -261,254 +261,199 @@ class ConcurrentMLPTrainingHook(Hook):
             else:
                 return np.array(data)
 
-        # Access training data more robustly
+        def batch_inference(images_batch, gt_keypoints_batch):
+            """Run batched inference on a list of images."""
+            batch_preds = []
+            batch_gts = []
+            batch_errors = []
+            
+            try:
+                # Convert images to proper format for batch inference
+                processed_images = []
+                valid_indices = []
+                
+                for i, (img, gt_kpts) in enumerate(zip(images_batch, gt_keypoints_batch)):
+                    if img is not None and gt_kpts is not None:
+                        processed_images.append(img)
+                        valid_indices.append(i)
+                
+                if not processed_images:
+                    return batch_preds, batch_gts, batch_errors
+                
+                # Create batch bounding boxes (all images are 224x224)
+                batch_bboxes = np.array([[0, 0, 224, 224]] * len(processed_images), dtype=np.float32)
+                
+                # Run batch inference
+                with torch.no_grad():
+                    results = inference_topdown(model, processed_images, bboxes=batch_bboxes, bbox_format='xyxy')
+                
+                # Process results
+                for i, result in enumerate(results):
+                    if result and hasattr(result, 'pred_instances') and len(result.pred_instances.keypoints) > 0:
+                        pred_kpts = tensor_to_numpy(result.pred_instances.keypoints[0])
+                        original_idx = valid_indices[i]
+                        gt_kpts = gt_keypoints_batch[original_idx]
+                        
+                        if pred_kpts is not None and pred_kpts.shape[0] == 19 and gt_kpts is not None:
+                            # Flatten coordinates to 38-D vectors
+                            pred_flat = pred_kpts.flatten()
+                            gt_flat = gt_kpts.flatten()
+                            
+                            # Calculate per-landmark radial errors
+                            landmark_errors = np.sqrt(np.sum((pred_kpts - gt_kpts)**2, axis=1))
+                            
+                            batch_preds.append(pred_flat)
+                            batch_gts.append(gt_flat)
+                            batch_errors.append(landmark_errors)
+                            
+            except Exception as e:
+                logger.warning(f'[ConcurrentMLPTrainingHook] Batch inference failed: {e}')
+                
+            return batch_preds, batch_gts, batch_errors
+
+        # Access training data more robustly with batching
         try:
             from tqdm import tqdm
-
-            # Helper functions -------------------------------------------------------
-            def _process_individual_inference(batch_imgs, batch_bboxes, batch_gts):
-                """Fallback to individual inference when batched inference fails."""
-                processed = 0
-                for img, bbox, gt_kpts in zip(batch_imgs, batch_bboxes, batch_gts):
-                    try:
-                        # Ensure single image is properly formatted
-                        if isinstance(img, list):
-                            img = np.array(img, dtype=np.uint8)
-                        if isinstance(img, np.ndarray):
-                            if img.ndim == 1:
-                                img = img.reshape((224, 224, 3))
-                            img = img.astype(np.uint8)
-                        else:
-                            continue
-                            
-                        # Run individual inference
-                        result = inference_topdown(
-                            model,
-                            [img],  # Single image in list
-                            bboxes=np.array([bbox], dtype=np.float32),
-                            bbox_format='xyxy'
-                        )
-                        
-                        if result and len(result) > 0:
-                            res = result[0]
-                            if res is not None:
-                                pred_kpts = tensor_to_numpy(res.pred_instances.keypoints[0])
-                                if pred_kpts.shape[0] == 19:
-                                    pred_flat = pred_kpts.flatten()
-                                    gt_flat = gt_kpts.flatten()
-                                    landmark_errors = np.sqrt(np.sum((pred_kpts - gt_kpts) ** 2, axis=1))
-                                    
-                                    all_preds.append(pred_flat)
-                                    all_gts.append(gt_flat)
-                                    all_errors.append(landmark_errors)
-                                    processed += 1
-                    except Exception as e:
-                        logger.debug(f'[ConcurrentMLPTrainingHook] Individual inference failed: {e}')
-                        continue
-                return processed
-
-            def _process_inference_batch(batch_imgs, batch_bboxes, batch_gts):
-                """Run batched inference_topdown and collect results into the global lists."""
-                if not batch_imgs:
-                    return 0  # nothing to do
-
-                try:
-                    # Ensure images are properly formatted as numpy arrays
-                    processed_imgs = []
-                    for i, img in enumerate(batch_imgs):
-                        if isinstance(img, np.ndarray):
-                            if img.shape == (224, 224, 3) and img.dtype == np.uint8:
-                                processed_imgs.append(img)
-                            else:
-                                logger.debug(f'[ConcurrentMLPTrainingHook] Image {i} shape/dtype issue: {img.shape}, {img.dtype}')
-                                # Try to fix the image
-                                if img.ndim == 1:
-                                    img = img.reshape((224, 224, 3))
-                                img = img.astype(np.uint8)
-                                processed_imgs.append(img)
-                        elif isinstance(img, list):
-                            # Convert list to numpy array
-                            img_array = np.array(img, dtype=np.uint8)
-                            if img_array.ndim == 1:
-                                img_array = img_array.reshape((224, 224, 3))
-                            processed_imgs.append(img_array)
-                        else:
-                            logger.warning(f'[ConcurrentMLPTrainingHook] Unexpected image type: {type(img)}')
-                            continue
-                    
-                    if not processed_imgs:
-                        logger.warning('[ConcurrentMLPTrainingHook] No valid images in batch after processing')
-                        return 0
-                    
-                    # Debug: log first batch details
-                    if len(all_preds) == 0:  # First batch
-                        logger.info(f'[ConcurrentMLPTrainingHook] First batch: {len(processed_imgs)} images, shapes: {[img.shape for img in processed_imgs[:3]]}')
-                    
-                    # Run batched inference
-                    results = inference_topdown(
-                        model,
-                        processed_imgs,
-                        bboxes=np.array(batch_bboxes[:len(processed_imgs)], dtype=np.float32),
-                        bbox_format='xyxy'
-                    )
-                except Exception as e:
-                    logger.warning(f'[ConcurrentMLPTrainingHook] Batched inference failure: {e}')
-                    # Try individual inference as fallback
-                    logger.info('[ConcurrentMLPTrainingHook] Falling back to individual inference...')
-                    return _process_individual_inference(batch_imgs, batch_bboxes, batch_gts)
-                
-                # Continue with result processing...
-
-                processed = 0
-                for res, gt_kpts in zip(results, batch_gts):
-                    try:
-                        if res is None:
-                            continue
-                        # res is already a PoseDataSample object for this image
-                        pred_kpts = tensor_to_numpy(res.pred_instances.keypoints[0])
-                        if pred_kpts.shape[0] != 19:
-                            continue
-
-                        pred_flat = pred_kpts.flatten()
-                        gt_flat = gt_kpts.flatten()
-
-                        landmark_errors = np.sqrt(np.sum((pred_kpts - gt_kpts) ** 2, axis=1))
-
-                        all_preds.append(pred_flat)
-                        all_gts.append(gt_flat)
-                        all_errors.append(landmark_errors)
-
-                        processed += 1
-                    except Exception as inner_e:
-                        logger.debug(f'[ConcurrentMLPTrainingHook] Skipped a sample in batch due to error: {inner_e}')
-                        continue
-                return processed
-
-            # -------------------------------------------------------------------------
-            # Method 1: Annotation-file based loading (numpy-stored images) ------------
+            
+            # Method 1: Try to access the raw annotation file
             if hasattr(train_dataset, 'ann_file') and train_dataset.ann_file:
                 logger.info(f'[ConcurrentMLPTrainingHook] Loading data from annotation file: {train_dataset.ann_file}')
                 import pandas as pd
-
+                
                 try:
                     df = pd.read_json(train_dataset.ann_file)
                     logger.info(f'[ConcurrentMLPTrainingHook] Loaded {len(df)} samples from annotation file')
-
+                    
+                    # Import landmark info
                     import cephalometric_dataset_info
+                    landmark_names = cephalometric_dataset_info.landmark_names_in_order
                     landmark_cols = cephalometric_dataset_info.original_landmark_cols
-
-                    batch_imgs, batch_bboxes, batch_gts = [], [], []
+                    
                     processed_count = 0
-
-                    for idx, row in tqdm(df.iterrows(), total=len(df), disable=runner.rank != 0, desc="GPU Inference from File"):
-                        try:
-                            # More robust image loading with debugging
-                            raw_image = row['Image']
-                            if isinstance(raw_image, list):
-                                # Convert list to numpy array
-                                img_array = np.array(raw_image, dtype=np.uint8)
-                            else:
-                                img_array = np.array(raw_image, dtype=np.uint8)
-                            
-                            # Ensure proper shape
-                            if img_array.ndim == 1:
-                                img_array = img_array.reshape((224, 224, 3))
-                            elif img_array.shape != (224, 224, 3):
-                                logger.debug(f'[ConcurrentMLPTrainingHook] Unexpected image shape: {img_array.shape}')
-                                continue
-
-                            # Build GT keypoints
-                            gt_keypoints = []
-                            valid_gt = True
-                            for i in range(0, len(landmark_cols), 2):
-                                x_col = landmark_cols[i]
-                                y_col = landmark_cols[i + 1]
-                                if x_col in row and y_col in row and pd.notna(row[x_col]) and pd.notna(row[y_col]):
-                                    gt_keypoints.append([row[x_col], row[y_col]])
+                    
+                    # Process in batches
+                    for batch_start in tqdm(range(0, len(df), BATCH_SIZE), disable=runner.rank != 0, desc="Batch Inference from File"):
+                        batch_end = min(batch_start + BATCH_SIZE, len(df))
+                        batch_df = df.iloc[batch_start:batch_end]
+                        
+                        # Prepare batch data
+                        images_batch = []
+                        gt_keypoints_batch = []
+                        
+                        for idx, row in batch_df.iterrows():
+                            try:
+                                # Get image from row
+                                img_array = np.array(row['Image'], dtype=np.uint8).reshape((224, 224, 3))
+                                
+                                # Get ground truth keypoints
+                                gt_keypoints = []
+                                valid_gt = True
+                                for i in range(0, len(landmark_cols), 2):
+                                    x_col = landmark_cols[i]
+                                    y_col = landmark_cols[i+1]
+                                    if x_col in row and y_col in row and pd.notna(row[x_col]) and pd.notna(row[y_col]):
+                                        gt_keypoints.append([row[x_col], row[y_col]])
+                                    else:
+                                        gt_keypoints.append([0, 0])
+                                        valid_gt = False
+                                
+                                if valid_gt:
+                                    gt_keypoints = np.array(gt_keypoints)
+                                    images_batch.append(img_array)
+                                    gt_keypoints_batch.append(gt_keypoints)
                                 else:
-                                    valid_gt = False
-                                    break
-
-                            if not valid_gt:
+                                    images_batch.append(None)
+                                    gt_keypoints_batch.append(None)
+                                    
+                            except Exception as e:
+                                logger.warning(f'[ConcurrentMLPTrainingHook] Failed to prepare sample {idx}: {e}')
+                                images_batch.append(None)
+                                gt_keypoints_batch.append(None)
                                 continue
-
-                            gt_keypoints = np.array(gt_keypoints)
-
-                            batch_imgs.append(img_array)
-                            batch_bboxes.append([0, 0, 224, 224])
-                            batch_gts.append(gt_keypoints)
-
-                            # When batch is full, run inference
-                            if len(batch_imgs) == self.inference_batch_size:
-                                processed_count += _process_inference_batch(batch_imgs, batch_bboxes, batch_gts)
-                                batch_imgs, batch_bboxes, batch_gts = [], [], []
-
-                        except Exception as e:
-                            logger.debug(f'[ConcurrentMLPTrainingHook] Failed to prepare sample {idx}: {e}')
-                            continue
-
-                    # Process any remaining samples in batch
-                    if batch_imgs:
-                        processed_count += _process_inference_batch(batch_imgs, batch_bboxes, batch_gts)
-
-                    logger.info(f'[ConcurrentMLPTrainingHook] Successfully processed {processed_count} samples from file')
-
+                        
+                        # Run batch inference
+                        batch_preds, batch_gts, batch_errors = batch_inference(images_batch, gt_keypoints_batch)
+                        
+                        # Add to results
+                        all_preds.extend(batch_preds)
+                        all_gts.extend(batch_gts)
+                        all_errors.extend(batch_errors)
+                        
+                        processed_count += len(batch_preds)
+                    
+                    logger.info(f'[ConcurrentMLPTrainingHook] Successfully processed {processed_count} samples from file using batch inference')
+                    
                 except Exception as e:
                     logger.warning(f'[ConcurrentMLPTrainingHook] Failed to load from annotation file: {e}')
                     df = None
-
-            # -------------------------------------------------------------------------
-            # Method 2: Dataset iteration fallback ------------------------------------
-            if not all_preds:
-                logger.info('[ConcurrentMLPTrainingHook] Using dataset iteration method')
-
-                batch_imgs, batch_bboxes, batch_gts = [], [], []
+            
+            # Method 2: Fallback to dataset iteration if file method fails
+            if not all_preds:  # No predictions from file method
+                logger.info('[ConcurrentMLPTrainingHook] Using dataset iteration method with batching')
+                
                 processed_count = 0
-
-                for idx in tqdm(range(len(train_dataset)), disable=runner.rank != 0, desc="Dataset Inference"):
-                    try:
-                        data_sample = train_dataset[idx]
-
-                        # Extract image
-                        if 'inputs' in data_sample:
-                            img = data_sample['inputs']
-                            if isinstance(img, torch.Tensor):
-                                img_np = tensor_to_numpy(img.permute(1, 2, 0) * 255).astype(np.uint8)
+                
+                # Process in batches
+                for batch_start in tqdm(range(0, len(train_dataset), BATCH_SIZE), disable=runner.rank != 0, desc="Batch Dataset Inference"):
+                    batch_end = min(batch_start + BATCH_SIZE, len(train_dataset))
+                    
+                    # Prepare batch data
+                    images_batch = []
+                    gt_keypoints_batch = []
+                    
+                    for idx in range(batch_start, batch_end):
+                        try:
+                            data_sample = train_dataset[idx]
+                            
+                            # Extract image - handle different possible formats
+                            if 'inputs' in data_sample:
+                                img = data_sample['inputs']
+                                if isinstance(img, torch.Tensor):
+                                    # Convert from (C, H, W) tensor to (H, W, C) numpy
+                                    img_np = tensor_to_numpy(img.permute(1, 2, 0) * 255).astype(np.uint8)
+                                else:
+                                    img_np = np.array(img, dtype=np.uint8)
                             else:
-                                img_np = np.array(img, dtype=np.uint8)
-                        else:
-                            continue
-
-                        # Extract GT keypoints
-                        if 'data_samples' in data_sample and hasattr(data_sample['data_samples'], 'gt_instances'):
-                            gt_instances = data_sample['data_samples'].gt_instances
-                            if hasattr(gt_instances, 'keypoints') and len(gt_instances.keypoints) > 0:
-                                gt_kpts = tensor_to_numpy(gt_instances.keypoints[0])
-                            else:
+                                images_batch.append(None)
+                                gt_keypoints_batch.append(None)
                                 continue
-                        else:
+                            
+                            # Extract ground truth keypoints with robust handling
+                            if 'data_samples' in data_sample and hasattr(data_sample['data_samples'], 'gt_instances'):
+                                gt_instances = data_sample['data_samples'].gt_instances
+                                if hasattr(gt_instances, 'keypoints') and len(gt_instances.keypoints) > 0:
+                                    gt_kpts = tensor_to_numpy(gt_instances.keypoints[0])
+                                    images_batch.append(img_np)
+                                    gt_keypoints_batch.append(gt_kpts)
+                                else:
+                                    images_batch.append(None)
+                                    gt_keypoints_batch.append(None)
+                            else:
+                                images_batch.append(None)
+                                gt_keypoints_batch.append(None)
+                                
+                        except Exception as e:
+                            # Only log every 100th error to avoid spam
+                            if idx % 100 == 0:
+                                logger.warning(f'[ConcurrentMLPTrainingHook] Failed to process sample {idx}: {e}')
+                            images_batch.append(None)
+                            gt_keypoints_batch.append(None)
                             continue
-
-                        batch_imgs.append(img_np)
-                        batch_bboxes.append([0, 0, 224, 224])
-                        batch_gts.append(gt_kpts)
-
-                        if len(batch_imgs) == self.inference_batch_size:
-                            processed_count += _process_inference_batch(batch_imgs, batch_bboxes, batch_gts)
-                            batch_imgs, batch_bboxes, batch_gts = [], [], []
-
-                    except Exception as e:
-                        if idx % 100 == 0:
-                            logger.debug(f'[ConcurrentMLPTrainingHook] Failed to prepare sample {idx}: {e}')
-                        continue
-
-                if batch_imgs:
-                    processed_count += _process_inference_batch(batch_imgs, batch_bboxes, batch_gts)
-
-                logger.info(f'[ConcurrentMLPTrainingHook] Successfully processed {processed_count} samples via dataset iteration')
+                    
+                    # Run batch inference
+                    batch_preds, batch_gts, batch_errors = batch_inference(images_batch, gt_keypoints_batch)
+                    
+                    # Add to results
+                    all_preds.extend(batch_preds)
+                    all_gts.extend(batch_gts)
+                    all_errors.extend(batch_errors)
+                    
+                    processed_count += len(batch_preds)
+                
+                logger.info(f'[ConcurrentMLPTrainingHook] Successfully processed {processed_count} samples via dataset iteration with batch inference')
 
         except Exception as e:
-            logger.error(f'[ConcurrentMLPTrainingHook] Critical error during data processing: {e}')
+            logger.error(f'[ConcurrentMLPTrainingHook] Critical error during batch data processing: {e}')
             return
 
         if not all_preds:
@@ -519,7 +464,7 @@ class ConcurrentMLPTrainingHook(Hook):
         all_gts = np.stack(all_gts)      # [N, 38]
         all_errors = np.stack(all_errors)  # [N, 19]
         
-        logger.info(f'[ConcurrentMLPTrainingHook] Generated predictions for {len(all_preds)} samples')
+        logger.info(f'[ConcurrentMLPTrainingHook] Generated predictions for {len(all_preds)} samples using batch inference (batch_size={BATCH_SIZE})')
 
         # -----------------------------------------------------------------
         # Step 1.5: Compute hard-example weights
