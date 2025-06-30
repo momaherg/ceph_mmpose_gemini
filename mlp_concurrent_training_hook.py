@@ -286,10 +286,10 @@ class ConcurrentMLPTrainingHook(Hook):
                 processed = 0
                 for res, gt_kpts in zip(results, batch_gts):
                     try:
-                        if res is None or len(res) == 0:
+                        if res is None:
                             continue
-                        first_sample = res[0] if isinstance(res, (list, tuple)) else res
-                        pred_kpts = tensor_to_numpy(first_sample.pred_instances.keypoints[0])
+                        # res is already a PoseDataSample object for this image
+                        pred_kpts = tensor_to_numpy(res.pred_instances.keypoints[0])
                         if pred_kpts.shape[0] != 19:
                             continue
 
