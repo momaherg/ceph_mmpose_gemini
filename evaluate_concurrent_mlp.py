@@ -20,6 +20,8 @@ import argparse
 import matplotlib.pyplot as plt
 from sklearn.preprocessing import StandardScaler
 import joblib
+import cv2
+from matplotlib.patches import Circle
 
 # Add current directory to path for custom modules
 sys.path.insert(0, os.getcwd())
@@ -74,6 +76,67 @@ class JointMLPRefinementModel(nn.Module):
             
         return out + 0.1 * residual  # Small residual weight to start
 
+def calculate_angle(p1, p2, p3):
+    """
+    Calculate angle at point p2 formed by points p1-p2-p3.
+    Args:
+        p1, p2, p3: numpy arrays of shape (2,) representing (x, y) coordinates
+    Returns:
+        angle in degrees
+    """
+    # Create vectors
+    v1 = p1 - p2  # Vector from p2 to p1
+    v2 = p3 - p2  # Vector from p2 to p3
+    
+    # Calculate angle using dot product
+    cos_angle = np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2))
+    
+    # Clamp to avoid numerical errors
+    cos_angle = np.clip(cos_angle, -1.0, 1.0)
+    
+    # Convert to degrees
+    angle = np.arccos(cos_angle) * 180.0 / np.pi
+    
+    return angle
+
+def calculate_anb_angle(landmarks):
+    """
+    Calculate ANB angle from cephalometric landmarks.
+    ANB = SNA - SNB
+    
+    Args:
+        landmarks: numpy array of shape (19, 2) with landmark coordinates
+    Returns:
+        ANB angle in degrees
+    """
+    # Get landmark indices
+    sella_idx = 0    # sella
+    nasion_idx = 1   # nasion  
+    a_point_idx = 2  # A_point
+    b_point_idx = 3  # B_point
+    
+    # Get landmark coordinates
+    sella = landmarks[sella_idx]
+    nasion = landmarks[nasion_idx]
+    a_point = landmarks[a_point_idx]
+    b_point = landmarks[b_point_idx]
+    
+    # Check if landmarks are valid (not [0,0])
+    if (np.array_equal(sella, [0, 0]) or np.array_equal(nasion, [0, 0]) or 
+        np.array_equal(a_point, [0, 0]) or np.array_equal(b_point, [0, 0])):
+        return np.nan
+    
+    # Calculate SNA angle (Sella-Nasion-A point)
+    sna_angle = calculate_angle(sella, nasion, a_point)
+    
+    # Calculate SNB angle (Sella-Nasion-B point)  
+    snb_angle = calculate_angle(sella, nasion, b_point)
+    
+    # ANB = SNA - SNB
+    anb_angle = sna_angle - snb_angle
+    
+    return anb_angle
+
 def apply_joint_mlp_refinement(predictions, mlp_joint, scaler_input, scaler_target, device):
     """Apply joint MLP refinement to predictions."""
     try:
@@ -101,6 +164,68 @@ def apply_joint_mlp_refinement(predictions, mlp_joint, scaler_input, scaler_targ
     except Exception as e:
         print(f"Joint MLP refinement failed: {e}")
         return predictions
+
+def plot_landmarks_on_image(image, pred_coords, gt_coords, landmark_names, title, save_path):
+    """
+    Plot landmarks on image showing both predictions and ground truth.
+    
+    Args:
+        image: numpy array of shape (224, 224, 3)
+        pred_coords: predicted coordinates, shape (19, 2)
+        gt_coords: ground truth coordinates, shape (19, 2)
+        landmark_names: list of landmark names
+        title: plot title
+        save_path: path to save the plot
+    """
+    fig, ax = plt.subplots(1, 1, figsize=(12, 12))
+    
+    # Display image
+    ax.imshow(image)
+    
+    # Plot landmarks
+    for i, (pred, gt, name) in enumerate(zip(pred_coords, gt_coords, landmark_names)):
+        # Skip invalid landmarks
+        if gt[0] <= 0 or gt[1] <= 0:
+            continue
+            
+        # Plot ground truth (green circles)
+        circle_gt = Circle((gt[0], gt[1]), radius=3, color='green', alpha=0.7)
+        ax.add_patch(circle_gt)
+        
+        # Plot predictions (red crosses)
+        ax.plot(pred[0], pred[1], 'rx', markersize=8, markeredgewidth=2)
+        
+        # Add landmark labels
+        ax.annotate(f'{i}', (gt[0], gt[1]), xytext=(5, 5), 
+                   textcoords='offset points', fontsize=8, color='white',
+                   bbox=dict(boxstyle='round,pad=0.3', facecolor='black', alpha=0.7))
+    
+    # Calculate overall error
+    valid_mask = (gt_coords[:, 0] > 0) & (gt_coords[:, 1] > 0)
+    if np.any(valid_mask):
+        errors = np.sqrt(np.sum((pred_coords[valid_mask] - gt_coords[valid_mask])**2, axis=1))
+        mean_error = np.mean(errors)
+        ax.set_title(f'{title}\nMean Error: {mean_error:.2f} pixels', fontsize=14)
+    else:
+        ax.set_title(title, fontsize=14)
+    
+    # Add legend
+    from matplotlib.lines import Line2D
+    legend_elements = [
+        Line2D([0], [0], marker='o', color='w', markerfacecolor='green', 
+               markersize=8, label='Ground Truth', alpha=0.7),
+        Line2D([0], [0], marker='x', color='red', markersize=8, 
+               markeredgewidth=2, label='Prediction', linestyle='None')
+    ]
+    ax.legend(handles=legend_elements, loc='upper right')
+    
+    ax.set_xlim(0, 224)
+    ax.set_ylim(224, 0)  # Flip y-axis for image coordinates
+    ax.axis('off')
+    
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150, bbox_inches='tight')
+    plt.close()
 
 def compute_metrics(pred_coords, gt_coords, landmark_names):
     """Compute comprehensive evaluation metrics."""
@@ -310,6 +435,8 @@ def main():
     hrnet_predictions = []
     mlp_predictions = []
     ground_truths = []
+    test_images = []
+    test_indices = []
     
     from tqdm import tqdm
     
@@ -357,6 +484,8 @@ def main():
             hrnet_predictions.append(pred_keypoints)
             mlp_predictions.append(refined_keypoints)
             ground_truths.append(gt_keypoints)
+            test_images.append(img_array)
+            test_indices.append(idx)
             
         except Exception as e:
             print(f"Failed to process sample {idx}: {e}")
@@ -379,6 +508,47 @@ def main():
     hrnet_overall, hrnet_per_landmark = compute_metrics(hrnet_coords, gt_coords, landmark_names)
     mlp_overall, mlp_per_landmark = compute_metrics(mlp_coords, gt_coords, landmark_names)
     
+    # Calculate ANB angles for all samples
+    print("\n📐 Computing ANB angles...")
+    hrnet_anb_angles = []
+    mlp_anb_angles = []
+    gt_anb_angles = []
+    
+    for i in range(len(ground_truths)):
+        gt_anb = calculate_anb_angle(gt_coords[i])
+        hrnet_anb = calculate_anb_angle(hrnet_coords[i])
+        mlp_anb = calculate_anb_angle(mlp_coords[i])
+        
+        if not (np.isnan(gt_anb) or np.isnan(hrnet_anb) or np.isnan(mlp_anb)):
+            gt_anb_angles.append(gt_anb)
+            hrnet_anb_angles.append(hrnet_anb)
+            mlp_anb_angles.append(mlp_anb)
+    
+    gt_anb_angles = np.array(gt_anb_angles)
+    hrnet_anb_angles = np.array(hrnet_anb_angles)
+    mlp_anb_angles = np.array(mlp_anb_angles)
+    
+    # Compute ANB angle errors
+    hrnet_anb_errors = np.abs(hrnet_anb_angles - gt_anb_angles)
+    mlp_anb_errors = np.abs(mlp_anb_angles - gt_anb_angles)
+    
+    # Find best and worst examples based on overall MRE
+    sample_errors = []
+    for i in range(len(hrnet_predictions)):
+        # Calculate per-sample MRE for HRNet
+        valid_mask = (gt_coords[i, :, 0] > 0) & (gt_coords[i, :, 1] > 0)
+        if np.any(valid_mask):
+            errors = np.sqrt(np.sum((hrnet_coords[i, valid_mask] - gt_coords[i, valid_mask])**2, axis=1))
+            sample_mre = np.mean(errors)
+            sample_errors.append((sample_mre, i))
+    
+    # Sort by error
+    sample_errors.sort(key=lambda x: x[0])
+    
+    # Get best and worst examples (top 3 and bottom 3)
+    best_examples = sample_errors[:3]  # Lowest errors
+    worst_examples = sample_errors[-3:]  # Highest errors
+    
     # Print results
     print("\n" + "="*80)
     print("JOINT MLP EVALUATION RESULTS")
@@ -400,6 +570,26 @@ def main():
     print(f"{'P90':<15} {hrnet_overall['p90']:<15.3f} {mlp_overall['p90']:<15.3f}")
     print(f"{'P95':<15} {hrnet_overall['p95']:<15.3f} {mlp_overall['p95']:<15.3f}")
     
+    # ANB angle results
+    if len(gt_anb_angles) > 0:
+        print(f"\n📐 ANB ANGLE ANALYSIS:")
+        print(f"{'Metric':<20} {'HRNetV2':<15} {'Joint MLP':<15} {'Improvement':<15}")
+        print("-" * 70)
+        
+        hrnet_anb_mae = np.mean(hrnet_anb_errors)
+        mlp_anb_mae = np.mean(mlp_anb_errors)
+        anb_improvement = (hrnet_anb_mae - mlp_anb_mae) / hrnet_anb_mae * 100
+        
+        hrnet_anb_std = np.std(hrnet_anb_errors)
+        mlp_anb_std = np.std(mlp_anb_errors)
+        
+        print(f"{'Mean Abs Error (°)':<20} {hrnet_anb_mae:<15.2f} {mlp_anb_mae:<15.2f} {anb_improvement:<15.1f}%")
+        print(f"{'Std Dev (°)':<20} {hrnet_anb_std:<15.2f} {mlp_anb_std:<15.2f}")
+        print(f"{'Max Error (°)':<20} {np.max(hrnet_anb_errors):<15.2f} {np.max(mlp_anb_errors):<15.2f}")
+        print(f"{'Samples Analyzed':<20} {len(gt_anb_angles)}")
+    else:
+        print(f"\n⚠️  No valid ANB angles could be computed (missing landmarks)")
+    
     # Per-landmark comparison for problematic landmarks
     print(f"\n🎯 PROBLEMATIC LANDMARKS COMPARISON:")
     problematic_landmarks = ['sella', 'Gonion', 'PNS', 'A_point', 'B_point']
@@ -419,6 +609,59 @@ def main():
     output_dir = os.path.join(args.work_dir, "joint_mlp_evaluation")
     os.makedirs(output_dir, exist_ok=True)
     
+    # Plot best and worst examples
+    print(f"\n🖼️  Saving best and worst prediction examples...")
+    examples_dir = os.path.join(output_dir, "examples")
+    os.makedirs(examples_dir, exist_ok=True)
+    
+    # Plot best examples (HRNet vs MLP)
+    for rank, (error, sample_idx) in enumerate(best_examples):
+        # HRNet prediction
+        hrnet_plot_path = os.path.join(examples_dir, f"best_{rank+1}_hrnet.png")
+        plot_landmarks_on_image(
+            test_images[sample_idx], 
+            hrnet_coords[sample_idx], 
+            gt_coords[sample_idx], 
+            landmark_names,
+            f"Best Example #{rank+1} - HRNetV2",
+            hrnet_plot_path
+        )
+        
+        # MLP prediction
+        mlp_plot_path = os.path.join(examples_dir, f"best_{rank+1}_mlp.png")
+        plot_landmarks_on_image(
+            test_images[sample_idx], 
+            mlp_coords[sample_idx], 
+            gt_coords[sample_idx], 
+            landmark_names,
+            f"Best Example #{rank+1} - Joint MLP",
+            mlp_plot_path
+        )
+    
+    # Plot worst examples (HRNet vs MLP)
+    for rank, (error, sample_idx) in enumerate(worst_examples):
+        # HRNet prediction
+        hrnet_plot_path = os.path.join(examples_dir, f"worst_{rank+1}_hrnet.png")
+        plot_landmarks_on_image(
+            test_images[sample_idx], 
+            hrnet_coords[sample_idx], 
+            gt_coords[sample_idx], 
+            landmark_names,
+            f"Worst Example #{rank+1} - HRNetV2",
+            hrnet_plot_path
+        )
+        
+        # MLP prediction
+        mlp_plot_path = os.path.join(examples_dir, f"worst_{rank+1}_mlp.png")
+        plot_landmarks_on_image(
+            test_images[sample_idx], 
+            mlp_coords[sample_idx], 
+            gt_coords[sample_idx], 
+            landmark_names,
+            f"Worst Example #{rank+1} - Joint MLP",
+            mlp_plot_path
+        )
+    
     # Save detailed results
     results_summary = {
         'hrnet_overall': hrnet_overall,
@@ -427,7 +670,13 @@ def main():
         'improvement_std': improvement_std,
         'improvement_median': improvement_median,
         'total_samples': len(hrnet_predictions),
-        'model_type': model_type
+        'model_type': model_type,
+        'anb_analysis': {
+            'hrnet_anb_mae': hrnet_anb_mae if len(gt_anb_angles) > 0 else None,
+            'mlp_anb_mae': mlp_anb_mae if len(gt_anb_angles) > 0 else None,
+            'anb_improvement': anb_improvement if len(gt_anb_angles) > 0 else None,
+            'anb_samples': len(gt_anb_angles)
+        }
     }
     
     # Save per-landmark comparison
@@ -451,7 +700,15 @@ def main():
     comparison_df.to_csv(os.path.join(output_dir, "per_landmark_comparison.csv"), index=False)
     
     # Create visualization
-    fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 12))
+    fig = plt.figure(figsize=(20, 15))
+    
+    # Create 2x3 subplot layout
+    ax1 = plt.subplot(2, 3, 1)
+    ax2 = plt.subplot(2, 3, 2)
+    ax3 = plt.subplot(2, 3, 3)
+    ax4 = plt.subplot(2, 3, 4)
+    ax5 = plt.subplot(2, 3, 5)
+    ax6 = plt.subplot(2, 3, 6)
     
     # Overall comparison
     methods = ['HRNetV2', 'Joint MLP']
@@ -507,6 +764,44 @@ def main():
     ax4.legend()
     ax4.grid(True, alpha=0.3)
     
+    # ANB angle comparison
+    if len(gt_anb_angles) > 0:
+        methods_anb = ['HRNetV2', 'Joint MLP']
+        anb_maes = [hrnet_anb_mae, mlp_anb_mae]
+        anb_stds = [hrnet_anb_std, mlp_anb_std]
+        
+        ax5.bar(methods_anb, anb_maes, yerr=anb_stds, capsize=5, alpha=0.7, 
+                color=['skyblue', 'lightcoral'])
+        ax5.set_ylabel('Mean Absolute Error (degrees)')
+        ax5.set_title('ANB Angle Error Comparison')
+        ax5.grid(True, alpha=0.3)
+        
+        # Add improvement percentage
+        ax5.text(1, mlp_anb_mae + mlp_anb_std + 0.1, 
+                 f'{anb_improvement:.1f}% improvement', ha='center', va='bottom', 
+                 fontsize=10, color='green' if anb_improvement > 0 else 'red', fontweight='bold')
+        
+        # ANB angle scatter plot
+        ax6.scatter(hrnet_anb_errors, mlp_anb_errors, alpha=0.6, color='purple')
+        
+        # Add diagonal line
+        max_anb_error = max(np.max(hrnet_anb_errors), np.max(mlp_anb_errors))
+        ax6.plot([0, max_anb_error], [0, max_anb_error], 'r--', alpha=0.8, 
+                 label='No improvement line')
+        ax6.set_xlabel('HRNetV2 ANB Error (degrees)')
+        ax6.set_ylabel('Joint MLP ANB Error (degrees)')
+        ax6.set_title('ANB Angle Error Correlation')
+        ax6.legend()
+        ax6.grid(True, alpha=0.3)
+    else:
+        ax5.text(0.5, 0.5, 'No valid ANB angles\ncould be computed', 
+                 ha='center', va='center', transform=ax5.transAxes, fontsize=12)
+        ax5.set_title('ANB Angle Analysis')
+        
+        ax6.text(0.5, 0.5, 'ANB angle analysis\nrequires valid\nSella, Nasion, A, B points', 
+                 ha='center', va='center', transform=ax6.transAxes, fontsize=10)
+        ax6.set_title('ANB Requirements')
+    
     plt.tight_layout()
     plot_path = os.path.join(output_dir, "joint_mlp_evaluation_results.png")
     plt.savefig(plot_path, dpi=150, bbox_inches='tight')
@@ -514,17 +809,32 @@ def main():
     
     print(f"\n💾 Results saved to: {output_dir}")
     print(f"   - Per-landmark comparison: per_landmark_comparison.csv")
-    print(f"   - Visualization: joint_mlp_evaluation_results.png")
+    print(f"   - Comprehensive visualization: joint_mlp_evaluation_results.png")
+    print(f"   - Best/worst examples: examples/ directory")
+    print(f"     • Best 3 examples: best_1_hrnet.png, best_1_mlp.png, etc.")
+    print(f"     • Worst 3 examples: worst_1_hrnet.png, worst_1_mlp.png, etc.")
     
     print(f"\n🎉 Joint MLP evaluation completed!")
     print(f"📈 Overall improvement: {improvement_mre:.1f}% reduction in MRE")
     print(f"🎯 Joint model captures cross-correlations between landmarks")
     print(f"🔧 Evaluated using: {model_type} joint MLP model")
     
+    if len(gt_anb_angles) > 0:
+        print(f"📐 ANB angle improvement: {anb_improvement:.1f}% reduction in MAE")
+        print(f"   ({len(gt_anb_angles)} samples with valid ANB calculations)")
+    else:
+        print(f"⚠️  ANB angle analysis not available (missing required landmarks)")
+    
+    print(f"\n🖼️  Visual analysis available:")
+    print(f"   - Compare HRNet vs MLP predictions on best/worst cases")
+    print(f"   - Green circles = Ground truth landmarks")
+    print(f"   - Red crosses = Model predictions")
+    print(f"   - Numbers indicate landmark indices (see cephalometric_dataset_info.py)")
+    
     if model_type == "latest":
-        print("💡 Note: Training is likely still in progress. Final results may differ.")
+        print("\n💡 Note: Training is likely still in progress. Final results may differ.")
     elif "epoch_" in model_type:
-        print("💡 Note: Using intermediate checkpoint. Final results may differ.")
+        print("\n💡 Note: Using intermediate checkpoint. Final results may differ.")
 
 if __name__ == "__main__":
     main() 

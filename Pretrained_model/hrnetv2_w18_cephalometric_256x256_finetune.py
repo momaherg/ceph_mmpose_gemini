@@ -158,6 +158,8 @@ custom_hooks = [
         log_interval=20,                     # Log MLP training progress every 20 epochs
         inference_batch_size=80,             # Batch size for HRNet inference step
         enable_hrnet_hard_sampling=True,     # Enable hard example oversampling for HRNetV2 
-        hrnet_hard_sampling_ratio=1.5        # Increase dataset size by this factor for hard sampling
+        hrnet_hard_sampling_ratio=1.5,       # Increase dataset size by this factor for hard sampling
+        enable_prediction_caching=True,      # Enable prediction caching to avoid double processing
+        cache_clear_interval=1               # Clear cache every N epochs to manage memory
     )
 ] 
