@@ -265,7 +265,48 @@ class ConcurrentMLPTrainingHook(Hook):
         try:
             from tqdm import tqdm
 
-            # Helper -----------------------------------------------------------------
+            # Helper functions -------------------------------------------------------
+            def _process_individual_inference(batch_imgs, batch_bboxes, batch_gts):
+                """Fallback to individual inference when batched inference fails."""
+                processed = 0
+                for img, bbox, gt_kpts in zip(batch_imgs, batch_bboxes, batch_gts):
+                    try:
+                        # Ensure single image is properly formatted
+                        if isinstance(img, list):
+                            img = np.array(img, dtype=np.uint8)
+                        if isinstance(img, np.ndarray):
+                            if img.ndim == 1:
+                                img = img.reshape((224, 224, 3))
+                            img = img.astype(np.uint8)
+                        else:
+                            continue
+                            
+                        # Run individual inference
+                        result = inference_topdown(
+                            model,
+                            [img],  # Single image in list
+                            bboxes=np.array([bbox], dtype=np.float32),
+                            bbox_format='xyxy'
+                        )
+                        
+                        if result and len(result) > 0:
+                            res = result[0]
+                            if res is not None:
+                                pred_kpts = tensor_to_numpy(res.pred_instances.keypoints[0])
+                                if pred_kpts.shape[0] == 19:
+                                    pred_flat = pred_kpts.flatten()
+                                    gt_flat = gt_kpts.flatten()
+                                    landmark_errors = np.sqrt(np.sum((pred_kpts - gt_kpts) ** 2, axis=1))
+                                    
+                                    all_preds.append(pred_flat)
+                                    all_gts.append(gt_flat)
+                                    all_errors.append(landmark_errors)
+                                    processed += 1
+                    except Exception as e:
+                        logger.debug(f'[ConcurrentMLPTrainingHook] Individual inference failed: {e}')
+                        continue
+                return processed
+
             def _process_inference_batch(batch_imgs, batch_bboxes, batch_gts):
                 """Run batched inference_topdown and collect results into the global lists."""
                 if not batch_imgs:
@@ -274,23 +315,49 @@ class ConcurrentMLPTrainingHook(Hook):
                 try:
                     # Ensure images are properly formatted as numpy arrays
                     processed_imgs = []
-                    for img in batch_imgs:
+                    for i, img in enumerate(batch_imgs):
                         if isinstance(img, np.ndarray):
-                            processed_imgs.append(img)
+                            if img.shape == (224, 224, 3) and img.dtype == np.uint8:
+                                processed_imgs.append(img)
+                            else:
+                                logger.debug(f'[ConcurrentMLPTrainingHook] Image {i} shape/dtype issue: {img.shape}, {img.dtype}')
+                                # Try to fix the image
+                                if img.ndim == 1:
+                                    img = img.reshape((224, 224, 3))
+                                img = img.astype(np.uint8)
+                                processed_imgs.append(img)
+                        elif isinstance(img, list):
+                            # Convert list to numpy array
+                            img_array = np.array(img, dtype=np.uint8)
+                            if img_array.ndim == 1:
+                                img_array = img_array.reshape((224, 224, 3))
+                            processed_imgs.append(img_array)
                         else:
-                            # Convert to numpy array if needed
-                            processed_imgs.append(np.array(img, dtype=np.uint8))
+                            logger.warning(f'[ConcurrentMLPTrainingHook] Unexpected image type: {type(img)}')
+                            continue
+                    
+                    if not processed_imgs:
+                        logger.warning('[ConcurrentMLPTrainingHook] No valid images in batch after processing')
+                        return 0
+                    
+                    # Debug: log first batch details
+                    if len(all_preds) == 0:  # First batch
+                        logger.info(f'[ConcurrentMLPTrainingHook] First batch: {len(processed_imgs)} images, shapes: {[img.shape for img in processed_imgs[:3]]}')
                     
                     # Run batched inference
                     results = inference_topdown(
                         model,
                         processed_imgs,
-                        bboxes=np.array(batch_bboxes, dtype=np.float32),
+                        bboxes=np.array(batch_bboxes[:len(processed_imgs)], dtype=np.float32),
                         bbox_format='xyxy'
                     )
                 except Exception as e:
                     logger.warning(f'[ConcurrentMLPTrainingHook] Batched inference failure: {e}')
-                    return 0
+                    # Try individual inference as fallback
+                    logger.info('[ConcurrentMLPTrainingHook] Falling back to individual inference...')
+                    return _process_individual_inference(batch_imgs, batch_bboxes, batch_gts)
+                
+                # Continue with result processing...
 
                 processed = 0
                 for res, gt_kpts in zip(results, batch_gts):
@@ -335,7 +402,20 @@ class ConcurrentMLPTrainingHook(Hook):
 
                     for idx, row in tqdm(df.iterrows(), total=len(df), disable=runner.rank != 0, desc="GPU Inference from File"):
                         try:
-                            img_array = np.array(row['Image'], dtype=np.uint8).reshape((224, 224, 3))
+                            # More robust image loading with debugging
+                            raw_image = row['Image']
+                            if isinstance(raw_image, list):
+                                # Convert list to numpy array
+                                img_array = np.array(raw_image, dtype=np.uint8)
+                            else:
+                                img_array = np.array(raw_image, dtype=np.uint8)
+                            
+                            # Ensure proper shape
+                            if img_array.ndim == 1:
+                                img_array = img_array.reshape((224, 224, 3))
+                            elif img_array.shape != (224, 224, 3):
+                                logger.debug(f'[ConcurrentMLPTrainingHook] Unexpected image shape: {img_array.shape}')
+                                continue
 
                             # Build GT keypoints
                             gt_keypoints = []
