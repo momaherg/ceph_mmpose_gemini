@@ -2,7 +2,7 @@ _base_ = ['./td-hm_hrnetv2-w18_8xb64-60e_aflw-256x256.py'] # Inherit from origin
 
 # Fine-tuning specific
 load_from = 'Pretrained_model/hrnetv2_w18_aflw_256x256-f2bbc62b_20210125.pth'
-train_cfg = dict(by_epoch=True, max_epochs=100, val_interval=2) # Extended training: 60 -> 100 epochs
+train_cfg = dict(by_epoch=True, max_epochs=222, val_interval=2) # Extended training: 100 -> 222 epochs
 
 # Improved optimizer settings with cosine annealing
 optim_wrapper = dict(
@@ -14,13 +14,13 @@ optim_wrapper = dict(
 # Learning rate scheduler with warm-up and step decay
 param_scheduler = [
     dict(type='LinearLR', begin=0, end=500, start_factor=1e-3, by_epoch=False),  # Warm-up
-    # dict(type='CosineAnnealingLR', T_max=100, eta_min=1e-6, by_epoch=True)  # Cosine annealing - updated T_max to match max_epochs
+    # dict(type='CosineAnnealingLR', T_max=222, eta_min=1e-6, by_epoch=True)  # Cosine annealing - updated T_max to match max_epochs
     dict(
         type='MultiStepLR',
         begin=0,
-        end=100,
+        end=222,
         by_epoch=True,
-        milestones=[70, 90],  # Decay LR at epoch 70 and 90
+        milestones=[155, 200],  # Decay LR at epoch 155 and 200 (scaled from [70, 90] for 100 epochs)
         gamma=0.1)
 ]
 
@@ -138,23 +138,25 @@ test_evaluator = val_evaluator
 #    visualization=dict(enable=True, type='PoseVisualizationHook')) 
 
 # =========================================================================
-# CONCURRENT JOINT MLP TRAINING HOOK
+# CONCURRENT JOINT MLP TRAINING HOOK WITH HRNET HARD-EXAMPLE OVERSAMPLING
 # =========================================================================
 # This hook trains a joint MLP refinement model on-the-fly during HRNetV2 training.
 # After each HRNet epoch, it:
 # 1. Runs inference on training data using current HRNet weights
-# 2. Trains a joint 38-D MLP model (all coordinates together) for 100 epochs
-# 3. Implements hard-example oversampling for samples with high landmark errors
-# 4. Keeps MLP parameters independent (no gradient leakage to HRNet)
+# 2. Identifies hard examples based on landmark prediction errors
+# 3. Trains a joint 38-D MLP model for 100 epochs with hard-example oversampling
+# 4. Creates weighted sampler for next HRNet epoch to oversample hard examples
+# 5. Keeps MLP parameters independent (no gradient leakage to HRNet)
 
 custom_hooks = [
     dict(
         type='ConcurrentMLPTrainingHook',
-        mlp_epochs=100,              # Train joint MLP for 100 epochs after each HRNet epoch
-        mlp_batch_size=16,           # MLP batch size
-        mlp_lr=1e-5,                 # MLP learning rate (same as standalone training)
-        mlp_weight_decay=1e-4,       # MLP weight decay
-        hard_example_threshold=5.0,  # MRE threshold for hard-example oversampling (pixels)
-        log_interval=20              # Log MLP training progress every 20 epochs
+        mlp_epochs=100,                    # Train joint MLP for 100 epochs after each HRNet epoch
+        mlp_batch_size=16,                 # MLP batch size
+        mlp_lr=1e-5,                       # MLP learning rate (same as standalone training)
+        mlp_weight_decay=1e-4,             # MLP weight decay
+        hard_example_threshold=5.0,        # MRE threshold for hard-example identification (pixels)
+        hrnet_hard_example_weight=2.0,     # Weight multiplier for hard examples in next HRNet epoch (2x oversampling)
+        log_interval=20                    # Log MLP training progress every 20 epochs
     )
 ] 

@@ -64,6 +64,9 @@ import pandas as pd
 from sklearn.preprocessing import StandardScaler
 import joblib
 
+# Import for weighted sampling
+from torch.utils.data import WeightedRandomSampler
+
 # -----------------------------------------------------------------------------
 #  Joint MLP architecture for 38-D coordinate prediction
 # -----------------------------------------------------------------------------
@@ -164,6 +167,7 @@ class ConcurrentMLPTrainingHook(Hook):
         mlp_weight_decay: float = 1e-4,
         hard_example_threshold: float = 5.0,  # MRE threshold in pixels
         log_interval: int = 50,
+        hrnet_hard_example_weight: float = 2.0,  # Weight multiplier for hard examples in HRNet training
     ) -> None:
         self.mlp_epochs = mlp_epochs
         self.mlp_batch_size = mlp_batch_size
@@ -171,6 +175,7 @@ class ConcurrentMLPTrainingHook(Hook):
         self.mlp_weight_decay = mlp_weight_decay
         self.hard_example_threshold = hard_example_threshold
         self.log_interval = log_interval
+        self.hrnet_hard_example_weight = hrnet_hard_example_weight
 
         # These will be initialised in before_run
         self.mlp_joint: JointMLPRefinementModel | None = None
@@ -182,6 +187,10 @@ class ConcurrentMLPTrainingHook(Hook):
         self.scaler_input: StandardScaler | None = None
         self.scaler_target: StandardScaler | None = None
         self.scalers_initialized = False
+        
+        # Store sample weights for HRNet training
+        self.sample_weights_for_hrnet: np.ndarray | None = None
+        self.sample_indices_mapping: List[int] | None = None
 
     # ---------------------------------------------------------------------
     # MMEngine lifecycle methods
@@ -200,6 +209,71 @@ class ConcurrentMLPTrainingHook(Hook):
         
         logger.info(f'[ConcurrentMLPTrainingHook] Joint MLP initialized with {sum(p.numel() for p in self.mlp_joint.parameters()):,} parameters')
         logger.info(f'[ConcurrentMLPTrainingHook] Hard-example threshold: {self.hard_example_threshold} pixels')
+        logger.info(f'[ConcurrentMLPTrainingHook] HRNet hard-example weight: {self.hrnet_hard_example_weight}x')
+
+    def _create_weighted_sampler_for_hrnet(self, runner: Runner, sample_weights: np.ndarray):
+        """Create a weighted sampler for HRNetV2 training based on hard examples."""
+        logger: MMLogger = runner.logger
+        
+        try:
+            # Store weights and mapping for the next epoch
+            self.sample_weights_for_hrnet = sample_weights.copy()
+            self.sample_indices_mapping = list(range(len(sample_weights)))
+            
+            # Create weighted sampler
+            # Convert numpy weights to torch tensor
+            weights_tensor = torch.from_numpy(sample_weights).float()
+            
+            # Create weighted random sampler
+            weighted_sampler = WeightedRandomSampler(
+                weights=weights_tensor,
+                num_samples=len(sample_weights),
+                replacement=True  # Allow replacement for oversampling
+            )
+            
+            # Update the train dataloader with the new sampler
+            train_dataloader = runner.train_dataloader
+            
+            # Create new dataloader with weighted sampler
+            from torch.utils.data import DataLoader
+            
+            new_train_dataloader = DataLoader(
+                dataset=train_dataloader.dataset,
+                batch_size=train_dataloader.batch_size,
+                sampler=weighted_sampler,
+                num_workers=train_dataloader.num_workers,
+                pin_memory=getattr(train_dataloader, 'pin_memory', False),
+                drop_last=getattr(train_dataloader, 'drop_last', False),
+                persistent_workers=getattr(train_dataloader, 'persistent_workers', False),
+            )
+            
+            # Replace the runner's train dataloader
+            runner.train_dataloader = new_train_dataloader
+            
+            num_hard_examples = np.sum(sample_weights > 1.0)
+            logger.info(f'[ConcurrentMLPTrainingHook] Updated HRNet training with weighted sampler')
+            logger.info(f'[ConcurrentMLPTrainingHook] Hard examples will be oversampled {self.hrnet_hard_example_weight}x for next epoch')
+            logger.info(f'[ConcurrentMLPTrainingHook] {num_hard_examples}/{len(sample_weights)} samples marked as hard examples')
+            
+        except Exception as e:
+            logger.warning(f'[ConcurrentMLPTrainingHook] Failed to create weighted sampler for HRNet: {e}')
+            logger.warning('[ConcurrentMLPTrainingHook] Continuing with standard sampling for HRNet')
+
+    def before_train_epoch(self, runner: Runner):
+        """Apply weighted sampling for HRNetV2 training if hard examples were identified."""
+        logger: MMLogger = runner.logger
+        
+        # Skip first epoch (no hard examples identified yet)
+        if runner.epoch == 0:
+            logger.info('[ConcurrentMLPTrainingHook] First epoch - using standard sampling for HRNet')
+            return
+            
+        # Apply weighted sampling if we have sample weights from previous epoch
+        if self.sample_weights_for_hrnet is not None:
+            logger.info(f'[ConcurrentMLPTrainingHook] Applying hard-example oversampling for HRNet epoch {runner.epoch + 1}')
+            self._create_weighted_sampler_for_hrnet(runner, self.sample_weights_for_hrnet)
+        else:
+            logger.info('[ConcurrentMLPTrainingHook] No hard examples identified yet - using standard sampling')
 
     def after_train_epoch(self, runner: Runner):
         """After each HRNetV2 epoch, train joint MLP on-the-fly using current predictions."""
@@ -465,15 +539,20 @@ class ConcurrentMLPTrainingHook(Hook):
         max_errors_per_sample = np.max(all_errors, axis=1)  # [N,] - worst landmark per sample
         hard_examples = max_errors_per_sample > self.hard_example_threshold
         
-        # Create sample weights: 1.0 for normal, 2.0 for hard examples
+        # Create sample weights: 1.0 for normal, hrnet_hard_example_weight for hard examples
         sample_weights = np.ones(len(all_preds))
-        sample_weights[hard_examples] = 2.0
+        sample_weights[hard_examples] = self.hrnet_hard_example_weight
         
         num_hard_examples = np.sum(hard_examples)
         logger.info(f'[ConcurrentMLPTrainingHook] Hard examples (>{self.hard_example_threshold}px): {num_hard_examples}/{len(all_preds)} ({num_hard_examples/len(all_preds)*100:.1f}%)')
         
         if num_hard_examples > 0:
             logger.info(f'[ConcurrentMLPTrainingHook] Hard example errors: min={np.min(max_errors_per_sample[hard_examples]):.2f}, max={np.max(max_errors_per_sample[hard_examples]):.2f}, mean={np.mean(max_errors_per_sample[hard_examples]):.2f}')
+            logger.info(f'[ConcurrentMLPTrainingHook] Hard examples will be weighted {self.hrnet_hard_example_weight}x for both MLP and next HRNet epoch')
+
+        # Store sample weights for next HRNet epoch
+        self.sample_weights_for_hrnet = sample_weights.copy()
+        logger.info(f'[ConcurrentMLPTrainingHook] Sample weights stored for next HRNet epoch training')
 
         # -----------------------------------------------------------------
         # Step 2: Initialize normalization scalers (only once)
