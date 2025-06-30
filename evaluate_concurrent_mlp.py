@@ -204,6 +204,7 @@ def main():
     synchronized_mlp_path = None
     model_type = "unknown"
     
+    # Try to find synchronized model first
     if os.path.exists(mapping_file):
         try:
             import json
@@ -226,50 +227,76 @@ def main():
         except Exception as e:
             print(f"⚠️  Failed to load checkpoint mapping: {e}")
     else:
-        print(f"⚠️  Checkpoint mapping file not found: {mapping_file}")
+        print(f"💡 Checkpoint mapping file not found - likely early training stage")
+        print(f"   Will use epoch-based MLP model matching strategy")
     
     # Fallback to existing logic if no synchronized model found
     if synchronized_mlp_path is None:
-        print("🔄 Falling back to non-synchronized MLP model search...")
+        print("🔄 Using epoch-based MLP model matching...")
         
-        # Check for joint MLP models (existing logic)
-        mlp_joint_path = os.path.join(mlp_dir, "mlp_joint_final.pth")
+        # Try to extract epoch number from HRNet checkpoint for better matching
+        hrnet_epoch = None
+        if "epoch_" in hrnet_checkpoint_name:
+            try:
+                hrnet_epoch = int(hrnet_checkpoint_name.split("epoch_")[1].split(".")[0])
+                print(f"💡 HRNet checkpoint is from epoch {hrnet_epoch}")
+            except:
+                pass
         
-        # Check for final models first, then latest, then epoch-specific
-        if os.path.exists(mlp_joint_path):
-            synchronized_mlp_path = mlp_joint_path
-            print(f"✓ Found final joint MLP model: {mlp_joint_path}")
-            model_type = "final_fallback"
-        else:
-            # Try latest model
-            mlp_joint_latest = os.path.join(mlp_dir, "mlp_joint_latest.pth")
-            
-            if os.path.exists(mlp_joint_latest):
-                synchronized_mlp_path = mlp_joint_latest
-                print(f"✓ Found latest joint MLP model: {mlp_joint_latest}")
-                model_type = "latest_fallback"
+        # First, try to find MLP model from the same epoch
+        if hrnet_epoch is not None:
+            epoch_mlp_path = os.path.join(mlp_dir, f"mlp_joint_epoch_{hrnet_epoch}.pth")
+            if os.path.exists(epoch_mlp_path):
+                synchronized_mlp_path = epoch_mlp_path
+                print(f"✓ Found matching epoch MLP model: {os.path.basename(epoch_mlp_path)}")
+                model_type = f"epoch_matched_{hrnet_epoch}"
             else:
-                # Try to find epoch-specific models
-                epoch_models = glob.glob(os.path.join(mlp_dir, "mlp_joint_epoch_*.pth"))
-                if epoch_models:
-                    # Get the latest epoch model
-                    latest_joint_model = max(epoch_models, key=lambda x: int(x.split('_epoch_')[1].split('.')[0]))
-                    epoch_num = latest_joint_model.split('_epoch_')[1].split('.')[0]
-                    
-                    synchronized_mlp_path = latest_joint_model
-                    print(f"✓ Found epoch {epoch_num} joint MLP model: {latest_joint_model}")
-                    model_type = f"epoch_{epoch_num}_fallback"
+                print(f"⚠️  No MLP model found for epoch {hrnet_epoch}")
+        
+        # If no epoch match, fall back to other strategies
+        if synchronized_mlp_path is None:
+            # Check for final model
+            mlp_joint_path = os.path.join(mlp_dir, "mlp_joint_final.pth")
+            
+            if os.path.exists(mlp_joint_path):
+                synchronized_mlp_path = mlp_joint_path
+                print(f"✓ Found final joint MLP model: {mlp_joint_path}")
+                model_type = "final_fallback"
+            else:
+                # Try latest model
+                mlp_joint_latest = os.path.join(mlp_dir, "mlp_joint_latest.pth")
+                
+                if os.path.exists(mlp_joint_latest):
+                    synchronized_mlp_path = mlp_joint_latest
+                    print(f"✓ Found latest joint MLP model: {mlp_joint_latest}")
+                    model_type = "latest_fallback"
                 else:
-                    print("ERROR: Joint MLP model not found.")
-                    print(f"Searched in: {mlp_dir}")
-                    print("Available files:")
-                    if os.path.exists(mlp_dir):
-                        for file in os.listdir(mlp_dir):
-                            print(f"  - {file}")
+                    # Try to find any epoch-specific models
+                    epoch_models = glob.glob(os.path.join(mlp_dir, "mlp_joint_epoch_*.pth"))
+                    if epoch_models:
+                        # Get the latest epoch model
+                        latest_joint_model = max(epoch_models, key=lambda x: int(x.split('_epoch_')[1].split('.')[0]))
+                        epoch_num = latest_joint_model.split('_epoch_')[1].split('.')[0]
+                        
+                        synchronized_mlp_path = latest_joint_model
+                        print(f"✓ Found epoch {epoch_num} joint MLP model: {latest_joint_model}")
+                        model_type = f"epoch_{epoch_num}_fallback"
+                        
+                        # Warn if there's a significant epoch mismatch
+                        if hrnet_epoch is not None and abs(int(epoch_num) - hrnet_epoch) > 2:
+                            print(f"⚠️  Warning: Using MLP from epoch {epoch_num} with HRNet from epoch {hrnet_epoch}")
+                            print(f"   Consider waiting for more training or using synchronized checkpoints")
                     else:
-                        print("  MLP directory does not exist")
-                    print("\nTip: Make sure concurrent joint training is running and has completed at least one epoch.")
-                    return
+                        print("ERROR: No joint MLP model found.")
+                        print(f"Searched in: {mlp_dir}")
+                        print("Available files:")
+                        if os.path.exists(mlp_dir):
+                            for file in os.listdir(mlp_dir):
+                                print(f"  - {file}")
+                        else:
+                            print("  MLP directory does not exist")
+                        print("\nTip: Make sure concurrent joint training is running and has completed at least one epoch.")
+                        return
     
     # Load models
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
