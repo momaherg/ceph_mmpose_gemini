@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Concurrent MLP Training Hook for MMEngine / MMPose
--------------------------------------------------
+Concurrent MLP Training Hook for MMEngine / MMPose with Checkpoint Synchronization
+----------------------------------------------------------------------------------
 This hook trains a joint MLP refinement model **concurrently** with HRNetV2 training.  
 After every HRNet training epoch, the hook:
 
@@ -10,12 +10,16 @@ After every HRNet training epoch, the hook:
 2.  Creates an in-memory dataset of (predicted → ground-truth) coordinate pairs.
 3.  Trains a joint MLP for a fixed number of epochs (default: 100).
 4.  Implements hard-example oversampling for samples with high landmark errors.
+5.  **NEW**: Saves synchronized MLP models whenever HRNet checkpoints are saved.
+6.  **NEW**: Creates weighted samplers for next HRNet epoch to oversample hard examples.
 
 Important design decisions:
 •   **Joint 38-D model** – Single MLP that predicts all 38 coordinates (19 x,y pairs)
     allowing the network to learn cross-correlations between X and Y axes.
 •   **Hard-example oversampling** – Samples with any landmark MRE > threshold get
-    duplicated in the training batch to focus learning on difficult cases.
+    duplicated in both MLP training and next HRNet epoch for focused learning.
+•   **Checkpoint synchronization** – MLP models are saved in sync with HRNet checkpoints
+    ensuring perfect correspondence for evaluation.
 •   **One-time initialisation** – MLP weights, optimisers and scalers are created
     once in `before_run` and *persist* across the whole HRNet training.
 •   **No gradient leakage** – MLP training is completely detached from the
@@ -34,6 +38,7 @@ custom_hooks = [
         mlp_lr=1e-5,
         mlp_weight_decay=1e-4,
         hard_example_threshold=5.0,  # MRE threshold for oversampling
+        hrnet_hard_example_weight=2.0,  # Weight for hard examples in HRNet training
         log_interval=20
     )
 ]
@@ -155,9 +160,9 @@ class _MLPDataset(data.Dataset):
 
 @HOOKS.register_module()
 class ConcurrentMLPTrainingHook(Hook):
-    """MMEngine hook that performs concurrent joint MLP refinement training."""
+    """MMEngine hook that performs concurrent joint MLP refinement training with checkpoint synchronization."""
 
-    priority = 'LOW'  # Run after default hooks
+    priority = 'VERY_LOW'  # Run after checkpoint hooks to ensure synchronization
 
     def __init__(
         self,
@@ -191,6 +196,10 @@ class ConcurrentMLPTrainingHook(Hook):
         # Store sample weights for HRNet training
         self.sample_weights_for_hrnet: np.ndarray | None = None
         self.sample_indices_mapping: List[int] | None = None
+        
+        # Track checkpoint synchronization
+        self.checkpoint_mlp_mapping: dict = {}  # Maps HRNet checkpoint names to MLP model paths
+        self.last_saved_checkpoint: str | None = None
 
     # ---------------------------------------------------------------------
     # MMEngine lifecycle methods
@@ -648,4 +657,58 @@ class ConcurrentMLPTrainingHook(Hook):
         save_dir = os.path.join(runner.work_dir, 'concurrent_mlp')
         os.makedirs(save_dir, exist_ok=True)
         torch.save(self.mlp_joint.state_dict(), os.path.join(save_dir, 'mlp_joint_final.pth'))
-        logger.info(f'[ConcurrentMLPTrainingHook] Saved final joint MLP weights to {save_dir}') 
+        logger.info(f'[ConcurrentMLPTrainingHook] Saved final joint MLP weights to {save_dir}')
+
+    def _save_synchronized_mlp_model(self, runner: Runner, checkpoint_name: str):
+        """Save MLP model synchronized with a specific HRNet checkpoint."""
+        logger: MMLogger = runner.logger
+        
+        if self.mlp_joint is None:
+            return
+            
+        try:
+            save_dir = os.path.join(runner.work_dir, 'concurrent_mlp')
+            os.makedirs(save_dir, exist_ok=True)
+            
+            # Create synchronized MLP checkpoint name
+            # Extract meaningful part from HRNet checkpoint name
+            if checkpoint_name.endswith('.pth'):
+                base_name = checkpoint_name[:-4]  # Remove .pth extension
+            else:
+                base_name = checkpoint_name
+                
+            synchronized_mlp_path = os.path.join(save_dir, f'mlp_joint_sync_{base_name}.pth')
+            
+            # Save MLP model
+            torch.save(self.mlp_joint.state_dict(), synchronized_mlp_path)
+            
+            # Update mapping
+            self.checkpoint_mlp_mapping[checkpoint_name] = synchronized_mlp_path
+            
+            # Save mapping to file for evaluation scripts
+            mapping_file = os.path.join(save_dir, 'checkpoint_mlp_mapping.json')
+            import json
+            with open(mapping_file, 'w') as f:
+                json.dump(self.checkpoint_mlp_mapping, f, indent=2)
+            
+            logger.info(f'[ConcurrentMLPTrainingHook] Synchronized MLP model saved: {os.path.basename(synchronized_mlp_path)}')
+            logger.info(f'[ConcurrentMLPTrainingHook] Mapped to HRNet checkpoint: {checkpoint_name}')
+            
+        except Exception as e:
+            logger.warning(f'[ConcurrentMLPTrainingHook] Failed to save synchronized MLP model: {e}')
+
+    def after_save_checkpoint(self, runner: Runner, checkpoint_path: str):
+        """Hook called after HRNet checkpoint is saved - save synchronized MLP model."""
+        logger: MMLogger = runner.logger
+        
+        # Extract checkpoint filename
+        checkpoint_name = os.path.basename(checkpoint_path)
+        
+        # Only save synchronized models for important checkpoints
+        important_checkpoints = ['best_', 'latest', 'epoch_']
+        is_important = any(checkpoint_name.startswith(prefix) for prefix in important_checkpoints)
+        
+        if is_important and self.mlp_joint is not None:
+            logger.info(f'[ConcurrentMLPTrainingHook] HRNet checkpoint saved: {checkpoint_name}')
+            self._save_synchronized_mlp_model(runner, checkpoint_name)
+            self.last_saved_checkpoint = checkpoint_name 
