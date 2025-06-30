@@ -99,6 +99,24 @@ def calculate_angle(p1, p2, p3):
     
     return angle
 
+def classify_anb_angle(anb_angle):
+    """
+    Classify ANB angle according to orthodontic standards.
+    
+    Args:
+        anb_angle: ANB angle in degrees
+    Returns:
+        Classification string: 'Class I', 'Class II', or 'Class III'
+    """
+    if np.isnan(anb_angle):
+        return 'Invalid'
+    elif anb_angle >= 2.0 and anb_angle <= 4.0:
+        return 'Class I'  # Balanced jaw relationship
+    elif anb_angle > 4.0:
+        return 'Class II'  # Protruding upper jaw
+    else:  # anb_angle < 2.0
+        return 'Class III'  # Protruding lower jaw
+
 def calculate_anb_angle(landmarks):
     """
     Calculate ANB angle from cephalometric landmarks.
@@ -532,6 +550,39 @@ def main():
     hrnet_anb_errors = np.abs(hrnet_anb_angles - gt_anb_angles)
     mlp_anb_errors = np.abs(mlp_anb_angles - gt_anb_angles)
     
+    # Compute ANB angle classifications
+    print("📊 Computing ANB angle classifications...")
+    gt_classifications = [classify_anb_angle(angle) for angle in gt_anb_angles]
+    hrnet_classifications = [classify_anb_angle(angle) for angle in hrnet_anb_angles]
+    mlp_classifications = [classify_anb_angle(angle) for angle in mlp_anb_angles]
+    
+    # Calculate classification accuracy
+    hrnet_correct = sum(1 for gt, pred in zip(gt_classifications, hrnet_classifications) if gt == pred)
+    mlp_correct = sum(1 for gt, pred in zip(gt_classifications, mlp_classifications) if gt == pred)
+    
+    total_valid = len(gt_classifications)
+    hrnet_accuracy = (hrnet_correct / total_valid) * 100 if total_valid > 0 else 0
+    mlp_accuracy = (mlp_correct / total_valid) * 100 if total_valid > 0 else 0
+    
+    # Calculate per-class metrics
+    from collections import Counter
+    gt_class_counts = Counter(gt_classifications)
+    hrnet_class_counts = Counter(hrnet_classifications)
+    mlp_class_counts = Counter(mlp_classifications)
+    
+    # Calculate confusion matrices
+    classes = ['Class I', 'Class II', 'Class III']
+    hrnet_confusion = np.zeros((3, 3), dtype=int)
+    mlp_confusion = np.zeros((3, 3), dtype=int)
+    
+    class_to_idx = {'Class I': 0, 'Class II': 1, 'Class III': 2}
+    
+    for gt, hrnet_pred, mlp_pred in zip(gt_classifications, hrnet_classifications, mlp_classifications):
+        if gt in class_to_idx and hrnet_pred in class_to_idx:
+            hrnet_confusion[class_to_idx[gt], class_to_idx[hrnet_pred]] += 1
+        if gt in class_to_idx and mlp_pred in class_to_idx:
+            mlp_confusion[class_to_idx[gt], class_to_idx[mlp_pred]] += 1
+    
     # Find best and worst examples based on overall MRE
     sample_errors = []
     for i in range(len(hrnet_predictions)):
@@ -587,6 +638,41 @@ def main():
         print(f"{'Std Dev (°)':<20} {hrnet_anb_std:<15.2f} {mlp_anb_std:<15.2f}")
         print(f"{'Max Error (°)':<20} {np.max(hrnet_anb_errors):<15.2f} {np.max(mlp_anb_errors):<15.2f}")
         print(f"{'Samples Analyzed':<20} {len(gt_anb_angles)}")
+        
+        # ANB Classification Results
+        print(f"\n🏷️  ANB CLASSIFICATION ACCURACY:")
+        print(f"{'Method':<15} {'Accuracy':<15} {'Correct/Total':<15}")
+        print("-" * 50)
+        print(f"{'HRNetV2':<15} {hrnet_accuracy:<15.1f}% {hrnet_correct}/{total_valid}")
+        print(f"{'Joint MLP':<15} {mlp_accuracy:<15.1f}% {mlp_correct}/{total_valid}")
+        
+        accuracy_improvement = mlp_accuracy - hrnet_accuracy
+        print(f"{'Improvement':<15} {accuracy_improvement:<15.1f}% {'(+' + str(mlp_correct - hrnet_correct) + ' samples)'}")
+        
+        # Class distribution
+        print(f"\n📋 GROUND TRUTH CLASS DISTRIBUTION:")
+        for class_name in classes:
+            count = gt_class_counts.get(class_name, 0)
+            percentage = (count / total_valid) * 100 if total_valid > 0 else 0
+            print(f"  {class_name}: {count} samples ({percentage:.1f}%)")
+        
+        # Confusion matrix summary
+        print(f"\n🔍 CLASSIFICATION ERRORS SUMMARY:")
+        print("HRNetV2 Confusion Matrix:")
+        print("     Pred:  I  II III")
+        for i, true_class in enumerate(classes):
+            row_str = f"GT {true_class[:3]:>3}: "
+            for j in range(3):
+                row_str += f"{hrnet_confusion[i,j]:>3}"
+            print(row_str)
+        
+        print("\nJoint MLP Confusion Matrix:")
+        print("     Pred:  I  II III")
+        for i, true_class in enumerate(classes):
+            row_str = f"GT {true_class[:3]:>3}: "
+            for j in range(3):
+                row_str += f"{mlp_confusion[i,j]:>3}"
+            print(row_str)
     else:
         print(f"\n⚠️  No valid ANB angles could be computed (missing landmarks)")
     
@@ -675,7 +761,20 @@ def main():
             'hrnet_anb_mae': hrnet_anb_mae if len(gt_anb_angles) > 0 else None,
             'mlp_anb_mae': mlp_anb_mae if len(gt_anb_angles) > 0 else None,
             'anb_improvement': anb_improvement if len(gt_anb_angles) > 0 else None,
-            'anb_samples': len(gt_anb_angles)
+            'anb_samples': len(gt_anb_angles),
+            'classification_accuracy': {
+                'hrnet_accuracy': hrnet_accuracy if len(gt_anb_angles) > 0 else None,
+                'mlp_accuracy': mlp_accuracy if len(gt_anb_angles) > 0 else None,
+                'accuracy_improvement': accuracy_improvement if len(gt_anb_angles) > 0 else None,
+                'hrnet_correct': hrnet_correct if len(gt_anb_angles) > 0 else None,
+                'mlp_correct': mlp_correct if len(gt_anb_angles) > 0 else None,
+                'total_samples': total_valid if len(gt_anb_angles) > 0 else None
+            },
+            'class_distribution': dict(gt_class_counts) if len(gt_anb_angles) > 0 else None,
+            'confusion_matrices': {
+                'hrnet': hrnet_confusion.tolist() if len(gt_anb_angles) > 0 else None,
+                'mlp': mlp_confusion.tolist() if len(gt_anb_angles) > 0 else None
+            }
         }
     }
     
@@ -700,15 +799,18 @@ def main():
     comparison_df.to_csv(os.path.join(output_dir, "per_landmark_comparison.csv"), index=False)
     
     # Create visualization
-    fig = plt.figure(figsize=(20, 15))
+    fig = plt.figure(figsize=(24, 18))
     
-    # Create 2x3 subplot layout
-    ax1 = plt.subplot(2, 3, 1)
-    ax2 = plt.subplot(2, 3, 2)
-    ax3 = plt.subplot(2, 3, 3)
-    ax4 = plt.subplot(2, 3, 4)
-    ax5 = plt.subplot(2, 3, 5)
-    ax6 = plt.subplot(2, 3, 6)
+    # Create 3x3 subplot layout
+    ax1 = plt.subplot(3, 3, 1)
+    ax2 = plt.subplot(3, 3, 2)
+    ax3 = plt.subplot(3, 3, 3)
+    ax4 = plt.subplot(3, 3, 4)
+    ax5 = plt.subplot(3, 3, 5)
+    ax6 = plt.subplot(3, 3, 6)
+    ax7 = plt.subplot(3, 3, 7)
+    ax8 = plt.subplot(3, 3, 8)
+    ax9 = plt.subplot(3, 3, 9)
     
     # Overall comparison
     methods = ['HRNetV2', 'Joint MLP']
