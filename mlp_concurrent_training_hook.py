@@ -211,19 +211,14 @@ class ConcurrentMLPTrainingHook(Hook):
             batch_data_samples = []
             
             for img_np in batch_images:
-                # Convert image to tensor and normalize
-                # Assuming img_np is already in [0, 255] uint8 format
-                img_tensor = torch.from_numpy(img_np).float()
+                # Keep images as uint8 - let MMPose preprocessor handle normalization
+                # Convert from HWC to CHW but keep as uint8
+                if len(img_np.shape) == 3:
+                    img_tensor = torch.from_numpy(img_np).permute(2, 0, 1)
+                else:
+                    img_tensor = torch.from_numpy(img_np)
                 
-                # Convert from HWC to CHW
-                if len(img_tensor.shape) == 3:
-                    img_tensor = img_tensor.permute(2, 0, 1)
-                
-                # Normalize to [0, 1] if needed
-                if img_tensor.max() > 1.0:
-                    img_tensor = img_tensor / 255.0
-                
-                # Add to batch
+                # Add to batch (keep as uint8, no manual normalization)
                 batch_tensors.append(img_tensor)
                 
                 # Create data sample with required metadata
