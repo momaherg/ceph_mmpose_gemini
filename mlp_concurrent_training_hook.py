@@ -268,46 +268,38 @@ class ConcurrentMLPTrainingHook(Hook):
             batch_errors = []
             
             try:
-                # Convert images to proper format for batch inference
-                processed_images = []
-                valid_indices = []
-                
+                # Process each image individually but in a batch-like manner
                 for i, (img, gt_kpts) in enumerate(zip(images_batch, gt_keypoints_batch)):
                     if img is not None and gt_kpts is not None:
-                        processed_images.append(img)
-                        valid_indices.append(i)
-                
-                if not processed_images:
-                    return batch_preds, batch_gts, batch_errors
-                
-                # Create batch bounding boxes (all images are 224x224)
-                batch_bboxes = np.array([[0, 0, 224, 224]] * len(processed_images), dtype=np.float32)
-                
-                # Run batch inference
-                with torch.no_grad():
-                    results = inference_topdown(model, processed_images, bboxes=batch_bboxes, bbox_format='xyxy')
-                
-                # Process results
-                for i, result in enumerate(results):
-                    if result and hasattr(result, 'pred_instances') and len(result.pred_instances.keypoints) > 0:
-                        pred_kpts = tensor_to_numpy(result.pred_instances.keypoints[0])
-                        original_idx = valid_indices[i]
-                        gt_kpts = gt_keypoints_batch[original_idx]
-                        
-                        if pred_kpts is not None and pred_kpts.shape[0] == 19 and gt_kpts is not None:
-                            # Flatten coordinates to 38-D vectors
-                            pred_flat = pred_kpts.flatten()
-                            gt_flat = gt_kpts.flatten()
+                        try:
+                            # Run inference on individual image
+                            bbox = np.array([[0, 0, 224, 224]], dtype=np.float32)
                             
-                            # Calculate per-landmark radial errors
-                            landmark_errors = np.sqrt(np.sum((pred_kpts - gt_kpts)**2, axis=1))
+                            with torch.no_grad():
+                                results = inference_topdown(model, img, bboxes=bbox, bbox_format='xyxy')
                             
-                            batch_preds.append(pred_flat)
-                            batch_gts.append(gt_flat)
-                            batch_errors.append(landmark_errors)
-                            
+                            if results and len(results) > 0:
+                                pred_kpts = results[0].pred_instances.keypoints[0]
+                                pred_kpts = tensor_to_numpy(pred_kpts)
+                                
+                                if pred_kpts is not None and pred_kpts.shape[0] == 19:
+                                    # Flatten coordinates to 38-D vectors
+                                    pred_flat = pred_kpts.flatten()
+                                    gt_flat = gt_kpts.flatten()
+                                    
+                                    # Calculate per-landmark radial errors
+                                    landmark_errors = np.sqrt(np.sum((pred_kpts - gt_kpts)**2, axis=1))
+                                    
+                                    batch_preds.append(pred_flat)
+                                    batch_gts.append(gt_flat)
+                                    batch_errors.append(landmark_errors)
+                                    
+                        except Exception as e:
+                            # Skip failed individual images
+                            continue
+                             
             except Exception as e:
-                logger.warning(f'[ConcurrentMLPTrainingHook] Batch inference failed: {e}')
+                logger.warning(f'[ConcurrentMLPTrainingHook] Batch processing failed: {e}')
                 
             return batch_preds, batch_gts, batch_errors
 
