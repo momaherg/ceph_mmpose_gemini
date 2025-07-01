@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-Concurrent MLP Training Script for Cephalometric Landmark Detection - V5 with 5-Fold Cross-Validation
-This script trains HRNetV2 with concurrent MLP refinement using 5-fold cross-validation.
+5-Fold Cross-Validation Concurrent MLP Training Script for Cephalometric Landmark Detection - V5
+This script performs 5-fold cross-validation with concurrent MLP refinement using custom hooks.
+Each fold trains for 18 epochs with patient-level splitting to avoid data leakage.
 """
 
 import os
@@ -35,154 +36,179 @@ def safe_torch_load(*args, **kwargs):
 
 torch.load = safe_torch_load
 
-def plot_training_progress(work_dir, fold_num):
-    """Plot training progress from log files."""
-    try:
-        import json
-        log_file = os.path.join(work_dir, "vis_data", "scalars.json")
-        if os.path.exists(log_file):
-            with open(log_file, 'r') as f:
-                logs = [json.loads(line) for line in f]
-            
-            # Extract metrics
-            train_loss = [log['loss'] for log in logs if 'loss' in log and log.get('mode') == 'train']
-            val_nme = [log['NME'] for log in logs if 'NME' in log and log.get('mode') == 'val']
-            
-            if train_loss and val_nme:
-                fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
-                
-                ax1.plot(train_loss)
-                ax1.set_title('Training Loss')
-                ax1.set_xlabel('Iteration')
-                ax1.set_ylabel('Loss')
-                ax1.grid(True)
-                
-                ax2.plot(val_nme)
-                ax2.set_title('Validation NME')
-                ax2.set_xlabel('Epoch')
-                ax2.set_ylabel('NME')
-                ax2.grid(True)
-                
-                plt.tight_layout()
-                plt.savefig(os.path.join(work_dir, f'training_progress_fold_{fold_num}.png'), dpi=150)
-                plt.close()
-                print(f"Training progress plot saved to {work_dir}/training_progress_fold_{fold_num}.png")
-    except Exception as e:
-        print(f"Could not plot training progress: {e}")
-
-def create_cross_validation_splits(df, n_folds=5, random_state=42):
-    """Create 5-fold cross-validation splits ensuring patient-level splitting."""
+def create_patient_level_folds(df, n_folds=5, random_state=42):
+    """Create patient-level k-fold splits to avoid data leakage."""
+    print(f"🔄 Creating {n_folds}-fold cross-validation splits at patient level...")
     
     # Get unique patient IDs
     if 'patient_id' not in df.columns:
-        print("ERROR: 'patient_id' column not found. Cannot create patient-level splits.")
+        print("ERROR: 'patient_id' column not found in the DataFrame.")
         return None
     
     unique_patients = df['patient_id'].unique()
-    print(f"📊 Creating {n_folds}-fold cross-validation splits for {len(unique_patients)} unique patients")
+    print(f"📊 Total unique patients: {len(unique_patients)}")
     
     # Create KFold splitter
-    kfold = KFold(n_splits=n_folds, shuffle=True, random_state=random_state)
+    kf = KFold(n_splits=n_folds, shuffle=True, random_state=random_state)
     
-    cv_splits = []
-    for fold_idx, (train_patient_idx, val_patient_idx) in enumerate(kfold.split(unique_patients)):
-        train_patients = unique_patients[train_patient_idx]
-        val_patients = unique_patients[val_patient_idx]
+    folds = []
+    for fold_idx, (train_patient_indices, val_patient_indices) in enumerate(kf.split(unique_patients)):
+        train_patients = unique_patients[train_patient_indices]
+        val_patients = unique_patients[val_patient_indices]
         
-        # Split data based on patient IDs
+        # Get samples for each patient group
         train_df = df[df['patient_id'].isin(train_patients)].reset_index(drop=True)
         val_df = df[df['patient_id'].isin(val_patients)].reset_index(drop=True)
         
-        cv_splits.append({
+        folds.append({
             'fold': fold_idx + 1,
             'train_df': train_df,
             'val_df': val_df,
-            'train_patients': train_patients.tolist(),
-            'val_patients': val_patients.tolist()
+            'train_patients': train_patients,
+            'val_patients': val_patients
         })
         
-        print(f"  Fold {fold_idx + 1}: {len(train_df)} train samples ({len(train_patients)} patients), "
-              f"{len(val_df)} val samples ({len(val_patients)} patients)")
+        print(f"📋 Fold {fold_idx + 1}: {len(train_patients)} train patients ({len(train_df)} samples), "
+              f"{len(val_patients)} val patients ({len(val_df)} samples)")
     
-    return cv_splits
+    return folds
 
-def train_single_fold(fold_data, base_config_path, base_work_dir, test_df=None):
-    """Train a single fold of cross-validation."""
-    
+def plot_fold_results(fold_results, work_dir):
+    """Plot cross-validation results across folds."""
+    try:
+        folds = [r['fold'] for r in fold_results]
+        final_mres = [r['final_mre'] for r in fold_results if r['final_mre'] is not None]
+        
+        if not final_mres:
+            print("⚠️  No valid MRE results to plot")
+            return
+        
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+        
+        # Bar plot of final MRE per fold
+        ax1.bar(folds[:len(final_mres)], final_mres, alpha=0.7, color='skyblue')
+        ax1.set_xlabel('Fold')
+        ax1.set_ylabel('Final Validation MRE (pixels)')
+        ax1.set_title('Final MRE per Fold')
+        ax1.grid(True, alpha=0.3)
+        
+        # Add mean line
+        mean_mre = np.mean(final_mres)
+        ax1.axhline(y=mean_mre, color='red', linestyle='--', alpha=0.8, 
+                   label=f'Mean: {mean_mre:.3f}')
+        ax1.legend()
+        
+        # Box plot of MRE distribution
+        ax2.boxplot(final_mres, labels=['All Folds'])
+        ax2.set_ylabel('Final Validation MRE (pixels)')
+        ax2.set_title('MRE Distribution Across Folds')
+        ax2.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        plot_path = os.path.join(work_dir, 'cross_validation_results.png')
+        plt.savefig(plot_path, dpi=150, bbox_inches='tight')
+        plt.close()
+        
+        print(f"📊 Cross-validation results plot saved: {plot_path}")
+        
+    except Exception as e:
+        print(f"⚠️  Could not plot cross-validation results: {e}")
+
+def train_single_fold(fold_data, base_work_dir, config_path, main_df):
+    """Train a single fold of the cross-validation."""
     fold_num = fold_data['fold']
     train_df = fold_data['train_df']
     val_df = fold_data['val_df']
     
-    print(f"\n{'='*80}")
-    print(f"🚀 TRAINING FOLD {fold_num}")
-    print(f"{'='*80}")
-    print(f"📊 Training samples: {len(train_df)}")
+    print(f"\n" + "="*60)
+    print(f"🚀 TRAINING FOLD {fold_num}/5")
+    print("="*60)
+    print(f"📊 Train samples: {len(train_df)}")
     print(f"📊 Validation samples: {len(val_df)}")
     
     # Create fold-specific work directory
     fold_work_dir = os.path.join(base_work_dir, f"fold_{fold_num}")
     os.makedirs(fold_work_dir, exist_ok=True)
     
-    # Load and modify config for this fold
-    cfg = Config.fromfile(base_config_path)
+    # Load and configure the model
+    cfg = Config.fromfile(config_path)
     cfg.work_dir = os.path.abspath(fold_work_dir)
     
-    # Save fold data to temporary JSON files
-    temp_train_ann_file = os.path.join(fold_work_dir, 'fold_train_ann.json')
-    temp_val_ann_file = os.path.join(fold_work_dir, 'fold_val_ann.json')
+    # Update training configuration for 18 epochs
+    cfg.train_cfg.max_epochs = 18
     
-    train_df.to_json(temp_train_ann_file, orient='records', indent=2)
-    val_df.to_json(temp_val_ann_file, orient='records', indent=2)
-    
-    # Update config with fold-specific data
-    cfg.train_dataloader.dataset.ann_file = temp_train_ann_file
-    cfg.train_dataloader.dataset.data_df = None
-    cfg.train_dataloader.dataset.data_root = ''
-    
-    cfg.val_dataloader.dataset.ann_file = temp_val_ann_file
-    cfg.val_dataloader.dataset.data_df = None
-    cfg.val_dataloader.dataset.data_root = ''
-    
-    # Use validation set for test if no separate test set
-    if test_df is not None and not test_df.empty:
-        temp_test_ann_file = os.path.join(fold_work_dir, 'fold_test_ann.json')
-        test_df.to_json(temp_test_ann_file, orient='records', indent=2)
-        cfg.test_dataloader.dataset.ann_file = temp_test_ann_file
-    else:
-        cfg.test_dataloader.dataset.ann_file = temp_val_ann_file
-    cfg.test_dataloader.dataset.data_df = None
-    cfg.test_dataloader.dataset.data_root = ''
-    
-    # Save fold information
-    fold_info = {
-        'fold_number': fold_num,
-        'train_patients': fold_data['train_patients'],
-        'val_patients': fold_data['val_patients'],
-        'train_samples': len(train_df),
-        'val_samples': len(val_df),
-        'work_dir': fold_work_dir
-    }
-    
-    fold_info_file = os.path.join(fold_work_dir, 'fold_info.json')
-    with open(fold_info_file, 'w') as f:
-        json.dump(fold_info, f, indent=2)
+    # Update learning rate scheduler for shorter training
+    if hasattr(cfg, 'param_scheduler') and len(cfg.param_scheduler) > 1:
+        # Adjust MultiStepLR milestones for 18 epochs
+        cfg.param_scheduler[1].end = 18
+        cfg.param_scheduler[1].milestones = [13, 16]  # Decay at 72% and 89% of training
     
     try:
-        # Build runner and start training
-        print(f"\n🎯 Starting training for fold {fold_num}...")
+        # Save fold DataFrames to temporary files
+        temp_train_ann_file = os.path.join(fold_work_dir, f'fold_{fold_num}_train_ann.json')
+        temp_val_ann_file = os.path.join(fold_work_dir, f'fold_{fold_num}_val_ann.json')
+        
+        train_df.to_json(temp_train_ann_file, orient='records', indent=2)
+        val_df.to_json(temp_val_ann_file, orient='records', indent=2)
+        
+        # Update config with fold-specific data
+        cfg.train_dataloader.dataset.ann_file = temp_train_ann_file
+        cfg.train_dataloader.dataset.data_df = None
+        cfg.train_dataloader.dataset.data_root = ''
+        
+        cfg.val_dataloader.dataset.ann_file = temp_val_ann_file
+        cfg.val_dataloader.dataset.data_df = None
+        cfg.val_dataloader.dataset.data_root = ''
+        
+        cfg.test_dataloader.dataset.ann_file = temp_val_ann_file  # Use validation set for testing
+        cfg.test_dataloader.dataset.data_df = None
+        cfg.test_dataloader.dataset.data_root = ''
+        
+        print(f"✓ Fold {fold_num} configuration prepared")
+        
+        # Save fold information
+        fold_info = {
+            'fold': fold_num,
+            'train_patients': fold_data['train_patients'].tolist(),
+            'val_patients': fold_data['val_patients'].tolist(),
+            'train_samples': len(train_df),
+            'val_samples': len(val_df),
+            'epochs': 18
+        }
+        
+        with open(os.path.join(fold_work_dir, f'fold_{fold_num}_info.json'), 'w') as f:
+            json.dump(fold_info, f, indent=2)
+        
+        # Train the model
+        print(f"🏃‍♂️ Starting training for fold {fold_num}...")
+        
         runner = Runner.from_cfg(cfg)
         runner.train()
         
-        print(f"✅ Fold {fold_num} training completed successfully!")
+        print(f"✅ Fold {fold_num} training completed!")
         
-        # Plot training progress for this fold
-        plot_training_progress(fold_work_dir, fold_num)
+        # Try to extract final validation MRE
+        final_mre = None
+        try:
+            log_file = os.path.join(fold_work_dir, "vis_data", "scalars.json")
+            if os.path.exists(log_file):
+                with open(log_file, 'r') as f:
+                    logs = [json.loads(line) for line in f]
+                
+                val_nme_logs = [log['NME'] for log in logs if 'NME' in log and log.get('mode') == 'val']
+                if val_nme_logs:
+                    final_mre = val_nme_logs[-1]  # Last validation NME
+                    print(f"📊 Fold {fold_num} final validation MRE: {final_mre:.4f}")
+        except Exception as e:
+            print(f"⚠️  Could not extract final MRE for fold {fold_num}: {e}")
         
         return {
             'fold': fold_num,
-            'success': True,
             'work_dir': fold_work_dir,
-            'error': None
+            'final_mre': final_mre,
+            'train_samples': len(train_df),
+            'val_samples': len(val_df),
+            'status': 'completed'
         }
         
     except Exception as e:
@@ -192,284 +218,188 @@ def train_single_fold(fold_data, base_config_path, base_work_dir, test_df=None):
         
         return {
             'fold': fold_num,
-            'success': False,
             'work_dir': fold_work_dir,
+            'final_mre': None,
+            'train_samples': len(train_df),
+            'val_samples': len(val_df),
+            'status': 'failed',
             'error': str(e)
         }
 
-def aggregate_cv_results(cv_results, base_work_dir):
-    """Aggregate results from all cross-validation folds."""
-    
-    print(f"\n{'='*80}")
-    print("📊 CROSS-VALIDATION RESULTS SUMMARY")
-    print(f"{'='*80}")
-    
-    successful_folds = [r for r in cv_results if r['success']]
-    failed_folds = [r for r in cv_results if not r['success']]
-    
-    print(f"✅ Successful folds: {len(successful_folds)}/5")
-    print(f"❌ Failed folds: {len(failed_folds)}/5")
-    
-    if failed_folds:
-        print(f"\n❌ Failed folds:")
-        for fold_result in failed_folds:
-            print(f"  - Fold {fold_result['fold']}: {fold_result['error']}")
-    
-    if successful_folds:
-        print(f"\n✅ Successful folds:")
-        for fold_result in successful_folds:
-            fold_dir = fold_result['work_dir']
-            # Look for best checkpoint in each fold
-            import glob
-            best_checkpoints = glob.glob(os.path.join(fold_dir, "best_NME_epoch_*.pth"))
-            if best_checkpoints:
-                best_checkpoint = max(best_checkpoints, key=os.path.getctime)
-                epoch_num = os.path.basename(best_checkpoint).split('_epoch_')[1].split('.')[0]
-                print(f"  - Fold {fold_result['fold']}: Best epoch {epoch_num}")
-            else:
-                print(f"  - Fold {fold_result['fold']}: Training completed")
-    
-    # Save cross-validation summary
-    cv_summary = {
-        'total_folds': 5,
-        'successful_folds': len(successful_folds),
-        'failed_folds': len(failed_folds),
-        'results': cv_results
-    }
-    
-    summary_file = os.path.join(base_work_dir, 'cross_validation_summary.json')
-    with open(summary_file, 'w') as f:
-        json.dump(cv_summary, f, indent=2)
-    
-    print(f"\n💾 Cross-validation summary saved to: {summary_file}")
-    
-    return cv_summary
-
 def main():
-    """Main concurrent training function with 5-fold cross-validation."""
+    """Main 5-fold cross-validation function."""
     
     parser = argparse.ArgumentParser(
-        description='Concurrent MLP Training Script for Cephalometric Landmark Detection - V5 with 5-Fold CV')
-    parser.add_argument(
-        '--test_split_file',
-        type=str,
-        default=None,
-        help='Path to a text file containing patient IDs for the test set, one ID per line.'
-    )
+        description='5-Fold Cross-Validation Concurrent MLP Training for Cephalometric Landmark Detection')
     parser.add_argument(
         '--n_folds',
         type=int,
         default=5,
-        help='Number of folds for cross-validation (default: 5)'
+        help='Number of cross-validation folds (default: 5)'
+    )
+    parser.add_argument(
+        '--epochs_per_fold',
+        type=int,
+        default=18,
+        help='Number of epochs to train each fold (default: 18)'
     )
     parser.add_argument(
         '--start_fold',
         type=int,
         default=1,
-        help='Starting fold number (1-based, default: 1)'
-    )
-    parser.add_argument(
-        '--end_fold',
-        type=int,
-        default=None,
-        help='Ending fold number (1-based, default: all folds)'
-    )
-    parser.add_argument(
-        '--cv_random_state',
-        type=int,
-        default=42,
-        help='Random state for cross-validation splits (default: 42)'
+        help='Starting fold number (for resuming interrupted training, default: 1)'
     )
     args = parser.parse_args()
     
-    # Set end_fold to n_folds if not specified
-    if args.end_fold is None:
-        args.end_fold = args.n_folds
-    
     print("="*80)
-    print("CONCURRENT MLP TRAINING - V5 with 5-FOLD CROSS-VALIDATION")
-    print("🚀 HRNetV2 + On-the-fly MLP Refinement + Cross-Validation")
+    print("5-FOLD CROSS-VALIDATION CONCURRENT MLP TRAINING")
     print("="*80)
-    print(f"📊 Cross-validation: {args.n_folds}-fold")
-    print(f"🎯 Training folds: {args.start_fold} to {args.end_fold}")
-    print(f"🎲 Random state: {args.cv_random_state}")
+    print(f"🔄 Number of folds: {args.n_folds}")
+    print(f"⏱️  Epochs per fold: {args.epochs_per_fold}")
+    print(f"🚀 Starting from fold: {args.start_fold}")
+    print("="*80)
     
     # Initialize MMPose scope
     init_default_scope('mmpose')
     
-    # Import custom modules (this must be done after init_default_scope)
+    # Import custom modules
     try:
         import custom_cephalometric_dataset
         import custom_transforms
         import cephalometric_dataset_info
-        # Import the concurrent training hook
         import mlp_concurrent_training_hook
         print("✓ Custom modules imported successfully")
-        print("✓ Concurrent MLP training hook imported")
     except ImportError as e:
         print(f"✗ Failed to import custom modules: {e}")
         return
     
     # Configuration
     config_path = "Pretrained_model/hrnetv2_w18_cephalometric_256x256_finetune.py"
-    base_work_dir = "work_dirs/hrnetv2_w18_cephalometric_concurrent_mlp_v5_cv"
+    base_work_dir = f"work_dirs/hrnetv2_w18_cephalometric_cv_{args.n_folds}fold"
+    os.makedirs(base_work_dir, exist_ok=True)
     
     print(f"Config: {config_path}")
     print(f"Base Work Dir: {base_work_dir}")
     
-    # Create base work directory
-    os.makedirs(base_work_dir, exist_ok=True)
-    
-    # Load and prepare data
+    # Load main dataset
     data_file_path = "/content/drive/MyDrive/Lala's Masters/train_data_pure_old_numpy.json"
-    print(f"Loading main data file from: {data_file_path}")
+    print(f"Loading data from: {data_file_path}")
     
     try:
         main_df = pd.read_json(data_file_path)
         print(f"Main DataFrame loaded. Shape: {main_df.shape}")
-
-        # Handle test data splitting (same as before)
-        test_df = pd.DataFrame()  # Initialize empty test DataFrame
         
-        if args.test_split_file:
-            print(f"Splitting data using external test set file: {args.test_split_file}")
-            with open(args.test_split_file, 'r') as f:
-                test_patient_ids = {
-                    int(line.strip())
-                    for line in f if line.strip()
-                }
-
-            if 'patient_id' not in main_df.columns:
-                print("ERROR: 'patient_id' column not found in the main DataFrame.")
-                return
-            
-            main_df['patient_id'] = main_df['patient_id'].astype(int)
-
-            test_df = main_df[main_df['patient_id'].isin(test_patient_ids)].reset_index(drop=True)
-            remaining_df = main_df[~main_df['patient_id'].isin(test_patient_ids)].reset_index(drop=True)
-            
-            print(f"Test DataFrame shape: {test_df.shape}")
-            print(f"Remaining DataFrame for CV: {remaining_df.shape}")
-            
-        else:
-            print("Using all data for cross-validation (no external test set)")
-            remaining_df = main_df.copy()
-
-        if remaining_df.empty:
-            print("ERROR: No data available for cross-validation.")
-            return
-
-        # Create cross-validation splits
-        cv_splits = create_cross_validation_splits(
-            remaining_df, 
-            n_folds=args.n_folds, 
-            random_state=args.cv_random_state
-        )
-        
-        if cv_splits is None:
+        # Ensure patient_id column exists and is integer
+        if 'patient_id' not in main_df.columns:
+            print("ERROR: 'patient_id' column not found in the main DataFrame.")
             return
         
-        # Save cross-validation split information
+        main_df['patient_id'] = main_df['patient_id'].astype(int)
+        
+        # Create cross-validation folds
+        folds = create_patient_level_folds(main_df, n_folds=args.n_folds, random_state=42)
+        
+        if folds is None:
+            return
+        
+        # Save overall fold information
         cv_info = {
             'n_folds': args.n_folds,
-            'random_state': args.cv_random_state,
-            'total_patients': len(remaining_df['patient_id'].unique()),
-            'total_samples': len(remaining_df),
-            'test_patients': len(test_df['patient_id'].unique()) if not test_df.empty else 0,
-            'test_samples': len(test_df),
-            'folds': []
+            'epochs_per_fold': args.epochs_per_fold,
+            'total_patients': len(main_df['patient_id'].unique()),
+            'total_samples': len(main_df),
+            'random_state': 42
         }
         
-        for split in cv_splits:
-            cv_info['folds'].append({
-                'fold': split['fold'],
-                'train_patients': len(split['train_patients']),
-                'val_patients': len(split['val_patients']),
-                'train_samples': len(split['train_df']),
-                'val_samples': len(split['val_df'])
-            })
-        
-        cv_info_file = os.path.join(base_work_dir, 'cross_validation_info.json')
-        with open(cv_info_file, 'w') as f:
+        with open(os.path.join(base_work_dir, 'cross_validation_info.json'), 'w') as f:
             json.dump(cv_info, f, indent=2)
         
-        print(f"✓ Cross-validation info saved to: {cv_info_file}")
-
+        print(f"\n✓ Created {len(folds)} folds for cross-validation")
+        
     except Exception as e:
         print(f"ERROR: Failed to load or process data: {e}")
         import traceback
         traceback.print_exc()
         return
     
-    # Print cross-validation training information
-    print("\n" + "="*70)
-    print("🚀 5-FOLD CROSS-VALIDATION TRAINING APPROACH")
-    print("="*70)
-    print(f"🔄 Training Cycle (per fold):")
-    print(f"   • Train HRNetV2 for 1 epoch")
-    print(f"   • Run inference on training data with current HRNet weights")
-    print(f"   • Train MLP models for 100 epochs on current predictions")
-    print(f"   • Apply hard-example oversampling for next epoch")
-    print(f"   • Repeat for all 222 epochs")
-    
-    print(f"\n📊 Cross-Validation Benefits:")
-    print(f"   • More robust performance estimates")
-    print(f"   • Better utilization of available data")
-    print(f"   • Reduced variance in results")
-    print(f"   • Patient-level splitting (no data leakage)")
-    
-    print(f"\n🧠 MLP Architecture (same for all folds):")
-    print(f"   • Input: 38 predicted coordinates (joint model)")
-    print(f"   • Hidden: 500 neurons (ReLU + Dropout)")
-    print(f"   • Output: 38 refined coordinates")
-    print(f"   • Hard-example oversampling for both MLP and HRNet")
-    
     # Train each fold
-    cv_results = []
+    fold_results = []
     
-    for fold_data in cv_splits:
+    for fold_data in folds:
         fold_num = fold_data['fold']
         
-        # Check if we should train this fold
-        if fold_num < args.start_fold or fold_num > args.end_fold:
-            print(f"\n⏭️  Skipping fold {fold_num} (outside range {args.start_fold}-{args.end_fold})")
+        # Skip folds before start_fold (for resuming)
+        if fold_num < args.start_fold:
+            print(f"⏭️  Skipping fold {fold_num} (before start_fold={args.start_fold})")
             continue
         
-        # Train this fold
-        fold_result = train_single_fold(fold_data, config_path, base_work_dir, test_df)
-        cv_results.append(fold_result)
-        
-        # Save intermediate results
-        intermediate_summary = {
-            'completed_folds': len(cv_results),
-            'successful_folds': len([r for r in cv_results if r['success']]),
-            'results_so_far': cv_results
-        }
-        
-        intermediate_file = os.path.join(base_work_dir, 'intermediate_cv_results.json')
-        with open(intermediate_file, 'w') as f:
-            json.dump(intermediate_summary, f, indent=2)
-    
-    # Aggregate and summarize results
-    if cv_results:
-        final_summary = aggregate_cv_results(cv_results, base_work_dir)
-        
-        print(f"\n🎉 Cross-validation training completed!")
-        print(f"📈 {final_summary['successful_folds']}/{final_summary['total_folds']} folds completed successfully")
-        
-        if final_summary['successful_folds'] > 0:
-            print(f"\n📋 Next steps:")
-            print(f"1. 📊 Evaluate each fold using evaluate_concurrent_mlp.py")
-            print(f"2. 🔍 Aggregate results across all folds")
-            print(f"3. 📈 Compare cross-validation performance")
-            print(f"4. 🎯 Select best fold or ensemble predictions")
+        try:
+            result = train_single_fold(fold_data, base_work_dir, config_path, main_df)
+            fold_results.append(result)
             
-            print(f"\n💡 Evaluation example:")
-            print(f"   python evaluate_concurrent_mlp.py --work_dir={base_work_dir}/fold_1 --checkpoint_type=best")
-            print(f"   python evaluate_concurrent_mlp.py --work_dir={base_work_dir}/fold_2 --checkpoint_type=best")
-            print(f"   # ... for each fold")
-    else:
-        print(f"\n⚠️  No folds were trained in the specified range {args.start_fold}-{args.end_fold}")
+            # Save intermediate results
+            with open(os.path.join(base_work_dir, 'fold_results.json'), 'w') as f:
+                json.dump(fold_results, f, indent=2)
+            
+        except Exception as e:
+            print(f"❌ Critical error in fold {fold_num}: {e}")
+            import traceback
+            traceback.print_exc()
+            
+            # Still save the failed result
+            fold_results.append({
+                'fold': fold_num,
+                'work_dir': os.path.join(base_work_dir, f"fold_{fold_num}"),
+                'final_mre': None,
+                'status': 'failed',
+                'error': str(e)
+            })
+    
+    # Summarize results
+    print("\n" + "="*80)
+    print("5-FOLD CROSS-VALIDATION RESULTS SUMMARY")
+    print("="*80)
+    
+    completed_folds = [r for r in fold_results if r['status'] == 'completed']
+    failed_folds = [r for r in fold_results if r['status'] == 'failed']
+    
+    print(f"✅ Completed folds: {len(completed_folds)}/{len(fold_results)}")
+    print(f"❌ Failed folds: {len(failed_folds)}")
+    
+    if completed_folds:
+        valid_mres = [r['final_mre'] for r in completed_folds if r['final_mre'] is not None]
+        
+        if valid_mres:
+            mean_mre = np.mean(valid_mres)
+            std_mre = np.std(valid_mres)
+            
+            print(f"\n📊 CROSS-VALIDATION PERFORMANCE:")
+            print(f"   Mean MRE: {mean_mre:.4f} ± {std_mre:.4f} pixels")
+            print(f"   Min MRE:  {np.min(valid_mres):.4f} pixels")
+            print(f"   Max MRE:  {np.max(valid_mres):.4f} pixels")
+            
+            print(f"\n📋 PER-FOLD RESULTS:")
+            for result in completed_folds:
+                if result['final_mre'] is not None:
+                    print(f"   Fold {result['fold']}: {result['final_mre']:.4f} pixels")
+        
+        # Plot results
+        plot_fold_results(fold_results, base_work_dir)
+    
+    if failed_folds:
+        print(f"\n❌ FAILED FOLDS:")
+        for result in failed_folds:
+            print(f"   Fold {result['fold']}: {result.get('error', 'Unknown error')}")
+    
+    print(f"\n💾 Results saved to: {base_work_dir}")
+    print(f"   - Cross-validation info: cross_validation_info.json")
+    print(f"   - Fold results: fold_results.json")
+    print(f"   - Individual fold results in: fold_1/, fold_2/, etc.")
+    
+    print(f"\n🎉 5-fold cross-validation completed!")
+    print(f"📈 Each fold trained with concurrent MLP refinement for {args.epochs_per_fold} epochs")
+    print(f"🎯 Patient-level splitting ensures no data leakage between folds")
+    print(f"💾 Storage optimized: Only 18 epochs per fold (90 total epochs vs 222 single training)")
 
 if __name__ == "__main__":
     main() 

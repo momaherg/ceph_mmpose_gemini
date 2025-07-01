@@ -157,6 +157,12 @@ def main():
         help='Work directory containing the trained models'
     )
     parser.add_argument(
+        '--fold',
+        type=int,
+        default=None,
+        help='Specific fold number to evaluate (for cross-validation, e.g., 1-5). If not specified, assumes single training.'
+    )
+    parser.add_argument(
         '--checkpoint_type',
         type=str,
         choices=['best', 'latest', 'epoch'],
@@ -175,9 +181,31 @@ def main():
     print("CONCURRENT JOINT MLP REFINEMENT EVALUATION")
     print("="*80)
     print(f"📋 Checkpoint type: {args.checkpoint_type}")
+    if args.fold is not None:
+        print(f"🔄 Cross-validation fold: {args.fold}")
     if args.checkpoint_type == 'epoch':
         print(f"📅 Target epoch: {args.epoch}")
     print()
+    
+    # Determine actual work directory (handle CV folds)
+    if args.fold is not None:
+        actual_work_dir = os.path.join(args.work_dir, f"fold_{args.fold}")
+        if not os.path.exists(actual_work_dir):
+            print(f"ERROR: Fold {args.fold} directory not found: {actual_work_dir}")
+            print("Available folds:")
+            parent_dir = args.work_dir
+            if os.path.exists(parent_dir):
+                fold_dirs = [d for d in os.listdir(parent_dir) if d.startswith('fold_')]
+                if fold_dirs:
+                    fold_numbers = sorted([int(d.split('_')[1]) for d in fold_dirs])
+                    print(f"  - Folds: {fold_numbers}")
+                else:
+                    print("  - No fold directories found")
+            return
+        print(f"✓ Evaluating fold {args.fold} in: {actual_work_dir}")
+    else:
+        actual_work_dir = args.work_dir
+        print(f"✓ Single training evaluation in: {actual_work_dir}")
     
     # Initialize MMPose scope
     init_default_scope('mmpose')
@@ -204,7 +232,7 @@ def main():
     
     if args.checkpoint_type == 'best':
         # Look for best validation checkpoint
-        hrnet_checkpoint_pattern = os.path.join(args.work_dir, "best_NME_epoch_*.pth")
+        hrnet_checkpoint_pattern = os.path.join(actual_work_dir, "best_NME_epoch_*.pth")
         hrnet_checkpoints = glob.glob(hrnet_checkpoint_pattern)
         
         if hrnet_checkpoints:
@@ -216,13 +244,13 @@ def main():
     
     if args.checkpoint_type == 'latest':
         # Look for latest checkpoint
-        latest_checkpoint = os.path.join(args.work_dir, "latest.pth")
+        latest_checkpoint = os.path.join(actual_work_dir, "latest.pth")
         if os.path.exists(latest_checkpoint):
             hrnet_checkpoint = latest_checkpoint
             print(f"✓ Using latest checkpoint")
         else:
             # Fallback to most recent epoch checkpoint
-            hrnet_checkpoint_pattern = os.path.join(args.work_dir, "epoch_*.pth")
+            hrnet_checkpoint_pattern = os.path.join(actual_work_dir, "epoch_*.pth")
             hrnet_checkpoints = glob.glob(hrnet_checkpoint_pattern)
             if hrnet_checkpoints:
                 hrnet_checkpoint = max(hrnet_checkpoints, key=lambda x: int(x.split('epoch_')[1].split('.')[0]))
@@ -234,7 +262,7 @@ def main():
             return
         
         # Look for specific epoch checkpoint
-        epoch_checkpoint = os.path.join(args.work_dir, f"epoch_{args.epoch}.pth")
+        epoch_checkpoint = os.path.join(actual_work_dir, f"epoch_{args.epoch}.pth")
         if os.path.exists(epoch_checkpoint):
             hrnet_checkpoint = epoch_checkpoint
             print(f"✓ Using epoch {args.epoch} checkpoint")
@@ -248,9 +276,9 @@ def main():
         print("Available checkpoint types:")
         
         # Show available checkpoints
-        best_checkpoints = glob.glob(os.path.join(args.work_dir, "best_NME_epoch_*.pth"))
-        epoch_checkpoints = glob.glob(os.path.join(args.work_dir, "epoch_*.pth"))
-        latest_checkpoint = os.path.join(args.work_dir, "latest.pth")
+        best_checkpoints = glob.glob(os.path.join(actual_work_dir, "best_NME_epoch_*.pth"))
+        epoch_checkpoints = glob.glob(os.path.join(actual_work_dir, "epoch_*.pth"))
+        latest_checkpoint = os.path.join(actual_work_dir, "latest.pth")
         
         if best_checkpoints:
             print(f"  - Best validation: {len(best_checkpoints)} checkpoint(s)")
@@ -266,7 +294,7 @@ def main():
     print(f"✓ Using HRNetV2 checkpoint: {hrnet_checkpoint_name}")
     
     # Load checkpoint mapping to find synchronized MLP model
-    mlp_dir = os.path.join(args.work_dir, "concurrent_mlp")
+    mlp_dir = os.path.join(actual_work_dir, "concurrent_mlp")
     mapping_file = os.path.join(mlp_dir, "checkpoint_mlp_mapping.json")
     
     synchronized_mlp_path = None
@@ -410,7 +438,7 @@ def main():
     
     # Load saved joint normalization scalers
     print("Loading saved joint normalization scalers...")
-    scaler_dir = os.path.join(args.work_dir, "concurrent_mlp")
+    scaler_dir = os.path.join(actual_work_dir, "concurrent_mlp")
     
     scaler_input_path = os.path.join(scaler_dir, "scaler_joint_input.pkl")
     scaler_target_path = os.path.join(scaler_dir, "scaler_joint_target.pkl")
@@ -555,7 +583,7 @@ def main():
                 print(f"{landmark:<20} {hrnet_err:<15.3f} {mlp_err:<15.3f} {improvement:<15.1f}%")
     
     # Save results
-    output_dir = os.path.join(args.work_dir, "joint_mlp_evaluation")
+    output_dir = os.path.join(actual_work_dir, "joint_mlp_evaluation")
     os.makedirs(output_dir, exist_ok=True)
     
     # Save detailed results
