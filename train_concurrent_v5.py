@@ -274,8 +274,8 @@ def main():
         return
     
     # Configuration
-    config_path = "Pretrained_model/hrnetv2_w68_cephalometric_256x256_finetune.py"
-    base_work_dir = f"work_dirs/hrnetv2_w68_cephalometric_cv_{args.n_folds}fold"
+    config_path = "Pretrained_model/hrnetv2_w18_cephalometric_256x256_finetune.py"
+    base_work_dir = f"work_dirs/hrnetv2_w18_cephalometric_cv_{args.n_folds}fold"
     os.makedirs(base_work_dir, exist_ok=True)
     
     print(f"Config: {config_path}")
