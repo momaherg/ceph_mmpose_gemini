@@ -153,7 +153,7 @@ def main():
     parser.add_argument(
         '--work_dir',
         type=str,
-        default='work_dirs/hrnetv2_w18_cephalometric_concurrent_mlp_v5',
+        default='work_dirs/hrnetv2_w18_cephalometric_cv_5fold',
         help='Work directory containing the trained models'
     )
     parser.add_argument(
