@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
 """
-HRNet and Concurrent Joint MLP Performance Evaluation Script
-This script evaluates HRNetV2 performance and optionally compares it with 
-joint MLP refinement if concurrent MLP training was performed.
-
-Automatically detects:
-- HRNet-only evaluation (if no MLP models found or --force-hrnet-only used)
-- Concurrent MLP evaluation (if MLP models are available)
+Concurrent Joint MLP Performance Evaluation Script
+This script evaluates the performance improvement from joint MLP refinement
+trained concurrently with HRNetV2.
+Use --hrnet-only flag to evaluate only HRNet without MLP refinement.
 """
 
 import os
@@ -147,7 +144,13 @@ def main():
     """Main evaluation function."""
     
     parser = argparse.ArgumentParser(
-        description='Evaluate HRNet and Concurrent Joint MLP Refinement Performance')
+        description='Evaluate Concurrent Joint MLP Refinement Performance')
+    parser.add_argument(
+        '--test_split_file',
+        type=str,
+        default=None,
+        help='Path to a text file containing patient IDs for the test set, one ID per line.'
+    )
     parser.add_argument(
         '--work_dir',
         type=str,
@@ -168,18 +171,23 @@ def main():
         help='Specific epoch number to evaluate (only used when checkpoint_type=epoch)'
     )
     parser.add_argument(
-        '--force-hrnet-only',
+        '--hrnet-only',
         action='store_true',
-        help='Force HRNet-only evaluation even if MLP models exist'
+        help='Evaluate only HRNet without MLP refinement'
     )
     args = parser.parse_args()
     
     print("="*80)
-    print("HRNET & CONCURRENT JOINT MLP EVALUATION")
+    if args.hrnet_only:
+        print("HRNET ONLY EVALUATION")
+    else:
+        print("CONCURRENT JOINT MLP REFINEMENT EVALUATION")
     print("="*80)
     print(f"📋 Checkpoint type: {args.checkpoint_type}")
     if args.checkpoint_type == 'epoch':
         print(f"📅 Target epoch: {args.epoch}")
+    if args.hrnet_only:
+        print("⚠️  MLP evaluation disabled - evaluating HRNet only")
     print()
     
     # Initialize MMPose scope
@@ -268,51 +276,14 @@ def main():
     hrnet_checkpoint_name = os.path.basename(hrnet_checkpoint)
     print(f"✓ Using HRNetV2 checkpoint: {hrnet_checkpoint_name}")
     
-    # Check if MLP models exist and determine evaluation mode
-    mlp_dir = os.path.join(args.work_dir, "concurrent_mlp")
-    mapping_file = os.path.join(mlp_dir, "checkpoint_mlp_mapping.json")
-    
-    # Determine if we should run MLP evaluation
-    run_mlp_evaluation = False
-    
-    if args.force_hrnet_only:
-        print("🎯 Force HRNet-only evaluation requested")
-        run_mlp_evaluation = False
-    elif not os.path.exists(mlp_dir):
-        print("📋 No MLP directory found - running HRNet-only evaluation")
-        print("   (This is normal if you trained with --disable-mlp)")
-        run_mlp_evaluation = False
-    else:
-        # Check if any MLP models exist
-        mlp_files = [
-            os.path.join(mlp_dir, "mlp_joint_final.pth"),
-            os.path.join(mlp_dir, "mlp_joint_latest.pth")
-        ]
-        
-        # Also check for epoch-specific models
-        import glob
-        epoch_mlp_files = glob.glob(os.path.join(mlp_dir, "mlp_joint_epoch_*.pth"))
-        mlp_files.extend(epoch_mlp_files)
-        
-        existing_mlp_files = [f for f in mlp_files if os.path.exists(f)]
-        
-        if existing_mlp_files:
-            print(f"✓ Found MLP models - running concurrent MLP evaluation")
-            print(f"  Available MLP models: {len(existing_mlp_files)}")
-            run_mlp_evaluation = True
-        else:
-            print("📋 No MLP models found - running HRNet-only evaluation")
-            print("   (This is normal if you trained with --disable-mlp)")
-            run_mlp_evaluation = False
-    
-    print(f"🔄 Evaluation mode: {'HRNet + MLP Concurrent' if run_mlp_evaluation else 'HRNet Only'}")
-    print()
-    
+    # Load checkpoint mapping to find synchronized MLP model (skip if hrnet-only)
     synchronized_mlp_path = None
-    model_type = "hrnet_only"
+    model_type = "hrnet_only" if args.hrnet_only else "unknown"
     
-    # Only try to find MLP models if we're running MLP evaluation
-    if run_mlp_evaluation:
+    if not args.hrnet_only:
+        mlp_dir = os.path.join(args.work_dir, "concurrent_mlp")
+        mapping_file = os.path.join(mlp_dir, "checkpoint_mlp_mapping.json")
+    
         # Try to find synchronized model first
         if os.path.exists(mapping_file):
             try:
@@ -415,63 +386,18 @@ def main():
     hrnet_model = init_model(config_path, hrnet_checkpoint, device=device)
     print("✓ HRNetV2 model loaded")
     
-    # Load joint MLP model (only if running MLP evaluation)
+    # Load joint MLP model (skip if hrnet-only)
     mlp_joint = None
-    if run_mlp_evaluation and synchronized_mlp_path:
+    scaler_input = None
+    scaler_target = None
+    
+    if not args.hrnet_only:
         mlp_joint = JointMLPRefinementModel().to(device)
         mlp_joint.load_state_dict(torch.load(synchronized_mlp_path, map_location=device))
         mlp_joint.eval()
         print("✓ Joint MLP model loaded")
-    elif run_mlp_evaluation:
-        print("⚠️  MLP evaluation requested but no valid MLP model found - falling back to HRNet-only")
-        run_mlp_evaluation = False
-    
-    # Load test data
-    data_file_path = "/content/drive/MyDrive/Lala's Masters/train_data_pure_old_numpy.json"
-    main_df = pd.read_json(data_file_path)
-    
-    # Split test data (same logic as training scripts)
-    print("Using random split for test set (same as training script)")
-    
-    # Check if we have enough samples
-    total_samples = len(main_df)
-    required_samples = 300  # 200 test + 100 validation
-    
-    if total_samples < required_samples:
-        print(f"ERROR: Not enough samples for requested split.")
-        print(f"Total samples: {total_samples}, Required: {required_samples} (200 test + 100 validation)")
-        return
         
-    print(f"Total samples available: {total_samples}")
-    
-    # Shuffle the entire dataframe with fixed random state for reproducibility (same as training)
-    shuffled_df = main_df.sample(frac=1, random_state=42).reset_index(drop=True)
-    
-    # Split randomly: first 200 for test, next 100 for validation, rest for training
-    test_df = shuffled_df.iloc[:200].reset_index(drop=True)
-    val_df = shuffled_df.iloc[200:300].reset_index(drop=True)
-    train_df = shuffled_df.iloc[300:].reset_index(drop=True)
-    
-    print(f"Random split completed (same as training):")
-    print(f"  • Test set: {len(test_df)} samples")
-    print(f"  • Validation set: {len(val_df)} samples") 
-    print(f"  • Training set: {len(train_df)} samples")
-    
-    if test_df.empty:
-        print("ERROR: No test samples found")
-        return
-    
-    print(f"✓ Evaluating on {len(test_df)} test samples")
-    
-    # Get landmark information
-    landmark_names = cephalometric_dataset_info.landmark_names_in_order
-    landmark_cols = cephalometric_dataset_info.original_landmark_cols
-    
-    # Load saved joint normalization scalers (only if running MLP evaluation)
-    scaler_input = None
-    scaler_target = None
-    
-    if run_mlp_evaluation:
+        # Load saved joint normalization scalers
         print("Loading saved joint normalization scalers...")
         scaler_dir = os.path.join(args.work_dir, "concurrent_mlp")
         
@@ -496,8 +422,34 @@ def main():
         except Exception as e:
             print(f"ERROR: Failed to load joint scalers: {e}")
             return
+    
+    # Load test data
+    data_file_path = "/content/drive/MyDrive/Lala's Masters/train_data_pure_old_numpy.json"
+    main_df = pd.read_json(data_file_path)
+    
+    # Split test data (same logic as training scripts)
+    if args.test_split_file:
+        print(f"Loading test set from external file: {args.test_split_file}")
+        with open(args.test_split_file, 'r') as f:
+            test_patient_ids = {int(line.strip()) for line in f if line.strip()}
+        
+        main_df['patient_id'] = main_df['patient_id'].astype(int)
+        test_df = main_df[main_df['patient_id'].isin(test_patient_ids)].reset_index(drop=True)
     else:
-        print("✓ Skipping scaler loading (HRNet-only evaluation)")
+        print("Using 'set' column for test set selection")
+        test_df = main_df[main_df['set'] == 'test'].reset_index(drop=True)
+        if test_df.empty:
+            test_df = main_df[main_df['set'] == 'dev'].reset_index(drop=True)
+    
+    if test_df.empty:
+        print("ERROR: No test samples found")
+        return
+    
+    print(f"✓ Evaluating on {len(test_df)} test samples")
+    
+    # Get landmark information
+    landmark_names = cephalometric_dataset_info.landmark_names_in_order
+    landmark_cols = cephalometric_dataset_info.original_landmark_cols
     
     # Evaluation on test set
     print(f"\n🔄 Running evaluation on {len(test_df)} test samples...")
@@ -506,9 +458,6 @@ def main():
     hrnet_predictions = []
     mlp_predictions = []
     ground_truths = []
-    
-    # Only store MLP predictions if running MLP evaluation
-    store_mlp_predictions = run_mlp_evaluation and mlp_joint is not None
     
     from tqdm import tqdm
     
@@ -547,8 +496,8 @@ def main():
             if pred_keypoints is None or pred_keypoints.shape[0] != 19:
                 continue
             
-            # Apply joint MLP refinement (only if available)
-            if store_mlp_predictions:
+            # Apply joint MLP refinement (skip if hrnet-only)
+            if not args.hrnet_only:
                 refined_keypoints = apply_joint_mlp_refinement(
                     pred_keypoints, mlp_joint, scaler_input, scaler_target, device
                 )
@@ -577,8 +526,7 @@ def main():
     
     hrnet_overall, hrnet_per_landmark = compute_metrics(hrnet_coords, gt_coords, landmark_names)
     
-    # Only compute MLP metrics if we have MLP predictions
-    if store_mlp_predictions and mlp_predictions:
+    if not args.hrnet_only:
         mlp_coords = np.array(mlp_predictions)
         mlp_overall, mlp_per_landmark = compute_metrics(mlp_coords, gt_coords, landmark_names)
     else:
@@ -588,17 +536,14 @@ def main():
     
     # Print results
     print("\n" + "="*80)
-    if store_mlp_predictions and mlp_overall:
-        print("JOINT MLP EVALUATION RESULTS")
+    if args.hrnet_only:
+        print("HRNET ONLY EVALUATION RESULTS")
     else:
-        print("HRNET EVALUATION RESULTS")
+        print("JOINT MLP EVALUATION RESULTS")
     print("="*80)
     
-    if store_mlp_predictions and mlp_overall:
+    if not args.hrnet_only:
         print(f"📊 Evaluated using {model_type} joint MLP model")
-    else:
-        print(f"📊 HRNet-only evaluation")
-    
     print(f"📈 HRNetV2 checkpoint: {hrnet_checkpoint_name} ({args.checkpoint_type})")
     print(f"🎯 Total samples evaluated: {len(hrnet_predictions)}")
     
@@ -609,7 +554,29 @@ def main():
     elif args.checkpoint_type == 'best':
         print(f"🏆 Best validation checkpoint used")
     
-    if store_mlp_predictions and mlp_overall:
+    if args.hrnet_only:
+        print(f"\n🏷️  HRNET PERFORMANCE:")
+        print(f"{'Metric':<15} {'HRNetV2':<15}")
+        print("-" * 30)
+        
+        print(f"{'MRE':<15} {hrnet_overall['mre']:<15.3f}")
+        print(f"{'Std Dev':<15} {hrnet_overall['std']:<15.3f}")
+        print(f"{'Median':<15} {hrnet_overall['median']:<15.3f}")
+        print(f"{'P90':<15} {hrnet_overall['p90']:<15.3f}")
+        print(f"{'P95':<15} {hrnet_overall['p95']:<15.3f}")
+        
+        # Per-landmark results for problematic landmarks
+        print(f"\n🎯 PROBLEMATIC LANDMARKS:")
+        problematic_landmarks = ['sella', 'Gonion', 'PNS', 'A_point', 'B_point']
+        
+        print(f"{'Landmark':<20} {'HRNetV2 MRE':<15}")
+        print("-" * 35)
+        
+        for landmark in problematic_landmarks:
+            if landmark in hrnet_per_landmark:
+                hrnet_err = hrnet_per_landmark[landmark]['mre']
+                print(f"{landmark:<20} {hrnet_err:<15.3f}")
+    else:
         print(f"\n🏷️  OVERALL PERFORMANCE:")
         print(f"{'Metric':<15} {'HRNetV2':<15} {'Joint MLP':<15} {'Improvement':<15}")
         print("-" * 65)
@@ -638,41 +605,22 @@ def main():
                 if hrnet_err > 0:
                     improvement = (hrnet_err - mlp_err) / hrnet_err * 100
                     print(f"{landmark:<20} {hrnet_err:<15.3f} {mlp_err:<15.3f} {improvement:<15.1f}%")
-    else:
-        print(f"\n🏷️  HRNET PERFORMANCE:")
-        print(f"{'Metric':<15} {'Value':<15}")
-        print("-" * 30)
-        
-        print(f"{'MRE':<15} {hrnet_overall['mre']:<15.3f}")
-        print(f"{'Std Dev':<15} {hrnet_overall['std']:<15.3f}")
-        print(f"{'Median':<15} {hrnet_overall['median']:<15.3f}")
-        print(f"{'P90':<15} {hrnet_overall['p90']:<15.3f}")
-        print(f"{'P95':<15} {hrnet_overall['p95']:<15.3f}")
-        
-        # Per-landmark performance for problematic landmarks
-        print(f"\n🎯 PROBLEMATIC LANDMARKS PERFORMANCE:")
-        problematic_landmarks = ['sella', 'Gonion', 'PNS', 'A_point', 'B_point']
-        
-        print(f"{'Landmark':<20} {'HRNetV2 MRE':<15}")
-        print("-" * 35)
-        
-        for landmark in problematic_landmarks:
-            if landmark in hrnet_per_landmark:
-                hrnet_err = hrnet_per_landmark[landmark]['mre']
-                print(f"{landmark:<20} {hrnet_err:<15.3f}")
     
     # Save results
-    if store_mlp_predictions and mlp_overall:
-        output_dir = os.path.join(args.work_dir, "joint_mlp_evaluation")
-        output_suffix = "joint_mlp"
-    else:
+    if args.hrnet_only:
         output_dir = os.path.join(args.work_dir, "hrnet_evaluation")
-        output_suffix = "hrnet_only"
-    
+    else:
+        output_dir = os.path.join(args.work_dir, "joint_mlp_evaluation")
     os.makedirs(output_dir, exist_ok=True)
     
     # Save detailed results
-    if store_mlp_predictions and mlp_overall:
+    if args.hrnet_only:
+        results_summary = {
+            'hrnet_overall': hrnet_overall,
+            'total_samples': len(hrnet_predictions),
+            'model_type': model_type
+        }
+    else:
         results_summary = {
             'hrnet_overall': hrnet_overall,
             'mlp_overall': mlp_overall,
@@ -682,52 +630,66 @@ def main():
             'total_samples': len(hrnet_predictions),
             'model_type': model_type
         }
-        
-        # Save per-landmark comparison
-        per_landmark_comparison = []
-        for landmark in landmark_names:
-            if landmark in hrnet_per_landmark and landmark in mlp_per_landmark:
-                hrnet_err = hrnet_per_landmark[landmark]['mre']
-                mlp_err = mlp_per_landmark[landmark]['mre']
-                improvement = (hrnet_err - mlp_err) / hrnet_err * 100 if hrnet_err > 0 else 0
-                
+    
+    # Save per-landmark comparison
+    per_landmark_comparison = []
+    for landmark in landmark_names:
+        if landmark in hrnet_per_landmark:
+            hrnet_err = hrnet_per_landmark[landmark]['mre']
+            
+            if args.hrnet_only:
                 per_landmark_comparison.append({
                     'landmark': landmark,
                     'hrnet_mre': hrnet_err,
-                    'mlp_mre': mlp_err,
-                    'improvement_percent': improvement,
-                    'hrnet_std': hrnet_per_landmark[landmark]['std'],
-                    'mlp_std': mlp_per_landmark[landmark]['std']
+                    'hrnet_std': hrnet_per_landmark[landmark]['std']
                 })
-        
-        comparison_df = pd.DataFrame(per_landmark_comparison)
-        comparison_df.to_csv(os.path.join(output_dir, "per_landmark_comparison.csv"), index=False)
-    else:
-        results_summary = {
-            'hrnet_overall': hrnet_overall,
-            'total_samples': len(hrnet_predictions),
-            'model_type': model_type
-        }
-        
-        # Save per-landmark results
-        per_landmark_results = []
-        for landmark in landmark_names:
-            if landmark in hrnet_per_landmark:
-                hrnet_err = hrnet_per_landmark[landmark]['mre']
-                
-                per_landmark_results.append({
-                    'landmark': landmark,
-                    'hrnet_mre': hrnet_err,
-                    'hrnet_std': hrnet_per_landmark[landmark]['std'],
-                    'hrnet_median': hrnet_per_landmark[landmark]['median']
-                })
-        
-        results_df = pd.DataFrame(per_landmark_results)
-        results_df.to_csv(os.path.join(output_dir, "per_landmark_results.csv"), index=False)
+            else:
+                if landmark in mlp_per_landmark:
+                    mlp_err = mlp_per_landmark[landmark]['mre']
+                    improvement = (hrnet_err - mlp_err) / hrnet_err * 100 if hrnet_err > 0 else 0
+                    
+                    per_landmark_comparison.append({
+                        'landmark': landmark,
+                        'hrnet_mre': hrnet_err,
+                        'mlp_mre': mlp_err,
+                        'improvement_percent': improvement,
+                        'hrnet_std': hrnet_per_landmark[landmark]['std'],
+                        'mlp_std': mlp_per_landmark[landmark]['std']
+                    })
+    
+    comparison_df = pd.DataFrame(per_landmark_comparison)
+    comparison_df.to_csv(os.path.join(output_dir, "per_landmark_comparison.csv"), index=False)
     
     # Create visualization
-    if store_mlp_predictions and mlp_overall:
-        # MLP comparison visualization
+    if args.hrnet_only:
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+        
+        # Overall performance
+        metrics = ['MRE', 'Std Dev', 'Median', 'P90', 'P95']
+        values = [hrnet_overall['mre'], hrnet_overall['std'], hrnet_overall['median'], 
+                 hrnet_overall['p90'], hrnet_overall['p95']]
+        
+        ax1.bar(metrics, values, alpha=0.7, color='skyblue')
+        ax1.set_ylabel('Error (pixels)')
+        ax1.set_title('HRNetV2 Performance Metrics')
+        ax1.grid(True, alpha=0.3)
+        
+        # Error distribution
+        hrnet_errors = np.sqrt(np.sum((hrnet_coords - gt_coords)**2, axis=2)).flatten()
+        valid_mask = (gt_coords.reshape(-1, 2)[:, 0] > 0) & (gt_coords.reshape(-1, 2)[:, 1] > 0)
+        hrnet_errors = hrnet_errors[valid_mask]
+        
+        ax2.hist(hrnet_errors, bins=50, alpha=0.7, color='skyblue')
+        ax2.set_xlabel('Radial Error (pixels)')
+        ax2.set_ylabel('Frequency')
+        ax2.set_title('HRNetV2 Error Distribution')
+        ax2.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        plot_path = os.path.join(output_dir, "hrnet_evaluation_results.png")
+        plt.savefig(plot_path, dpi=150, bbox_inches='tight')
+        plt.close()
+    else:
         fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 12))
         
         # Overall comparison
@@ -788,72 +750,16 @@ def main():
         plot_path = os.path.join(output_dir, "joint_mlp_evaluation_results.png")
         plt.savefig(plot_path, dpi=150, bbox_inches='tight')
         plt.close()
-    else:
-        # HRNet-only visualization
-        fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 12))
-        
-        # Overall performance
-        metrics = ['MRE', 'Std Dev', 'Median', 'P90', 'P95']
-        values = [hrnet_overall['mre'], hrnet_overall['std'], hrnet_overall['median'], 
-                 hrnet_overall['p90'], hrnet_overall['p95']]
-        
-        ax1.bar(metrics, values, alpha=0.7, color='skyblue')
-        ax1.set_ylabel('Error (pixels)')
-        ax1.set_title('HRNetV2 Overall Performance')
-        ax1.grid(True, alpha=0.3)
-        ax1.tick_params(axis='x', rotation=45)
-        
-        # Per-landmark performance
-        landmarks_subset = results_df.head(10)  # Top 10 landmarks
-        ax2.barh(landmarks_subset['landmark'], landmarks_subset['hrnet_mre'], 
-                 color='skyblue')
-        ax2.set_xlabel('Mean Radial Error (pixels)')
-        ax2.set_title('Per-Landmark Performance')
-        ax2.grid(True, alpha=0.3)
-        
-        # Error distribution
-        hrnet_errors = np.sqrt(np.sum((hrnet_coords - gt_coords)**2, axis=2)).flatten()
-        
-        # Remove invalid landmarks (where gt is [0,0])
-        valid_mask = (gt_coords.reshape(-1, 2)[:, 0] > 0) & (gt_coords.reshape(-1, 2)[:, 1] > 0)
-        hrnet_errors = hrnet_errors[valid_mask]
-        
-        ax3.hist(hrnet_errors, bins=50, alpha=0.7, color='skyblue', edgecolor='black')
-        ax3.set_xlabel('Radial Error (pixels)')
-        ax3.set_ylabel('Frequency')
-        ax3.set_title('HRNetV2 Error Distribution')
-        ax3.grid(True, alpha=0.3)
-        
-        # Box plot of per-landmark errors
-        landmark_error_lists = []
-        landmark_labels = []
-        for landmark in landmark_names[:10]:  # Top 10 landmarks
-            landmark_idx = landmark_names.index(landmark)
-            landmark_errors = np.sqrt(np.sum((hrnet_coords[:, landmark_idx, :] - gt_coords[:, landmark_idx, :])**2, axis=1))
-            # Only include valid landmarks
-            valid_landmark = (gt_coords[:, landmark_idx, 0] > 0) & (gt_coords[:, landmark_idx, 1] > 0)
-            if np.any(valid_landmark):
-                landmark_error_lists.append(landmark_errors[valid_landmark])
-                landmark_labels.append(landmark)
-        
-        if landmark_error_lists:
-            ax4.boxplot(landmark_error_lists, labels=landmark_labels)
-            ax4.set_ylabel('Radial Error (pixels)')
-            ax4.set_title('Per-Landmark Error Distribution')
-            ax4.tick_params(axis='x', rotation=45)
-            ax4.grid(True, alpha=0.3)
-        
-        plt.tight_layout()
-        plot_path = os.path.join(output_dir, "hrnet_evaluation_results.png")
-        plt.savefig(plot_path, dpi=150, bbox_inches='tight')
-        plt.close()
     
     print(f"\n💾 Results saved to: {output_dir}")
-    
-    if store_mlp_predictions and mlp_overall:
-        print(f"   - Per-landmark comparison: per_landmark_comparison.csv")
+    print(f"   - Per-landmark comparison: per_landmark_comparison.csv")
+    if args.hrnet_only:
+        print(f"   - Visualization: hrnet_evaluation_results.png")
+        print(f"\n🎉 HRNet evaluation completed!")
+        print(f"📈 Overall MRE: {hrnet_overall['mre']:.3f} pixels")
+        print(f"🎯 Baseline performance established")
+    else:
         print(f"   - Visualization: joint_mlp_evaluation_results.png")
-        
         print(f"\n🎉 Joint MLP evaluation completed!")
         print(f"📈 Overall improvement: {improvement_mre:.1f}% reduction in MRE")
         print(f"🎯 Joint model captures cross-correlations between landmarks")
@@ -863,19 +769,6 @@ def main():
             print("💡 Note: Training is likely still in progress. Final results may differ.")
         elif "epoch_" in model_type:
             print("💡 Note: Using intermediate checkpoint. Final results may differ.")
-    else:
-        print(f"   - Per-landmark results: per_landmark_results.csv")
-        print(f"   - Visualization: hrnet_evaluation_results.png")
-        
-        print(f"\n🎉 HRNet evaluation completed!")
-        print(f"📈 Overall MRE: {hrnet_overall['mre']:.3f} pixels")
-        print(f"🎯 Baseline performance established")
-        print(f"🔧 Evaluated using: {model_type}")
-        
-        print(f"\n💡 To enable MLP refinement:")
-        print(f"   1. Train with concurrent MLP: python train_concurrent_v5.py (without --disable-mlp)")
-        print(f"   2. Re-run this evaluation script")
-        print(f"   3. Compare HRNet vs MLP performance")
 
 if __name__ == "__main__":
     main() 
