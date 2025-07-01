@@ -2,7 +2,7 @@
 """
 5-Fold Cross-Validation Concurrent MLP Training Script for Cephalometric Landmark Detection - V5
 This script performs 5-fold cross-validation with concurrent MLP refinement using custom hooks.
-Each fold trains for 18 epochs with patient-level splitting to avoid data leakage.
+Each fold trains for 68 epochs with patient-level splitting to avoid data leakage.
 """
 
 import os
@@ -134,13 +134,13 @@ def train_single_fold(fold_data, base_work_dir, config_path, main_df):
     cfg = Config.fromfile(config_path)
     cfg.work_dir = os.path.abspath(fold_work_dir)
     
-    # Update training configuration for 18 epochs
-    cfg.train_cfg.max_epochs = 18
+    # Update training configuration for 68 epochs
+    cfg.train_cfg.max_epochs = 68
     
     # Update learning rate scheduler for shorter training
     if hasattr(cfg, 'param_scheduler') and len(cfg.param_scheduler) > 1:
-        # Adjust MultiStepLR milestones for 18 epochs
-        cfg.param_scheduler[1].end = 18
+        # Adjust MultiStepLR milestones for 68 epochs
+        cfg.param_scheduler[1].end = 68
         cfg.param_scheduler[1].milestones = [13, 16]  # Decay at 72% and 89% of training
     
     try:
@@ -173,7 +173,7 @@ def train_single_fold(fold_data, base_work_dir, config_path, main_df):
             'val_patients': fold_data['val_patients'].tolist(),
             'train_samples': len(train_df),
             'val_samples': len(val_df),
-            'epochs': 18
+            'epochs': 68
         }
         
         with open(os.path.join(fold_work_dir, f'fold_{fold_num}_info.json'), 'w') as f:
@@ -240,8 +240,8 @@ def main():
     parser.add_argument(
         '--epochs_per_fold',
         type=int,
-        default=18,
-        help='Number of epochs to train each fold (default: 18)'
+        default=68,
+        help='Number of epochs to train each fold (default: 68)'
     )
     parser.add_argument(
         '--start_fold',
@@ -274,8 +274,8 @@ def main():
         return
     
     # Configuration
-    config_path = "Pretrained_model/hrnetv2_w18_cephalometric_256x256_finetune.py"
-    base_work_dir = f"work_dirs/hrnetv2_w18_cephalometric_cv_{args.n_folds}fold"
+    config_path = "Pretrained_model/hrnetv2_w68_cephalometric_256x256_finetune.py"
+    base_work_dir = f"work_dirs/hrnetv2_w68_cephalometric_cv_{args.n_folds}fold"
     os.makedirs(base_work_dir, exist_ok=True)
     
     print(f"Config: {config_path}")
@@ -399,7 +399,7 @@ def main():
     print(f"\n🎉 5-fold cross-validation completed!")
     print(f"📈 Each fold trained with concurrent MLP refinement for {args.epochs_per_fold} epochs")
     print(f"🎯 Patient-level splitting ensures no data leakage between folds")
-    print(f"💾 Storage optimized: Only 18 epochs per fold (90 total epochs vs 222 single training)")
+    print(f"💾 Storage optimized: Only 68 epochs per fold (90 total epochs vs 222 single training)")
 
 if __name__ == "__main__":
     main() 
