@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 Concurrent MLP Training Script for Cephalometric Landmark Detection - V5
-This script trains HRNetV2 with concurrent MLP refinement using custom hooks.
+This script trains HRNetV2 with optional concurrent MLP refinement using custom hooks.
+Use --disable-mlp flag to train only HRNet without MLP refinement.
 """
 
 import os
@@ -74,16 +75,19 @@ def main():
     parser = argparse.ArgumentParser(
         description='Concurrent MLP Training Script for Cephalometric Landmark Detection - V5')
     parser.add_argument(
-        '--test_split_file',
-        type=str,
-        default=None,
-        help='Path to a text file containing patient IDs for the test set, one ID per line.'
+        '--disable-mlp',
+        action='store_true',
+        help='Disable concurrent MLP training and train only HRNet'
     )
     args = parser.parse_args()
     
     print("="*80)
-    print("CONCURRENT MLP TRAINING - V5")
-    print("🚀 HRNetV2 + On-the-fly MLP Refinement")
+    if args.disable_mlp:
+        print("STANDARD HRNET TRAINING - V5")
+        print("🎯 HRNetV2 Baseline Training")
+    else:
+        print("CONCURRENT MLP TRAINING - V5")
+        print("🚀 HRNetV2 + On-the-fly MLP Refinement")
     print("="*80)
     
     # Initialize MMPose scope
@@ -94,10 +98,15 @@ def main():
         import custom_cephalometric_dataset
         import custom_transforms
         import cephalometric_dataset_info
-        # Import the concurrent training hook
-        import mlp_concurrent_training_hook
         print("✓ Custom modules imported successfully")
-        print("✓ Concurrent MLP training hook imported")
+        
+        # Conditionally import the concurrent training hook
+        if not args.disable_mlp:
+            import mlp_concurrent_training_hook
+            print("✓ Concurrent MLP training hook imported")
+        else:
+            print("⚠️  MLP training disabled - training HRNet only")
+            
     except ImportError as e:
         print(f"✗ Failed to import custom modules: {e}")
         return
@@ -129,43 +138,32 @@ def main():
         main_df = pd.read_json(data_file_path)
         print(f"Main DataFrame loaded. Shape: {main_df.shape}")
 
-        # Data splitting logic (same as train_improved_v4.py)
-        if args.test_split_file:
-            print(f"Splitting data using external test set file: {args.test_split_file}")
-            with open(args.test_split_file, 'r') as f:
-                test_patient_ids = {
-                    int(line.strip())
-                    for line in f if line.strip()
-                }
-
-            if 'patient_id' not in main_df.columns:
-                print("ERROR: 'patient_id' column not found in the main DataFrame.")
-                return
+        # Random data splitting logic: 200 test, 100 validation, rest training
+        print("Splitting data randomly: 200 test samples, 100 validation samples, rest for training")
+        
+        # Check if we have enough samples
+        total_samples = len(main_df)
+        required_samples = 300  # 200 test + 100 validation
+        
+        if total_samples < required_samples:
+            print(f"ERROR: Not enough samples for requested split.")
+            print(f"Total samples: {total_samples}, Required: {required_samples} (200 test + 100 validation)")
+            return
             
-            main_df['patient_id'] = main_df['patient_id'].astype(int)
-
-            test_df = main_df[main_df['patient_id'].isin(test_patient_ids)].reset_index(drop=True)
-            remaining_df = main_df[~main_df['patient_id'].isin(test_patient_ids)]
-
-            if len(remaining_df) >= 100:
-                val_df = remaining_df.sample(n=100, random_state=42)
-                train_df = remaining_df.drop(val_df.index).reset_index(drop=True)
-                val_df = val_df.reset_index(drop=True)
-            else:
-                print(f"WARNING: Only {len(remaining_df)} patients remaining after selecting the test set.")
-                print("Splitting the remaining data into 50% validation and 50% training.")
-                if len(remaining_df) > 1:
-                    val_df = remaining_df.sample(frac=0.5, random_state=42)
-                    train_df = remaining_df.drop(val_df.index).reset_index(drop=True)
-                    val_df = val_df.reset_index(drop=True)
-                else:
-                    val_df = remaining_df.reset_index(drop=True)
-                    train_df = pd.DataFrame()
-        else:
-            print("Splitting data using 'set' column from the JSON file.")
-            train_df = main_df[main_df['set'] == 'train'].reset_index(drop=True)
-            val_df = main_df[main_df['set'] == 'dev'].reset_index(drop=True)
-            test_df = main_df[main_df['set'] == 'test'].reset_index(drop=True)
+        print(f"Total samples available: {total_samples}")
+        
+        # Shuffle the entire dataframe with fixed random state for reproducibility
+        shuffled_df = main_df.sample(frac=1, random_state=42).reset_index(drop=True)
+        
+        # Split randomly: first 200 for test, next 100 for validation, rest for training
+        test_df = shuffled_df.iloc[:200].reset_index(drop=True)
+        val_df = shuffled_df.iloc[200:300].reset_index(drop=True)
+        train_df = shuffled_df.iloc[300:].reset_index(drop=True)
+        
+        print(f"Random split completed:")
+        print(f"  • Test set: {len(test_df)} samples")
+        print(f"  • Validation set: {len(val_df)} samples") 
+        print(f"  • Training set: {len(train_df)} samples")
 
         print(f"Train DataFrame shape: {train_df.shape}")
         print(f"Validation DataFrame shape: {val_df.shape}")
@@ -209,37 +207,57 @@ def main():
         traceback.print_exc()
         return
     
-    # Print concurrent training information
+    # Disable custom hooks if MLP training is disabled
+    if args.disable_mlp and hasattr(cfg, 'custom_hooks'):
+        cfg.custom_hooks = []
+        print("✓ Custom hooks disabled (MLP training turned off)")
+    
+    # Print training information
     print("\n" + "="*70)
-    print("🚀 CONCURRENT MLP TRAINING APPROACH")
-    print("="*70)
-    print(f"🔄 Training Cycle:")
-    print(f"   • Train HRNetV2 for 1 epoch")
-    print(f"   • Run inference on training data with current HRNet weights")
-    print(f"   • Train MLP models (X & Y) for 100 epochs on current predictions")
-    print(f"   • Repeat for all {cfg.train_cfg.max_epochs} epochs")
-    
-    print(f"\n🧠 MLP Architecture:")
-    print(f"   • Input: 19 predicted coordinates")
-    print(f"   • Hidden: 500 neurons (ReLU + Dropout)")
-    print(f"   • Output: 19 refined coordinates")
-    print(f"   • Two separate models: one for X, one for Y coordinates")
-    
-    print(f"\n⚙️  Training Parameters:")
-    print(f"   • HRNet epochs: {cfg.train_cfg.max_epochs}")
-    print(f"   • MLP epochs per cycle: 100")
-    print(f"   • MLP batch size: 16")
-    print(f"   • MLP learning rate: 1e-5")
-    print(f"   • MLP weight decay: 1e-4")
-    
-    print(f"\n🔒 Independence:")
-    print(f"   • MLP gradients do NOT propagate back to HRNet")
-    print(f"   • MLP parameters initialized once and persist across training")
-    print(f"   • MLPs adapt dynamically to evolving HRNet predictions")
+    if args.disable_mlp:
+        print("🎯 STANDARD HRNET TRAINING")
+        print("="*70)
+        print(f"🔄 Training Cycle:")
+        print(f"   • Train HRNetV2 for {cfg.train_cfg.max_epochs} epochs")
+        print(f"   • Standard pose estimation training")
+        print(f"   • No MLP refinement")
+        
+        print(f"\n⚙️  Training Parameters:")
+        print(f"   • HRNet epochs: {cfg.train_cfg.max_epochs}")
+        print(f"   • Standard MMPose training pipeline")
+    else:
+        print("🚀 CONCURRENT MLP TRAINING APPROACH")
+        print("="*70)
+        print(f"🔄 Training Cycle:")
+        print(f"   • Train HRNetV2 for 1 epoch")
+        print(f"   • Run inference on training data with current HRNet weights")
+        print(f"   • Train MLP models (X & Y) for 100 epochs on current predictions")
+        print(f"   • Repeat for all {cfg.train_cfg.max_epochs} epochs")
+        
+        print(f"\n🧠 MLP Architecture:")
+        print(f"   • Input: 19 predicted coordinates")
+        print(f"   • Hidden: 500 neurons (ReLU + Dropout)")
+        print(f"   • Output: 19 refined coordinates")
+        print(f"   • Two separate models: one for X, one for Y coordinates")
+        
+        print(f"\n⚙️  Training Parameters:")
+        print(f"   • HRNet epochs: {cfg.train_cfg.max_epochs}")
+        print(f"   • MLP epochs per cycle: 100")
+        print(f"   • MLP batch size: 16")
+        print(f"   • MLP learning rate: 1e-5")
+        print(f"   • MLP weight decay: 1e-4")
+        
+        print(f"\n🔒 Independence:")
+        print(f"   • MLP gradients do NOT propagate back to HRNet")
+        print(f"   • MLP parameters initialized once and persist across training")
+        print(f"   • MLPs adapt dynamically to evolving HRNet predictions")
     
     # Check if custom_hooks exists in config
-    if not hasattr(cfg, 'custom_hooks'):
-        print("⚠️  Warning: custom_hooks not found in config. The hook should be automatically active.")
+    if not hasattr(cfg, 'custom_hooks') or not cfg.custom_hooks:
+        if args.disable_mlp:
+            print("✓ No custom hooks configured (MLP training disabled)")
+        else:
+            print("⚠️  Warning: custom_hooks not found in config. The hook should be automatically active.")
     else:
         print(f"✓ Custom hooks configured: {len(cfg.custom_hooks)} hook(s)")
         for i, hook in enumerate(cfg.custom_hooks):
@@ -248,36 +266,48 @@ def main():
     # Build runner and start training
     try:
         print("\n" + "="*70)
-        print("🚀 STARTING CONCURRENT TRAINING")
+        if args.disable_mlp:
+            print("🚀 STARTING STANDARD HRNET TRAINING")
+        else:
+            print("🚀 STARTING CONCURRENT TRAINING")
         print("="*70)
         
         runner = Runner.from_cfg(cfg)
         
-        print("🎯 Concurrent training in progress...")
-        print("📊 After each HRNet epoch, MLPs will be trained for 100 epochs")
-        print("📈 Monitor logs for both HRNet and MLP training progress")
-        print("⏱️  This will take significantly longer due to concurrent MLP training")
+        if args.disable_mlp:
+            print("🎯 Standard HRNet training in progress...")
+            print("📈 Monitor logs for HRNet training progress")
+            print("⏱️  Standard training speed - no MLP overhead")
+        else:
+            print("🎯 Concurrent training in progress...")
+            print("📊 After each HRNet epoch, MLPs will be trained for 100 epochs")
+            print("📈 Monitor logs for both HRNet and MLP training progress")
+            print("⏱️  This will take significantly longer due to concurrent MLP training")
         
         runner.train()
         
-        print("\n🎉 Concurrent training completed successfully!")
+        if args.disable_mlp:
+            print("\n🎉 HRNet training completed successfully!")
+        else:
+            print("\n🎉 Concurrent training completed successfully!")
         
         # Plot training progress
         plot_training_progress(cfg.work_dir)
         
-        # Check for saved MLP models
-        mlp_dir = os.path.join(cfg.work_dir, "concurrent_mlp")
-        if os.path.exists(mlp_dir):
-            mlp_x_path = os.path.join(mlp_dir, "mlp_x_final.pth")
-            mlp_y_path = os.path.join(mlp_dir, "mlp_y_final.pth")
-            if os.path.exists(mlp_x_path) and os.path.exists(mlp_y_path):
-                print(f"✓ Concurrent MLP models saved:")
-                print(f"   X-coordinate model: {mlp_x_path}")
-                print(f"   Y-coordinate model: {mlp_y_path}")
+        # Check for saved MLP models (only if MLP training was enabled)
+        if not args.disable_mlp:
+            mlp_dir = os.path.join(cfg.work_dir, "concurrent_mlp")
+            if os.path.exists(mlp_dir):
+                mlp_joint_path = os.path.join(mlp_dir, "mlp_joint_final.pth")
+                if os.path.exists(mlp_joint_path):
+                    print(f"✓ Concurrent MLP model saved:")
+                    print(f"   Joint model: {mlp_joint_path}")
+                else:
+                    print("⚠️  MLP model not found. Check hook execution.")
             else:
-                print("⚠️  MLP models not found. Check hook execution.")
+                print("⚠️  MLP directory not found. Check hook execution.")
         else:
-            print("⚠️  MLP directory not found. Check hook execution.")
+            print("✓ Standard HRNet training completed - no MLP models to save")
         
     except Exception as e:
         print(f"\n💥 Training failed: {e}")
@@ -287,7 +317,10 @@ def main():
     
     # Final validation
     print("\n" + "="*70)
-    print("🏆 CONCURRENT TRAINING COMPLETED")
+    if args.disable_mlp:
+        print("🏆 HRNET TRAINING COMPLETED")
+    else:
+        print("🏆 CONCURRENT TRAINING COMPLETED")
     print("="*70)
     
     try:
@@ -299,17 +332,28 @@ def main():
             latest_checkpoint = max(checkpoints, key=os.path.getctime)
             print(f"🏅 Best HRNet checkpoint: {latest_checkpoint}")
             
-            print("\n🎯 Training completed! Key benefits expected:")
-            print(f"1. 🔄 Dynamic adaptation: MLPs continuously adapt to HRNet evolution")
-            print(f"2. 🎯 Overfitting mitigation: MLPs learn to correct HRNet intermediate errors")
-            print(f"3. 🧠 Complex relationships: MLPs capture spatial dependencies between landmarks")
-            print(f"4. 🚀 Two-stage refinement: HRNet predictions → MLP refinement")
-            
-            print(f"\n📋 Next steps:")
-            print(f"1. 📊 Evaluate both HRNet and MLP models on test set")
-            print(f"2. 🔍 Compare concurrent vs. sequential MLP training")
-            print(f"3. 📈 Analyze improvement over baseline HRNet")
-            print(f"4. 🎨 Visualize dynamic MLP adaptation over epochs")
+            if args.disable_mlp:
+                print("\n🎯 Standard HRNet training completed!")
+                print(f"1. 🏗️  Baseline model: Standard HRNetV2 for cephalometric landmarks")
+                print(f"2. 📊 Performance: Evaluate on test set for baseline metrics")
+                
+                print(f"\n📋 Next steps:")
+                print(f"1. 📊 Evaluate HRNet model on test set")
+                print(f"2. 📈 Compare with other baseline models")
+                print(f"3. 🔍 Analyze landmark prediction accuracy")
+                print(f"4. 🚀 Consider enabling MLP refinement for potential improvements")
+            else:
+                print("\n🎯 Training completed! Key benefits expected:")
+                print(f"1. 🔄 Dynamic adaptation: MLPs continuously adapt to HRNet evolution")
+                print(f"2. 🎯 Overfitting mitigation: MLPs learn to correct HRNet intermediate errors")
+                print(f"3. 🧠 Complex relationships: MLPs capture spatial dependencies between landmarks")
+                print(f"4. 🚀 Two-stage refinement: HRNet predictions → MLP refinement")
+                
+                print(f"\n📋 Next steps:")
+                print(f"1. 📊 Evaluate both HRNet and MLP models on test set")
+                print(f"2. 🔍 Compare concurrent vs. sequential MLP training")
+                print(f"3. 📈 Analyze improvement over baseline HRNet")
+                print(f"4. 🎨 Visualize dynamic MLP adaptation over epochs")
             
         else:
             print("⚠️  No best checkpoint found")
