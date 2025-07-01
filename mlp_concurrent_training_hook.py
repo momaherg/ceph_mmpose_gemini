@@ -200,6 +200,10 @@ class ConcurrentMLPTrainingHook(Hook):
         # Track checkpoint synchronization
         self.checkpoint_mlp_mapping: dict = {}  # Maps HRNet checkpoint names to MLP model paths
         self.last_saved_checkpoint: str | None = None
+        
+        # Checkpoint management
+        self.max_keep_ckpts: int = 5  # Keep only last 5 epoch checkpoints
+        self.best_checkpoint_path: str | None = None  # Track best checkpoint
 
     # ---------------------------------------------------------------------
     # MMEngine lifecycle methods
@@ -219,6 +223,7 @@ class ConcurrentMLPTrainingHook(Hook):
         logger.info(f'[ConcurrentMLPTrainingHook] Joint MLP initialized with {sum(p.numel() for p in self.mlp_joint.parameters()):,} parameters')
         logger.info(f'[ConcurrentMLPTrainingHook] Hard-example threshold: {self.hard_example_threshold} pixels')
         logger.info(f'[ConcurrentMLPTrainingHook] HRNet hard-example weight: {self.hrnet_hard_example_weight}x')
+        logger.info(f'[ConcurrentMLPTrainingHook] Will keep last {self.max_keep_ckpts} epoch checkpoints + best checkpoint')
 
     def _create_weighted_sampler_for_hrnet(self, runner: Runner, sample_weights: np.ndarray):
         """Create a weighted sampler for HRNetV2 training based on hard examples."""
@@ -646,6 +651,9 @@ class ConcurrentMLPTrainingHook(Hook):
         
         logger.info(f'[ConcurrentMLPTrainingHook] Joint MLP model saved for epoch {current_epoch}')
         logger.info(f'[ConcurrentMLPTrainingHook] Latest model: {mlp_joint_latest_path}')
+        
+        # Clean up old checkpoints to save storage
+        self._cleanup_old_checkpoints(runner, save_dir)
 
     # ---------------------------------------------------------------------
     # Optional: save MLP weights at end of run
@@ -658,6 +666,65 @@ class ConcurrentMLPTrainingHook(Hook):
         os.makedirs(save_dir, exist_ok=True)
         torch.save(self.mlp_joint.state_dict(), os.path.join(save_dir, 'mlp_joint_final.pth'))
         logger.info(f'[ConcurrentMLPTrainingHook] Saved final joint MLP weights to {save_dir}')
+
+    def _cleanup_old_checkpoints(self, runner: Runner, save_dir: str):
+        """Clean up old epoch checkpoints, keeping only the last N and the best one."""
+        logger: MMLogger = runner.logger
+        
+        try:
+            import glob
+            import os
+            
+            # Find all epoch checkpoint files
+            epoch_pattern = os.path.join(save_dir, "mlp_joint_epoch_*.pth")
+            epoch_files = glob.glob(epoch_pattern)
+            
+            if len(epoch_files) <= self.max_keep_ckpts:
+                return  # No cleanup needed
+            
+            # Sort by epoch number
+            epoch_files_with_nums = []
+            for file_path in epoch_files:
+                try:
+                    filename = os.path.basename(file_path)
+                    epoch_num = int(filename.split('_epoch_')[1].split('.')[0])
+                    epoch_files_with_nums.append((epoch_num, file_path))
+                except:
+                    continue
+            
+            # Sort by epoch number (ascending)
+            epoch_files_with_nums.sort(key=lambda x: x[0])
+            
+            # Keep only the last N checkpoints
+            files_to_keep = epoch_files_with_nums[-self.max_keep_ckpts:]
+            files_to_remove = epoch_files_with_nums[:-self.max_keep_ckpts]
+            
+            # Also keep the best checkpoint if it exists and would be removed
+            if self.best_checkpoint_path:
+                best_basename = os.path.basename(self.best_checkpoint_path)
+                for epoch_num, file_path in files_to_remove:
+                    if os.path.basename(file_path) == f"mlp_joint_sync_{best_basename}":
+                        # Don't remove the best checkpoint
+                        files_to_remove.remove((epoch_num, file_path))
+                        logger.info(f'[ConcurrentMLPTrainingHook] Preserving best checkpoint: mlp_joint_sync_{best_basename}')
+                        break
+            
+            # Remove old files
+            removed_count = 0
+            for epoch_num, file_path in files_to_remove:
+                try:
+                    os.remove(file_path)
+                    removed_count += 1
+                    logger.debug(f'[ConcurrentMLPTrainingHook] Removed old checkpoint: {os.path.basename(file_path)}')
+                except Exception as e:
+                    logger.warning(f'[ConcurrentMLPTrainingHook] Failed to remove {file_path}: {e}')
+            
+            if removed_count > 0:
+                kept_epochs = [str(epoch_num) for epoch_num, _ in files_to_keep]
+                logger.info(f'[ConcurrentMLPTrainingHook] Cleaned up {removed_count} old checkpoints, kept epochs: {", ".join(kept_epochs)}')
+                
+        except Exception as e:
+            logger.warning(f'[ConcurrentMLPTrainingHook] Checkpoint cleanup failed: {e}')
 
     def _save_synchronized_mlp_model(self, runner: Runner, checkpoint_name: str):
         """Save MLP model synchronized with a specific HRNet checkpoint."""
@@ -681,6 +748,11 @@ class ConcurrentMLPTrainingHook(Hook):
             
             # Save MLP model
             torch.save(self.mlp_joint.state_dict(), synchronized_mlp_path)
+            
+            # Track best checkpoint
+            if 'best_' in checkpoint_name:
+                self.best_checkpoint_path = checkpoint_name
+                logger.info(f'[ConcurrentMLPTrainingHook] New best checkpoint detected: {checkpoint_name}')
             
             # Update mapping
             self.checkpoint_mlp_mapping[checkpoint_name] = synchronized_mlp_path

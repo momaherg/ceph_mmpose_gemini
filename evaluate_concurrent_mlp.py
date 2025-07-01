@@ -156,11 +156,28 @@ def main():
         default='work_dirs/hrnetv2_w18_cephalometric_concurrent_mlp_v5',
         help='Work directory containing the trained models'
     )
+    parser.add_argument(
+        '--checkpoint_type',
+        type=str,
+        choices=['best', 'latest', 'epoch'],
+        default='best',
+        help='Type of checkpoint to evaluate: best (best validation), latest (most recent), or epoch (specific epoch)'
+    )
+    parser.add_argument(
+        '--epoch',
+        type=int,
+        default=None,
+        help='Specific epoch number to evaluate (only used when checkpoint_type=epoch)'
+    )
     args = parser.parse_args()
     
     print("="*80)
     print("CONCURRENT JOINT MLP REFINEMENT EVALUATION")
     print("="*80)
+    print(f"📋 Checkpoint type: {args.checkpoint_type}")
+    if args.checkpoint_type == 'epoch':
+        print(f"📅 Target epoch: {args.epoch}")
+    print()
     
     # Initialize MMPose scope
     init_default_scope('mmpose')
@@ -181,21 +198,72 @@ def main():
     # Load config
     cfg = Config.fromfile(config_path)
     
-    # Find the best HRNetV2 checkpoint
-    hrnet_checkpoint_pattern = os.path.join(args.work_dir, "best_NME_epoch_*.pth")
-    hrnet_checkpoints = glob.glob(hrnet_checkpoint_pattern)
+    # Find the HRNetV2 checkpoint based on user preference
+    hrnet_checkpoint = None
+    hrnet_checkpoint_name = None
     
-    if not hrnet_checkpoints:
-        hrnet_checkpoint_pattern = os.path.join(args.work_dir, "epoch_*.pth")
+    if args.checkpoint_type == 'best':
+        # Look for best validation checkpoint
+        hrnet_checkpoint_pattern = os.path.join(args.work_dir, "best_NME_epoch_*.pth")
         hrnet_checkpoints = glob.glob(hrnet_checkpoint_pattern)
+        
+        if hrnet_checkpoints:
+            hrnet_checkpoint = max(hrnet_checkpoints, key=os.path.getctime)
+            print(f"✓ Using best validation checkpoint")
+        else:
+            print("⚠️  No best validation checkpoint found, falling back to latest")
+            args.checkpoint_type = 'latest'  # Fallback
     
-    if not hrnet_checkpoints:
-        print("ERROR: No HRNetV2 checkpoints found")
+    if args.checkpoint_type == 'latest':
+        # Look for latest checkpoint
+        latest_checkpoint = os.path.join(args.work_dir, "latest.pth")
+        if os.path.exists(latest_checkpoint):
+            hrnet_checkpoint = latest_checkpoint
+            print(f"✓ Using latest checkpoint")
+        else:
+            # Fallback to most recent epoch checkpoint
+            hrnet_checkpoint_pattern = os.path.join(args.work_dir, "epoch_*.pth")
+            hrnet_checkpoints = glob.glob(hrnet_checkpoint_pattern)
+            if hrnet_checkpoints:
+                hrnet_checkpoint = max(hrnet_checkpoints, key=lambda x: int(x.split('epoch_')[1].split('.')[0]))
+                print(f"✓ Using most recent epoch checkpoint (latest.pth not found)")
+    
+    if args.checkpoint_type == 'epoch':
+        if args.epoch is None:
+            print("ERROR: --epoch must be specified when using --checkpoint_type=epoch")
+            return
+        
+        # Look for specific epoch checkpoint
+        epoch_checkpoint = os.path.join(args.work_dir, f"epoch_{args.epoch}.pth")
+        if os.path.exists(epoch_checkpoint):
+            hrnet_checkpoint = epoch_checkpoint
+            print(f"✓ Using epoch {args.epoch} checkpoint")
+        else:
+            print(f"ERROR: Epoch {args.epoch} checkpoint not found: {epoch_checkpoint}")
+            return
+    
+    # Final fallback if no checkpoint found
+    if hrnet_checkpoint is None:
+        print("ERROR: No suitable HRNetV2 checkpoint found")
+        print("Available checkpoint types:")
+        
+        # Show available checkpoints
+        best_checkpoints = glob.glob(os.path.join(args.work_dir, "best_NME_epoch_*.pth"))
+        epoch_checkpoints = glob.glob(os.path.join(args.work_dir, "epoch_*.pth"))
+        latest_checkpoint = os.path.join(args.work_dir, "latest.pth")
+        
+        if best_checkpoints:
+            print(f"  - Best validation: {len(best_checkpoints)} checkpoint(s)")
+        if os.path.exists(latest_checkpoint):
+            print(f"  - Latest: available")
+        if epoch_checkpoints:
+            epochs = sorted([int(f.split('epoch_')[1].split('.')[0]) for f in epoch_checkpoints])
+            print(f"  - Epoch-specific: epochs {epochs[0]}-{epochs[-1]} ({len(epochs)} total)")
+        
         return
     
-    hrnet_checkpoint = max(hrnet_checkpoints, key=os.path.getctime)
     hrnet_checkpoint_name = os.path.basename(hrnet_checkpoint)
-    print(f"✓ Using HRNetV2 checkpoint: {hrnet_checkpoint}")
+    print(f"✓ Using HRNetV2 checkpoint: {hrnet_checkpoint_name}")
     
     # Load checkpoint mapping to find synchronized MLP model
     mlp_dir = os.path.join(args.work_dir, "concurrent_mlp")
@@ -447,7 +515,15 @@ def main():
     print("JOINT MLP EVALUATION RESULTS")
     print("="*80)
     print(f"📊 Evaluated using {model_type} joint MLP model")
-    print(f"📈 HRNetV2 checkpoint: {os.path.basename(hrnet_checkpoint)}")
+    print(f"📈 HRNetV2 checkpoint: {hrnet_checkpoint_name} ({args.checkpoint_type})")
+    print(f"🎯 Total samples evaluated: {len(hrnet_predictions)}")
+    
+    if args.checkpoint_type == 'epoch' and args.epoch:
+        print(f"📅 Specific epoch evaluated: {args.epoch}")
+    elif args.checkpoint_type == 'latest':
+        print(f"🔄 Latest training checkpoint used")
+    elif args.checkpoint_type == 'best':
+        print(f"🏆 Best validation checkpoint used")
     
     print(f"\n🏷️  OVERALL PERFORMANCE:")
     print(f"{'Metric':<15} {'HRNetV2':<15} {'Joint MLP':<15} {'Improvement':<15}")
