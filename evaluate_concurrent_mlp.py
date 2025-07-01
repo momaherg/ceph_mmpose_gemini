@@ -3,6 +3,12 @@
 Concurrent Joint MLP Performance Evaluation Script
 This script evaluates the performance improvement from joint MLP refinement
 trained concurrently with HRNetV2.
+
+The script uses the same random split as the training script (random_state=42):
+- 200 samples for test set (evaluation)
+- 100 samples for validation set
+- Remaining samples for training set
+
 Use --hrnet-only flag to evaluate only HRNet without MLP refinement.
 """
 
@@ -145,12 +151,6 @@ def main():
     
     parser = argparse.ArgumentParser(
         description='Evaluate Concurrent Joint MLP Refinement Performance')
-    parser.add_argument(
-        '--test_split_file',
-        type=str,
-        default=None,
-        help='Path to a text file containing patient IDs for the test set, one ID per line.'
-    )
     parser.add_argument(
         '--work_dir',
         type=str,
@@ -427,25 +427,38 @@ def main():
     data_file_path = "/content/drive/MyDrive/Lala's Masters/train_data_pure_old_numpy.json"
     main_df = pd.read_json(data_file_path)
     
-    # Split test data (same logic as training scripts)
-    if args.test_split_file:
-        print(f"Loading test set from external file: {args.test_split_file}")
-        with open(args.test_split_file, 'r') as f:
-            test_patient_ids = {int(line.strip()) for line in f if line.strip()}
+    # Use same random split logic as training script (random seed 42)
+    print("Using same random split as training: 200 test samples, 100 validation samples, rest for training")
+    
+    # Check if we have enough samples
+    total_samples = len(main_df)
+    required_samples = 300  # 200 test + 100 validation
+    
+    if total_samples < required_samples:
+        print(f"ERROR: Not enough samples for random split.")
+        print(f"Total samples: {total_samples}, Required: {required_samples} (200 test + 100 validation)")
+        return
         
-        main_df['patient_id'] = main_df['patient_id'].astype(int)
-        test_df = main_df[main_df['patient_id'].isin(test_patient_ids)].reset_index(drop=True)
-    else:
-        print("Using 'set' column for test set selection")
-        test_df = main_df[main_df['set'] == 'test'].reset_index(drop=True)
-        if test_df.empty:
-            test_df = main_df[main_df['set'] == 'dev'].reset_index(drop=True)
+    print(f"Total samples available: {total_samples}")
+    
+    # Shuffle the entire dataframe with same random state as training (42)
+    shuffled_df = main_df.sample(frac=1, random_state=42).reset_index(drop=True)
+    
+    # Split randomly: first 200 for test, next 100 for validation, rest for training
+    test_df = shuffled_df.iloc[:200].reset_index(drop=True)
+    val_df = shuffled_df.iloc[200:300].reset_index(drop=True)
+    train_df = shuffled_df.iloc[300:].reset_index(drop=True)
+    
+    print(f"Random split completed (same as training):")
+    print(f"  • Test set: {len(test_df)} samples")
+    print(f"  • Validation set: {len(val_df)} samples") 
+    print(f"  • Training set: {len(train_df)} samples")
     
     if test_df.empty:
         print("ERROR: No test samples found")
         return
     
-    print(f"✓ Evaluating on {len(test_df)} test samples")
+    print(f"✓ Evaluating on {len(test_df)} test samples (matches training split)")
     
     # Get landmark information
     landmark_names = cephalometric_dataset_info.landmark_names_in_order
