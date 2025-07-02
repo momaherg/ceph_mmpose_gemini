@@ -175,6 +175,12 @@ def main():
         action='store_true',
         help='Evaluate only HRNet without MLP refinement'
     )
+    parser.add_argument(
+        '--data-file',
+        type=str,
+        default="/content/drive/MyDrive/Lala's Masters/train_data_pure_old_numpy.json",
+        help='Path to the training data JSON file'
+    )
     args = parser.parse_args()
     
     print("="*80)
@@ -424,7 +430,7 @@ def main():
             return
     
     # Load test data
-    data_file_path = "/content/drive/MyDrive/Lala's Masters/train_data_pure_old_numpy.json"
+    data_file_path = args.data_file
     main_df = pd.read_json(data_file_path)
     
     # Use same random split logic as training script (random seed 42)

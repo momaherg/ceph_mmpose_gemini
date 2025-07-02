@@ -79,6 +79,12 @@ def main():
         action='store_true',
         help='Disable concurrent MLP training and train only HRNet'
     )
+    parser.add_argument(
+        '--data-file',
+        type=str,
+        default="/content/drive/MyDrive/Lala's Masters/train_data_pure_old_numpy.json",
+        help='Path to the training data JSON file'
+    )
     args = parser.parse_args()
     
     print("="*80)
@@ -131,12 +137,77 @@ def main():
     os.makedirs(cfg.work_dir, exist_ok=True)
     
     # Load and prepare data
-    data_file_path = "/content/drive/MyDrive/Lala's Masters/train_data_pure_old_numpy.json"
+    data_file_path = args.data_file
     print(f"Loading main data file from: {data_file_path}")
     
+    # Check if file exists first
+    if not os.path.exists(data_file_path):
+        print(f"ERROR: Data file not found at: {data_file_path}")
+        
+        # Look for alternative data files
+        possible_paths = [
+            "/content/drive/MyDrive/Lala's Masters/train_data_pure_old_numpy.json",
+            "train_data_pure_old_numpy.json",
+            "data/train_data_pure_old_numpy.json",
+            "/content/drive/MyDrive/train_data_pure_old_numpy.json"
+        ]
+        
+        print("Checking for alternative data file locations:")
+        for path in possible_paths:
+            if os.path.exists(path):
+                print(f"✓ Found data file at: {path}")
+                data_file_path = path
+                break
+            else:
+                print(f"✗ Not found: {path}")
+        else:
+            print("\nERROR: No data file found in any expected location.")
+            print("Please ensure the data file exists and update the path accordingly.")
+            return
+    
     try:
-        main_df = pd.read_json(data_file_path)
+        # Check file size first
+        file_size = os.path.getsize(data_file_path)
+        print(f"Data file size: {file_size:,} bytes")
+        
+        if file_size == 0:
+            print("ERROR: Data file is empty")
+            return
+            
+        # Try different JSON reading methods
+        try:
+            main_df = pd.read_json(data_file_path)
+        except ValueError as e:
+            print(f"Failed with pd.read_json: {e}")
+            print("Trying alternative JSON loading method...")
+            
+            try:
+                import json
+                with open(data_file_path, 'r') as f:
+                    data = json.load(f)
+                main_df = pd.DataFrame(data)
+                print("✓ Successfully loaded with json.load()")
+            except Exception as e2:
+                print(f"Failed with json.load: {e2}")
+                print("Trying to read first few lines to diagnose the issue...")
+                
+                try:
+                    with open(data_file_path, 'r') as f:
+                        first_lines = [f.readline() for _ in range(5)]
+                    print("First 5 lines of the file:")
+                    for i, line in enumerate(first_lines, 1):
+                        print(f"  {i}: {line.strip()[:100]}...")
+                except Exception as e3:
+                    print(f"Could not read file: {e3}")
+                
+                print("\nPlease check if the JSON file is properly formatted.")
+                return
+        
         print(f"Main DataFrame loaded. Shape: {main_df.shape}")
+        
+        # Check DataFrame structure
+        print(f"DataFrame columns: {list(main_df.columns)[:10]}...")  # Show first 10 columns
+        print(f"DataFrame dtypes: {main_df.dtypes.head()}")
 
         # Random data splitting logic: 200 test, 100 validation, rest training
         print("Splitting data randomly: 200 test samples, 100 validation samples, rest for training")
