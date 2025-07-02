@@ -2,7 +2,7 @@ _base_ = ['./td-hm_hrnetv2-w18_8xb64-60e_aflw-256x256.py'] # Inherit from origin
 
 # Fine-tuning specific
 load_from = 'Pretrained_model/hrnetv2_w18_aflw_256x256-f2bbc62b_20210125.pth'
-train_cfg = dict(by_epoch=True, max_epochs=222, val_interval=2) # Extended training: 100 -> 222 epochs
+train_cfg = dict(by_epoch=True, max_epochs=77, val_interval=2) # Extended training: 100 -> 77 epochs
 
 # Improved optimizer settings with cosine annealing
 optim_wrapper = dict(
@@ -14,11 +14,11 @@ optim_wrapper = dict(
 # Learning rate scheduler with warm-up and step decay
 param_scheduler = [
     dict(type='LinearLR', begin=0, end=500, start_factor=1e-3, by_epoch=False),  # Warm-up
-    # dict(type='CosineAnnealingLR', T_max=222, eta_min=1e-6, by_epoch=True)  # Cosine annealing - updated T_max to match max_epochs
+    # dict(type='CosineAnnealingLR', T_max=77, eta_min=1e-6, by_epoch=True)  # Cosine annealing - updated T_max to match max_epochs
     dict(
         type='MultiStepLR',
         begin=0,
-        end=222,
+        end=77,
         by_epoch=True,
         milestones=[155, 200],  # Decay LR at epoch 155 and 200 (scaled from [70, 90] for 100 epochs)
         gamma=0.1)
