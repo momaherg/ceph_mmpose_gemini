@@ -379,17 +379,17 @@ def print_results_table(results: Dict[str, Dict], landmark_names: List[str]):
     # Improvement analysis (compare with first individual model)
     if len(results) > 2:  # At least 2 individual models + ensemble
         individual_models = [k for k in results.keys() if k.startswith('Model')]
-        if individual_models and 'Ensemble MLP' in results:
-            baseline_model = individual_models[0] + ' MLP'
+        if individual_models and 'Ensemble MLP (Test)' in results:
+            baseline_model = individual_models[0] + ' (Test)'
             if baseline_model in results:
                 baseline_mre = results[baseline_model]['overall']['mre']
-                ensemble_mre = results['Ensemble MLP']['overall']['mre']
+                ensemble_mre = results['Ensemble MLP (Test)']['overall']['mre']
                 
                 improvement = (baseline_mre - ensemble_mre) / baseline_mre * 100
                 
                 print(f"\n📈 ENSEMBLE IMPROVEMENT:")
                 print(f"   Baseline ({baseline_model}): {baseline_mre:.3f} pixels")
-                print(f"   Ensemble MLP: {ensemble_mre:.3f} pixels")
+                print(f"   Ensemble MLP (Test): {ensemble_mre:.3f} pixels")
                 print(f"   Improvement: {improvement:+.1f}%")
 
 def main():
@@ -419,6 +419,11 @@ def main():
         '--evaluate_individual',
         action='store_true',
         help='Evaluate individual models separately'
+    )
+    parser.add_argument(
+        '--evaluate_on_validation',
+        action='store_true',
+        help='Also evaluate each model on its own validation set'
     )
     args = parser.parse_args()
     
@@ -493,6 +498,7 @@ def main():
     all_mlp_preds = []
     all_gt = None
     results = {}
+    validation_results = {}
     
     for i, model_dir in enumerate(model_dirs, 1):
         components = load_model_components(model_dir, device, config_path)
@@ -504,7 +510,7 @@ def main():
         hrnet_model, mlp_joint, scaler_input, scaler_target, model_type, checkpoint_name = components
         all_model_components.append((hrnet_model, mlp_joint, scaler_input, scaler_target, model_type, checkpoint_name))
         
-        # Evaluate this model
+        # Evaluate this model on test set
         hrnet_preds, mlp_preds, gt_coords = evaluate_single_model(
             hrnet_model, mlp_joint, scaler_input, scaler_target,
             test_df, landmark_names, landmark_cols, device
@@ -514,7 +520,7 @@ def main():
             print(f"   ❌ No valid predictions from model {i}")
             continue
         
-        print(f"   ✓ Model {i} evaluated: {len(hrnet_preds)} samples")
+        print(f"   ✓ Model {i} evaluated on test set: {len(hrnet_preds)} samples")
         
         all_hrnet_preds.append(hrnet_preds)
         all_mlp_preds.append(mlp_preds)
@@ -527,8 +533,43 @@ def main():
             hrnet_overall, hrnet_per_landmark = compute_metrics(hrnet_preds, gt_coords, landmark_names)
             mlp_overall, mlp_per_landmark = compute_metrics(mlp_preds, gt_coords, landmark_names)
             
-            results[f'Model {i} HRNet'] = {'overall': hrnet_overall, 'per_landmark': hrnet_per_landmark}
-            results[f'Model {i} MLP'] = {'overall': mlp_overall, 'per_landmark': mlp_per_landmark}
+            results[f'Model {i} HRNet (Test)'] = {'overall': hrnet_overall, 'per_landmark': hrnet_per_landmark}
+            results[f'Model {i} MLP (Test)'] = {'overall': mlp_overall, 'per_landmark': mlp_per_landmark}
+        
+        # Evaluate on validation set if requested
+        if args.evaluate_on_validation:
+            print(f"   🔄 Evaluating Model {i} on its validation set...")
+            
+            # Load validation data for this model
+            val_ann_file = os.path.join(model_dir, f'temp_val_ann_split_{i}.json')
+            
+            if os.path.exists(val_ann_file):
+                try:
+                    val_df = pd.read_json(val_ann_file)
+                    print(f"      ✓ Loaded validation set: {len(val_df)} samples")
+                    
+                    # Evaluate on validation set
+                    val_hrnet_preds, val_mlp_preds, val_gt_coords = evaluate_single_model(
+                        hrnet_model, mlp_joint, scaler_input, scaler_target,
+                        val_df, landmark_names, landmark_cols, device
+                    )
+                    
+                    if val_hrnet_preds is not None:
+                        print(f"      ✓ Model {i} validation evaluation: {len(val_hrnet_preds)} samples")
+                        
+                        # Compute validation metrics
+                        val_hrnet_overall, val_hrnet_per_landmark = compute_metrics(val_hrnet_preds, val_gt_coords, landmark_names)
+                        val_mlp_overall, val_mlp_per_landmark = compute_metrics(val_mlp_preds, val_gt_coords, landmark_names)
+                        
+                        validation_results[f'Model {i} HRNet (Val)'] = {'overall': val_hrnet_overall, 'per_landmark': val_hrnet_per_landmark}
+                        validation_results[f'Model {i} MLP (Val)'] = {'overall': val_mlp_overall, 'per_landmark': val_mlp_per_landmark}
+                    else:
+                        print(f"      ❌ No valid validation predictions from model {i}")
+                        
+                except Exception as e:
+                    print(f"      ❌ Failed to load validation data for model {i}: {e}")
+            else:
+                print(f"      ⚠️  Validation file not found: {val_ann_file}")
     
     if not all_hrnet_preds:
         print("ERROR: No models successfully evaluated")
@@ -542,17 +583,24 @@ def main():
     ensemble_hrnet_overall, ensemble_hrnet_per_landmark = compute_metrics(ensemble_hrnet, all_gt, landmark_names)
     ensemble_mlp_overall, ensemble_mlp_per_landmark = compute_metrics(ensemble_mlp, all_gt, landmark_names)
     
-    results['Ensemble HRNet'] = {'overall': ensemble_hrnet_overall, 'per_landmark': ensemble_hrnet_per_landmark}
-    results['Ensemble MLP'] = {'overall': ensemble_mlp_overall, 'per_landmark': ensemble_mlp_per_landmark}
+    results['Ensemble HRNet (Test)'] = {'overall': ensemble_hrnet_overall, 'per_landmark': ensemble_hrnet_per_landmark}
+    results['Ensemble MLP (Test)'] = {'overall': ensemble_mlp_overall, 'per_landmark': ensemble_mlp_per_landmark}
     
     # Print results
     print_results_table(results, landmark_names)
+    
+    # Print validation results if available
+    if validation_results:
+        print(f"\n{'='*100}")
+        print(f"📊 VALIDATION SET RESULTS")
+        print(f"{'='*100}")
+        print_results_table(validation_results, landmark_names)
     
     # Save results
     output_dir = os.path.join(args.base_work_dir, "ensemble_evaluation")
     os.makedirs(output_dir, exist_ok=True)
     
-    # Save detailed comparison
+    # Save detailed comparison (test results)
     comparison_data = []
     for result_name, metrics in results.items():
         comparison_data.append({
@@ -566,9 +614,26 @@ def main():
         })
     
     comparison_df = pd.DataFrame(comparison_data)
-    comparison_df.to_csv(os.path.join(output_dir, "ensemble_comparison.csv"), index=False)
+    comparison_df.to_csv(os.path.join(output_dir, "ensemble_comparison_test.csv"), index=False)
     
-    # Save per-landmark results for key landmarks
+    # Save validation comparison if available
+    if validation_results:
+        val_comparison_data = []
+        for result_name, metrics in validation_results.items():
+            val_comparison_data.append({
+                'model': result_name,
+                'mre': metrics['overall']['mre'],
+                'std': metrics['overall']['std'],
+                'median': metrics['overall']['median'],
+                'p90': metrics['overall']['p90'],
+                'p95': metrics['overall']['p95'],
+                'samples': metrics['overall']['count']
+            })
+        
+        val_comparison_df = pd.DataFrame(val_comparison_data)
+        val_comparison_df.to_csv(os.path.join(output_dir, "ensemble_comparison_validation.csv"), index=False)
+    
+    # Save per-landmark results for key landmarks (test)
     key_landmarks = ['sella', 'Gonion', 'PNS', 'A_point', 'B_point', 'ANS', 'nasion']
     landmark_data = []
     
@@ -587,11 +652,35 @@ def main():
                     })
     
     landmark_df = pd.DataFrame(landmark_data)
-    landmark_df.to_csv(os.path.join(output_dir, "key_landmarks_comparison.csv"), index=False)
+    landmark_df.to_csv(os.path.join(output_dir, "key_landmarks_comparison_test.csv"), index=False)
+    
+    # Save validation landmark results if available
+    if validation_results:
+        val_landmark_data = []
+        
+        for landmark in key_landmarks:
+            if landmark in landmark_names:
+                for result_name, metrics in validation_results.items():
+                    if landmark in metrics['per_landmark']:
+                        lm_metrics = metrics['per_landmark'][landmark]
+                        val_landmark_data.append({
+                            'model': result_name,
+                            'landmark': landmark,
+                            'mre': lm_metrics['mre'],
+                            'std': lm_metrics['std'],
+                            'median': lm_metrics['median'],
+                            'count': lm_metrics['count']
+                        })
+        
+        val_landmark_df = pd.DataFrame(val_landmark_data)
+        val_landmark_df.to_csv(os.path.join(output_dir, "key_landmarks_comparison_validation.csv"), index=False)
     
     print(f"\n💾 Results saved to: {output_dir}")
-    print(f"   - Overall comparison: ensemble_comparison.csv")
-    print(f"   - Key landmarks: key_landmarks_comparison.csv")
+    print(f"   - Test set comparison: ensemble_comparison_test.csv")
+    print(f"   - Test set landmarks: key_landmarks_comparison_test.csv")
+    if validation_results:
+        print(f"   - Validation comparison: ensemble_comparison_validation.csv")
+        print(f"   - Validation landmarks: key_landmarks_comparison_validation.csv")
     
     # Quick summary
     ensemble_mre = ensemble_mlp_overall['mre']
