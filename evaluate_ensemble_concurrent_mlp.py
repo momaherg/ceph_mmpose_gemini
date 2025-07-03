@@ -688,20 +688,31 @@ def main():
     print(f"📊 {len(all_hrnet_preds)} models successfully evaluated")
     print(f"🎯 Ensemble MLP MRE: {ensemble_mre:.3f} pixels")
     
-    if len(all_hrnet_preds) > 1:
-        individual_mres = [results[f'Model {i+1} MLP']['overall']['mre'] for i in range(len(all_hrnet_preds))]
+    if len(all_hrnet_preds) > 1 and args.evaluate_individual:
+        individual_mres = [results[f'Model {i+1} MLP (Test)']['overall']['mre'] for i in range(len(all_hrnet_preds))]
         avg_individual_mre = np.mean(individual_mres)
         ensemble_improvement = (avg_individual_mre - ensemble_mre) / avg_individual_mre * 100
         print(f"📈 Improvement over average individual: {ensemble_improvement:+.1f}%")
     
     # Sella-specific summary
     if 'sella' in landmark_names:
-        sella_results = [(name, metrics['per_landmark'].get('sella', {}).get('mre', 0)) 
-                        for name, metrics in results.items() if 'MLP' in name]
+        # Test set sella performance
+        test_sella_results = [(name, metrics['per_landmark'].get('sella', {}).get('mre', 0)) 
+                             for name, metrics in results.items() if 'MLP' in name]
         
-        print(f"\n🎯 SELLA LANDMARK PERFORMANCE:")
-        for model_name, sella_mre in sella_results:
+        print(f"\n🎯 SELLA LANDMARK PERFORMANCE (TEST SET):")
+        for model_name, sella_mre in test_sella_results:
             print(f"   {model_name}: {sella_mre:.3f} pixels")
+        
+        # Validation set sella performance if available
+        if validation_results:
+            val_sella_results = [(name, metrics['per_landmark'].get('sella', {}).get('mre', 0)) 
+                                for name, metrics in validation_results.items() if 'MLP' in name]
+            
+            if val_sella_results:
+                print(f"\n🎯 SELLA LANDMARK PERFORMANCE (VALIDATION SET):")
+                for model_name, sella_mre in val_sella_results:
+                    print(f"   {model_name}: {sella_mre:.3f} pixels")
 
 if __name__ == "__main__":
     main() 
