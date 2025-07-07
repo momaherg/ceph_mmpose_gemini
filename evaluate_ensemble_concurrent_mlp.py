@@ -2,6 +2,9 @@
 """
 Ensemble Concurrent Joint MLP Performance Evaluation Script
 This script evaluates individual models and ensemble performance during training.
+
+IMPORTANT: Uses TRUE batch inference (same as training hook) for consistency.
+This ensures evaluation results match the inference method used during training.
 """
 
 import os
@@ -254,14 +257,83 @@ def load_model_components(model_dir: str, device: torch.device, config_path: str
     
     return hrnet_model, mlp_joint, scaler_input, scaler_target, model_type, hrnet_checkpoint_name
 
+def batch_hrnet_inference(images_batch, model, device):
+    """Run TRUE batch inference using the same method as training hook."""
+    try:
+        if len(images_batch) == 0:
+            return []
+        
+        # Convert to tensor batch [batch_size, C, H, W]
+        images_array = np.stack(images_batch)  # [N, H, W, C]
+        images_tensor = torch.from_numpy(images_array).permute(0, 3, 1, 2).float()  # [N, C, H, W]
+        images_tensor = images_tensor.to(device)
+        
+        # Normalize images (ImageNet normalization)
+        mean = torch.tensor([123.675, 116.28, 103.53]).view(1, 3, 1, 1).to(device)
+        std = torch.tensor([58.395, 57.12, 57.375]).view(1, 3, 1, 1).to(device)
+        images_tensor = (images_tensor - mean) / std
+        
+        # Run TRUE batch inference using model directly
+        with torch.no_grad():
+            # Get features from backbone
+            if hasattr(model, 'extract_feat'):
+                features = model.extract_feat(images_tensor)
+            else:
+                features = model.backbone(images_tensor)
+            
+            # Get predictions from head
+            if hasattr(model, 'head'):
+                head_outputs = model.head(features)
+                
+                # Extract heatmaps and convert to coordinates
+                if isinstance(head_outputs, (list, tuple)):
+                    heatmaps = head_outputs[0]
+                else:
+                    heatmaps = head_outputs
+                
+                # Decode heatmaps to coordinates
+                batch_size, num_keypoints, heatmap_h, heatmap_w = heatmaps.shape
+                
+                # Find max locations in heatmaps
+                heatmaps_reshaped = heatmaps.view(batch_size, num_keypoints, -1)
+                max_vals, max_indices = torch.max(heatmaps_reshaped, dim=2)
+                
+                # Convert indices to coordinates
+                max_indices_y = max_indices // heatmap_w
+                max_indices_x = max_indices % heatmap_w
+                
+                # Scale to original image size
+                scale_x = 224.0 / heatmap_w
+                scale_y = 224.0 / heatmap_h
+                
+                pred_coords = torch.stack([
+                    max_indices_x.float() * scale_x,
+                    max_indices_y.float() * scale_y
+                ], dim=-1)  # [batch_size, num_keypoints, 2]
+                
+                return pred_coords.cpu().numpy()
+            else:
+                return None
+                
+    except Exception as e:
+        print(f"Batch HRNet inference failed: {e}")
+        return None
+
 def evaluate_single_model(hrnet_model, mlp_joint, scaler_input, scaler_target, 
                          test_df, landmark_names, landmark_cols, device) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Evaluate a single model and return predictions."""
+    """Evaluate a single model using TRUE batch inference (consistent with training)."""
     hrnet_predictions = []
     mlp_predictions = []
     ground_truths = []
     
-    print(f"   🔄 Running inference on {len(test_df)} samples...")
+    print(f"   🔄 Running TRUE batch inference on {len(test_df)} samples...")
+    
+    # Batch processing parameters
+    EVAL_BATCH_SIZE = 64
+    
+    # Prepare all data first
+    all_images = []
+    all_gt_keypoints = []
     
     for idx, row in test_df.iterrows():
         try:
@@ -279,35 +351,72 @@ def evaluate_single_model(hrnet_model, mlp_joint, scaler_input, scaler_target,
                     gt_keypoints.append([0, 0])
                     valid_gt = False
             
-            if not valid_gt:
-                continue
+            if valid_gt:
+                all_images.append(img_array)
+                all_gt_keypoints.append(np.array(gt_keypoints))
                 
-            gt_keypoints = np.array(gt_keypoints)
+        except Exception as e:
+            continue
+    
+    if not all_images:
+        return None, None, None
+    
+    # Process in batches using TRUE batch inference
+    from tqdm import tqdm
+    
+    for batch_start in tqdm(range(0, len(all_images), EVAL_BATCH_SIZE), desc="   Batch Inference"):
+        batch_end = min(batch_start + EVAL_BATCH_SIZE, len(all_images))
+        
+        # Get batch data
+        batch_images = all_images[batch_start:batch_end]
+        batch_gt = all_gt_keypoints[batch_start:batch_end]
+        
+        try:
+            # Run TRUE batch HRNet inference (same method as training hook)
+            batch_hrnet_preds = batch_hrnet_inference(batch_images, hrnet_model, device)
             
-            # Run HRNetV2 inference
-            bbox = np.array([[0, 0, 224, 224]], dtype=np.float32)
-            results = inference_topdown(hrnet_model, img_array, bboxes=bbox, bbox_format='xyxy')
-            
-            if results and len(results) > 0:
-                pred_keypoints = results[0].pred_instances.keypoints[0]
-                if isinstance(pred_keypoints, torch.Tensor):
-                    pred_keypoints = pred_keypoints.cpu().numpy()
-            else:
+            if batch_hrnet_preds is None:
+                # Fallback to individual inference if batch fails
+                for img, gt_kpts in zip(batch_images, batch_gt):
+                    try:
+                        bbox = np.array([[0, 0, 224, 224]], dtype=np.float32)
+                        results = inference_topdown(hrnet_model, img, bboxes=bbox, bbox_format='xyxy')
+                        
+                        if results and len(results) > 0:
+                            pred_kpts = results[0].pred_instances.keypoints[0]
+                            if isinstance(pred_kpts, torch.Tensor):
+                                pred_kpts = pred_kpts.cpu().numpy()
+                                
+                            if pred_kpts is not None and pred_kpts.shape[0] == 19:
+                                # Apply MLP refinement
+                                refined_kpts = apply_joint_mlp_refinement(
+                                    pred_kpts, mlp_joint, scaler_input, scaler_target, device
+                                )
+                                
+                                hrnet_predictions.append(pred_kpts)
+                                mlp_predictions.append(refined_kpts)
+                                ground_truths.append(gt_kpts)
+                    except:
+                        continue
                 continue
-
-            if pred_keypoints is None or pred_keypoints.shape[0] != 19:
-                continue
             
-            # Apply joint MLP refinement
-            refined_keypoints = apply_joint_mlp_refinement(
-                pred_keypoints, mlp_joint, scaler_input, scaler_target, device
-            )
-            
-            # Store results
-            hrnet_predictions.append(pred_keypoints)
-            mlp_predictions.append(refined_keypoints)
-            ground_truths.append(gt_keypoints)
-            
+            # Process batch predictions
+            for i, (pred_kpts, gt_kpts) in enumerate(zip(batch_hrnet_preds, batch_gt)):
+                if pred_kpts.shape[0] == 19:  # Ensure correct number of landmarks
+                    try:
+                        # Apply joint MLP refinement
+                        refined_kpts = apply_joint_mlp_refinement(
+                            pred_kpts, mlp_joint, scaler_input, scaler_target, device
+                        )
+                        
+                        # Store results
+                        hrnet_predictions.append(pred_kpts)
+                        mlp_predictions.append(refined_kpts)
+                        ground_truths.append(gt_kpts)
+                        
+                    except Exception as e:
+                        continue
+        
         except Exception as e:
             continue
     
@@ -458,6 +567,7 @@ def main():
     
     print("="*80)
     print("ENSEMBLE CONCURRENT JOINT MLP EVALUATION")
+    print("✅ Using TRUE batch inference (consistent with training hook)")
     print("="*80)
     
     # Initialize MMPose scope
