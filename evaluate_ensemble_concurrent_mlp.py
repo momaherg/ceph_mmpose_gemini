@@ -39,15 +39,15 @@ def safe_torch_load(*args, **kwargs):
 torch.load = safe_torch_load
 
 class JointMLPRefinementModel(nn.Module):
-    """Joint MLP model for landmark coordinate refinement - same as in hook."""
+    """Joint MLP model for landmark coordinate refinement with adaptive selection."""
     def __init__(self, input_dim=38, hidden_dim=500, output_dim=38):
         super(JointMLPRefinementModel, self).__init__()
         self.input_dim = input_dim
         self.hidden_dim = hidden_dim
         self.output_dim = output_dim
         
-        # Main network with residual connection
-        self.net = nn.Sequential(
+        # Main refinement network
+        self.refinement_net = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
             nn.ReLU(inplace=True),
             nn.Dropout(0.1),
@@ -57,22 +57,51 @@ class JointMLPRefinementModel(nn.Module):
             nn.Linear(hidden_dim, output_dim)
         )
         
+        # Selection/gating network - learns when to trust HRNet vs MLP
+        # Outputs per-coordinate selection weights (38 weights for 38 coordinates)
+        self.selection_net = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim // 2),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.1),
+            nn.Linear(hidden_dim // 2, output_dim),
+            nn.Sigmoid()  # Output between 0 and 1 for each coordinate
+        )
+        
         # Residual projection (if dimensions don't match)
         self.residual_proj = None
         if input_dim != output_dim:
             self.residual_proj = nn.Linear(input_dim, output_dim)
 
     def forward(self, x):
-        # Main forward pass
-        out = self.net(x)
+        """
+        Args:
+            x: HRNet predictions [batch_size, 38]
+            
+        Returns:
+            Adaptively selected coordinates [batch_size, 38]
+        """
+        # Get MLP refinement predictions
+        mlp_refinement = self.refinement_net(x)
         
-        # Add residual connection
+        # Add residual connection to MLP predictions
         if self.residual_proj is not None:
             residual = self.residual_proj(x)
         else:
             residual = x
-            
-        return out + 0.1 * residual  # Small residual weight to start
+        
+        mlp_predictions = mlp_refinement + 0.1 * residual
+        
+        # Get selection weights (0 = use HRNet, 1 = use MLP)
+        selection_weights = self.selection_net(x)
+        
+        # Adaptive combination: weighted average of HRNet and MLP predictions
+        # output = (1 - weight) * hrnet + weight * mlp
+        adaptive_output = (1 - selection_weights) * x + selection_weights * mlp_predictions
+        
+        # Store selection weights for analysis (optional)
+        self.last_selection_weights = selection_weights
+        
+        return adaptive_output
 
 def apply_joint_mlp_refinement(predictions, mlp_joint, scaler_input, scaler_target, device):
     """Apply joint MLP refinement to predictions."""

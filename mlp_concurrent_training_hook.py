@@ -77,14 +77,15 @@ from torch.utils.data import WeightedRandomSampler
 # -----------------------------------------------------------------------------
 
 class JointMLPRefinementModel(nn.Module):
-    """Joint MLP model for landmark coordinate refinement.
+    """Joint MLP model for landmark coordinate refinement with adaptive selection.
     
     Input: 38 predicted coordinates (19 landmarks × 2 coordinates)
     Hidden: 500 neurons with residual connection
-    Output: 38 refined coordinates
+    Output: 38 refined coordinates with adaptive gating
     
-    This allows the network to learn cross-correlations between X and Y axes
-    and between different landmarks.
+    This model learns:
+    1. MLP refinements for coordinates
+    2. Per-coordinate selection weights to choose between HRNet and MLP predictions
     """
 
     def __init__(self, input_dim: int = 38, hidden_dim: int = 500, output_dim: int = 38):
@@ -93,8 +94,8 @@ class JointMLPRefinementModel(nn.Module):
         self.hidden_dim = hidden_dim
         self.output_dim = output_dim
         
-        # Main network with residual connection
-        self.net = nn.Sequential(
+        # Main refinement network
+        self.refinement_net = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
             nn.ReLU(inplace=True),
             nn.Dropout(0.1),
@@ -104,22 +105,51 @@ class JointMLPRefinementModel(nn.Module):
             nn.Linear(hidden_dim, output_dim)
         )
         
+        # Selection/gating network - learns when to trust HRNet vs MLP
+        # Outputs per-coordinate selection weights (38 weights for 38 coordinates)
+        self.selection_net = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim // 2),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.1),
+            nn.Linear(hidden_dim // 2, output_dim),
+            nn.Sigmoid()  # Output between 0 and 1 for each coordinate
+        )
+        
         # Residual projection (if dimensions don't match)
         self.residual_proj = None
         if input_dim != output_dim:
             self.residual_proj = nn.Linear(input_dim, output_dim)
 
     def forward(self, x):
-        # Main forward pass
-        out = self.net(x)
+        """
+        Args:
+            x: HRNet predictions [batch_size, 38]
+            
+        Returns:
+            Adaptively selected coordinates [batch_size, 38]
+        """
+        # Get MLP refinement predictions
+        mlp_refinement = self.refinement_net(x)
         
-        # Add residual connection
+        # Add residual connection to MLP predictions
         if self.residual_proj is not None:
             residual = self.residual_proj(x)
         else:
             residual = x
-            
-        return out + 0.1 * residual  # Small residual weight to start
+        
+        mlp_predictions = mlp_refinement + 0.1 * residual
+        
+        # Get selection weights (0 = use HRNet, 1 = use MLP)
+        selection_weights = self.selection_net(x)
+        
+        # Adaptive combination: weighted average of HRNet and MLP predictions
+        # output = (1 - weight) * hrnet + weight * mlp
+        adaptive_output = (1 - selection_weights) * x + selection_weights * mlp_predictions
+        
+        # Store selection weights for analysis (optional)
+        self.last_selection_weights = selection_weights
+        
+        return adaptive_output
 
 
 class _MLPDataset(data.Dataset):
@@ -207,7 +237,7 @@ class ConcurrentMLPTrainingHook(Hook):
 
     def before_run(self, runner: Runner):
         logger: MMLogger = runner.logger
-        logger.info('[ConcurrentMLPTrainingHook] Initialising joint 38-D MLP model …')
+        logger.info('[ConcurrentMLPTrainingHook] Initialising joint 38-D MLP model with adaptive selection…')
 
         self.mlp_joint = JointMLPRefinementModel().to(self.device)
         self.opt_joint = optim.Adam(self.mlp_joint.parameters(), lr=self.mlp_lr, weight_decay=self.mlp_weight_decay)
@@ -217,6 +247,9 @@ class ConcurrentMLPTrainingHook(Hook):
         self.scaler_target = StandardScaler()
         
         logger.info(f'[ConcurrentMLPTrainingHook] Joint MLP initialized with {sum(p.numel() for p in self.mlp_joint.parameters()):,} parameters')
+        logger.info(f'[ConcurrentMLPTrainingHook] Architecture includes:')
+        logger.info(f'[ConcurrentMLPTrainingHook]   - Refinement network: Predicts MLP-refined coordinates')
+        logger.info(f'[ConcurrentMLPTrainingHook]   - Selection network: Learns to choose between HRNet and MLP per coordinate')
         logger.info(f'[ConcurrentMLPTrainingHook] Hard-example threshold: {self.hard_example_threshold} pixels')
         logger.info(f'[ConcurrentMLPTrainingHook] HRNet hard-example weight: {self.hrnet_hard_example_weight}x')
 
@@ -609,6 +642,9 @@ class ConcurrentMLPTrainingHook(Hook):
             total_loss = 0.0
             for ep in range(self.mlp_epochs):
                 epoch_loss = 0.0
+                selection_weights_sum = torch.zeros(38).to(self.device)
+                selection_weights_count = 0
+                
                 for preds_batch, gts_batch in loader:
                     preds_batch = preds_batch.to(self.device, non_blocking=True)
                     gts_batch = gts_batch.to(self.device, non_blocking=True)
@@ -620,11 +656,34 @@ class ConcurrentMLPTrainingHook(Hook):
                     optimiser.step()
 
                     epoch_loss += loss.item()
+                    
+                    # Track selection weights
+                    if hasattr(model, 'last_selection_weights'):
+                        selection_weights_sum += model.last_selection_weights.detach().sum(dim=0)
+                        selection_weights_count += model.last_selection_weights.shape[0]
                 
                 total_loss = epoch_loss / len(loader)
+                
+                # Calculate average selection weights
+                if selection_weights_count > 0:
+                    avg_selection_weights = selection_weights_sum / selection_weights_count
+                    avg_weight_use_mlp = avg_selection_weights.mean().item()
+                    
                 if (ep + 1) % 20 == 0:
                     improvement = ((initial_loss - total_loss) / initial_loss * 100) if initial_loss > 0 else 0
-                    logger.info(f'[ConcurrentMLPTrainingHook] Joint-MLP epoch {ep+1}/{self.mlp_epochs} | MLP loss: {total_loss:.6f}, Initial loss: {initial_loss:.6f} ({improvement:+.1f}%)')
+                    if selection_weights_count > 0:
+                        logger.info(f'[ConcurrentMLPTrainingHook] Joint-MLP epoch {ep+1}/{self.mlp_epochs} | MLP loss: {total_loss:.6f}, Initial loss: {initial_loss:.6f} ({improvement:+.1f}%) | Avg MLP usage: {avg_weight_use_mlp:.3f}')
+                        
+                        # Log per-coordinate selection preference every 40 epochs
+                        if (ep + 1) % 40 == 0:
+                            # Convert to per-landmark statistics (19 landmarks × 2 coords)
+                            landmark_weights = avg_selection_weights.view(19, 2).mean(dim=1)
+                            max_mlp_landmarks = torch.topk(landmark_weights, k=5).indices
+                            min_mlp_landmarks = torch.topk(landmark_weights, k=5, largest=False).indices
+                            logger.info(f'[ConcurrentMLPTrainingHook] Top 5 landmarks preferring MLP: {max_mlp_landmarks.tolist()} (weights: {landmark_weights[max_mlp_landmarks].tolist()})')
+                            logger.info(f'[ConcurrentMLPTrainingHook] Top 5 landmarks preferring HRNet: {min_mlp_landmarks.tolist()} (weights: {landmark_weights[min_mlp_landmarks].tolist()})')
+                    else:
+                        logger.info(f'[ConcurrentMLPTrainingHook] Joint-MLP epoch {ep+1}/{self.mlp_epochs} | MLP loss: {total_loss:.6f}, Initial loss: {initial_loss:.6f} ({improvement:+.1f}%)')
 
         _train_joint(self.mlp_joint, self.opt_joint, dl_joint, initial_loss)
 

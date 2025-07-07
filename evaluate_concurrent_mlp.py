@@ -39,15 +39,15 @@ def safe_torch_load(*args, **kwargs):
 torch.load = safe_torch_load
 
 class JointMLPRefinementModel(nn.Module):
-    """Joint MLP model for landmark coordinate refinement - same as in hook."""
+    """Joint MLP model for landmark coordinate refinement with adaptive selection."""
     def __init__(self, input_dim=38, hidden_dim=500, output_dim=38):
         super(JointMLPRefinementModel, self).__init__()
         self.input_dim = input_dim
         self.hidden_dim = hidden_dim
         self.output_dim = output_dim
         
-        # Main network with residual connection
-        self.net = nn.Sequential(
+        # Main refinement network
+        self.refinement_net = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
             nn.ReLU(inplace=True),
             nn.Dropout(0.1),
@@ -57,25 +57,54 @@ class JointMLPRefinementModel(nn.Module):
             nn.Linear(hidden_dim, output_dim)
         )
         
+        # Selection/gating network - learns when to trust HRNet vs MLP
+        # Outputs per-coordinate selection weights (38 weights for 38 coordinates)
+        self.selection_net = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim // 2),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.1),
+            nn.Linear(hidden_dim // 2, output_dim),
+            nn.Sigmoid()  # Output between 0 and 1 for each coordinate
+        )
+        
         # Residual projection (if dimensions don't match)
         self.residual_proj = None
         if input_dim != output_dim:
             self.residual_proj = nn.Linear(input_dim, output_dim)
 
     def forward(self, x):
-        # Main forward pass
-        out = self.net(x)
+        """
+        Args:
+            x: HRNet predictions [batch_size, 38]
+            
+        Returns:
+            Adaptively selected coordinates [batch_size, 38]
+        """
+        # Get MLP refinement predictions
+        mlp_refinement = self.refinement_net(x)
         
-        # Add residual connection
+        # Add residual connection to MLP predictions
         if self.residual_proj is not None:
             residual = self.residual_proj(x)
         else:
             residual = x
-            
-        return out + 0.1 * residual  # Small residual weight to start
+        
+        mlp_predictions = mlp_refinement + 0.1 * residual
+        
+        # Get selection weights (0 = use HRNet, 1 = use MLP)
+        selection_weights = self.selection_net(x)
+        
+        # Adaptive combination: weighted average of HRNet and MLP predictions
+        # output = (1 - weight) * hrnet + weight * mlp
+        adaptive_output = (1 - selection_weights) * x + selection_weights * mlp_predictions
+        
+        # Store selection weights for analysis (optional)
+        self.last_selection_weights = selection_weights
+        
+        return adaptive_output
 
 def apply_joint_mlp_refinement(predictions, mlp_joint, scaler_input, scaler_target, device):
-    """Apply joint MLP refinement to predictions."""
+    """Apply joint MLP refinement to predictions and return selection weights."""
     try:
         # Flatten predictions to 38-D vector [x1, y1, x2, y2, ..., x19, y19]
         pred_flat = predictions.flatten().reshape(1, -1)
@@ -89,6 +118,10 @@ def apply_joint_mlp_refinement(predictions, mlp_joint, scaler_input, scaler_targ
         # Apply joint MLP refinement
         with torch.no_grad():
             refined_scaled = mlp_joint(pred_tensor).cpu().numpy()
+            # Get selection weights if available
+            selection_weights = None
+            if hasattr(mlp_joint, 'last_selection_weights'):
+                selection_weights = mlp_joint.last_selection_weights.cpu().numpy().flatten()
         
         # Denormalize outputs
         refined_flat = scaler_target.inverse_transform(refined_scaled).flatten()
@@ -96,11 +129,11 @@ def apply_joint_mlp_refinement(predictions, mlp_joint, scaler_input, scaler_targ
         # Reshape back to [19, 2] format
         refined_coords = refined_flat.reshape(19, 2)
         
-        return refined_coords
+        return refined_coords, selection_weights
         
     except Exception as e:
         print(f"Joint MLP refinement failed: {e}")
-        return predictions
+        return predictions, None
 
 def compute_metrics(pred_coords, gt_coords, landmark_names):
     """Compute comprehensive evaluation metrics."""
@@ -373,6 +406,7 @@ def main():
     hrnet_predictions = []
     mlp_predictions = []
     ground_truths = []
+    all_selection_weights = []
     
     from tqdm import tqdm
     
@@ -412,7 +446,7 @@ def main():
                 continue
             
             # Apply joint MLP refinement
-            refined_keypoints = apply_joint_mlp_refinement(
+            refined_keypoints, selection_weights = apply_joint_mlp_refinement(
                 pred_keypoints, mlp_joint, scaler_input, scaler_target, device
             )
             
@@ -420,6 +454,8 @@ def main():
             hrnet_predictions.append(pred_keypoints)
             mlp_predictions.append(refined_keypoints)
             ground_truths.append(gt_keypoints)
+            if selection_weights is not None:
+                all_selection_weights.append(selection_weights)
             
         except Exception as e:
             print(f"Failed to process sample {idx}: {e}")
@@ -477,6 +513,72 @@ def main():
             if hrnet_err > 0:
                 improvement = (hrnet_err - mlp_err) / hrnet_err * 100
                 print(f"{landmark:<20} {hrnet_err:<15.3f} {mlp_err:<15.3f} {improvement:<15.1f}%")
+    
+    # Analyze selection weights if available
+    if all_selection_weights:
+        print(f"\n🔍 ADAPTIVE SELECTION ANALYSIS:")
+        print(f"{'='*70}")
+        
+        # Convert to numpy array and reshape
+        selection_weights_array = np.array(all_selection_weights)  # [N, 38]
+        avg_selection_weights = np.mean(selection_weights_array, axis=0)  # [38]
+        
+        # Overall statistics
+        overall_mlp_usage = np.mean(avg_selection_weights)
+        print(f"📊 Overall MLP usage: {overall_mlp_usage:.3f} (0=always HRNet, 1=always MLP)")
+        
+        # Per-landmark statistics (reshape to [19, 2] for landmarks)
+        landmark_weights = avg_selection_weights.reshape(19, 2)  # [19 landmarks, 2 coords (x,y)]
+        landmark_avg_weights = np.mean(landmark_weights, axis=1)  # Average over x,y
+        
+        # Sort landmarks by MLP preference
+        sorted_indices = np.argsort(landmark_avg_weights)[::-1]
+        
+        print(f"\n🎯 Landmarks by MLP preference (highest to lowest):")
+        print(f"{'Landmark':<20} {'Avg Weight':<12} {'X Weight':<12} {'Y Weight':<12} {'Preference':<15}")
+        print("-" * 75)
+        
+        for idx in sorted_indices[:10]:  # Top 10
+            landmark = landmark_names[idx]
+            avg_w = landmark_avg_weights[idx]
+            x_w = landmark_weights[idx, 0]
+            y_w = landmark_weights[idx, 1]
+            
+            if avg_w > 0.7:
+                preference = "Strong MLP"
+            elif avg_w > 0.5:
+                preference = "Moderate MLP"
+            elif avg_w > 0.3:
+                preference = "Mixed"
+            else:
+                preference = "Strong HRNet"
+                
+            print(f"{landmark:<20} {avg_w:<12.3f} {x_w:<12.3f} {y_w:<12.3f} {preference:<15}")
+        
+        # Correlation with error improvement
+        print(f"\n📈 Selection weights vs. improvement correlation:")
+        improvements = []
+        weights = []
+        
+        for i, landmark in enumerate(landmark_names):
+            if landmark in hrnet_per_landmark and landmark in mlp_per_landmark:
+                hrnet_err = hrnet_per_landmark[landmark]['mre']
+                mlp_err = mlp_per_landmark[landmark]['mre']
+                if hrnet_err > 0:
+                    improvement = (hrnet_err - mlp_err) / hrnet_err * 100
+                    improvements.append(improvement)
+                    weights.append(landmark_avg_weights[i])
+        
+        if improvements:
+            correlation = np.corrcoef(weights, improvements)[0, 1]
+            print(f"Correlation between MLP usage and improvement: {correlation:.3f}")
+            
+            if correlation > 0.3:
+                print("✅ Positive correlation: Model learns to use MLP more where it helps more")
+            elif correlation < -0.3:
+                print("⚠️  Negative correlation: Model may be over-conservative with MLP usage")
+            else:
+                print("🔄 Weak correlation: Selection may be based on other factors")
     
     # Save results
     output_dir = os.path.join(args.work_dir, "joint_mlp_evaluation")
