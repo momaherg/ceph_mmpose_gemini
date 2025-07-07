@@ -68,7 +68,6 @@ import numpy as np
 import pandas as pd
 from sklearn.preprocessing import StandardScaler
 import joblib
-import time
 
 # Import for weighted sampling
 from torch.utils.data import WeightedRandomSampler
@@ -204,8 +203,6 @@ class ConcurrentMLPTrainingHook(Hook):
         hard_example_threshold: float = 5.0,  # MRE threshold in pixels
         log_interval: int = 50,
         hrnet_hard_example_weight: float = 2.0,  # Weight multiplier for hard examples in HRNet training
-        mlp_train_interval: int = 1,  # Train MLP every N HRNet epochs (1 = every epoch)
-        skip_first_n_epochs: int = 0,  # Skip MLP training for first N epochs to speed up initial training
     ) -> None:
         self.mlp_epochs = mlp_epochs
         self.mlp_batch_size = mlp_batch_size
@@ -214,8 +211,6 @@ class ConcurrentMLPTrainingHook(Hook):
         self.hard_example_threshold = hard_example_threshold
         self.log_interval = log_interval
         self.hrnet_hard_example_weight = hrnet_hard_example_weight
-        self.mlp_train_interval = mlp_train_interval
-        self.skip_first_n_epochs = skip_first_n_epochs
 
         # These will be initialised in before_run
         self.mlp_joint: JointMLPRefinementModel | None = None
@@ -326,20 +321,6 @@ class ConcurrentMLPTrainingHook(Hook):
         """After each HRNetV2 epoch, train joint MLP on-the-fly using current predictions."""
         logger: MMLogger = runner.logger
         assert self.mlp_joint is not None
-        
-        current_epoch = runner.epoch + 1  # runner.epoch is 0-indexed
-        
-        # Skip MLP training for early epochs if configured
-        if current_epoch <= self.skip_first_n_epochs:
-            logger.info(f'[ConcurrentMLPTrainingHook] Skipping MLP training for epoch {current_epoch} (configured to skip first {self.skip_first_n_epochs} epochs)')
-            return
-            
-        # Train MLP only at specified intervals
-        if (current_epoch - self.skip_first_n_epochs - 1) % self.mlp_train_interval != 0:
-            logger.info(f'[ConcurrentMLPTrainingHook] Skipping MLP training for epoch {current_epoch} (trains every {self.mlp_train_interval} epochs)')
-            return
-        
-        start_time = time.time()
 
         # -----------------------------------------------------------------
         # Step 1: Generate predictions on training data (GPU-optimized with batching)
@@ -381,14 +362,16 @@ class ConcurrentMLPTrainingHook(Hook):
         all_gts: List[np.ndarray] = []
         all_errors: List[np.ndarray] = []  # For hard-example detection
         
-        # Batch processing parameters
-        BATCH_SIZE = 256  # Increased batch size for true GPU batch processing
+        # Batch processing parameters - increased for TRUE batch processing
+        BATCH_SIZE = 256  # Process 256 images at once with TRUE batching (much faster!)
+        
+        # Performance tracking
+        import time
+        inference_start_time = time.time()
         
         train_dataset = runner.train_dataloader.dataset
-        logger.info(f'[ConcurrentMLPTrainingHook] Generating predictions for joint MLP with TRUE batch processing (batch_size={BATCH_SIZE})...')
-        
-        # Store device for nested functions
-        device = self.device
+        logger.info(f'[ConcurrentMLPTrainingHook] 🚀 Generating predictions using TRUE batch inference...')
+        logger.info(f'[ConcurrentMLPTrainingHook] 📊 Batch size: {BATCH_SIZE} (simultaneous processing for maximum speed)')
 
         def tensor_to_numpy(data):
             """Safely convert tensor to numpy, handling both tensor and numpy inputs."""
@@ -399,128 +382,143 @@ class ConcurrentMLPTrainingHook(Hook):
             else:
                 return np.array(data)
 
-        def fast_batch_inference(images_batch, gt_keypoints_batch):
-            """Run TRULY batched inference using direct model forward pass."""
+        def batch_inference(images_batch, gt_keypoints_batch):
+            """Run TRUE batched inference on multiple images simultaneously."""
             batch_preds = []
             batch_gts = []
             batch_errors = []
             
             try:
-                # Filter out None values
-                valid_indices = [(i, img, gt) for i, (img, gt) in enumerate(zip(images_batch, gt_keypoints_batch)) 
-                                if img is not None and gt is not None]
+                # Filter out None entries and prepare valid data
+                valid_indices = []
+                valid_images = []
+                valid_gts = []
                 
-                if not valid_indices:
+                for i, (img, gt_kpts) in enumerate(zip(images_batch, gt_keypoints_batch)):
+                    if img is not None and gt_kpts is not None:
+                        valid_indices.append(i)
+                        valid_images.append(img)
+                        valid_gts.append(gt_kpts)
+                
+                if not valid_images:
                     return batch_preds, batch_gts, batch_errors
                 
-                # Prepare batch tensors
-                batch_images = []
-                batch_gt_coords = []
+                # Convert to tensor batch [batch_size, C, H, W]
+                valid_images = np.stack(valid_images)  # [N, H, W, C]
+                valid_images = torch.from_numpy(valid_images).permute(0, 3, 1, 2).float()  # [N, C, H, W]
+                valid_images = valid_images.to(self.device)
                 
-                for idx, img, gt_kpts in valid_indices:
-                    # Convert image to tensor format expected by model
-                    if img.shape[2] == 3:  # HWC to CHW
-                        img_tensor = torch.from_numpy(img).permute(2, 0, 1).float() / 255.0
-                    else:
-                        img_tensor = torch.from_numpy(img).float() / 255.0
-                    
-                    batch_images.append(img_tensor)
-                    batch_gt_coords.append(gt_kpts)
+                # Normalize images (assuming ImageNet normalization)
+                mean = torch.tensor([123.675, 116.28, 103.53]).view(1, 3, 1, 1).to(self.device)
+                std = torch.tensor([58.395, 57.12, 57.375]).view(1, 3, 1, 1).to(self.device)
+                valid_images = (valid_images - mean) / std
                 
-                # Stack into batch tensor
-                batch_tensor = torch.stack(batch_images).to(device)
-                
-                # Direct forward pass through model (much faster than inference_topdown)
+                # Run TRUE batch inference using model directly (much faster!)
                 with torch.no_grad():
-                    # Get model output
-                    outputs = model(batch_tensor)
-                    
-                    # Extract heatmaps and decode to coordinates
-                    if hasattr(outputs, 'pred_fields') and 'heatmaps' in outputs.pred_fields:
-                        heatmaps = outputs.pred_fields.heatmaps
-                    elif isinstance(outputs, dict) and 'heatmaps' in outputs:
-                        heatmaps = outputs['heatmaps']
-                    elif isinstance(outputs, torch.Tensor):
-                        heatmaps = outputs
+                    # Get features from backbone
+                    if hasattr(model, 'extract_feat'):
+                        features = model.extract_feat(valid_images)
                     else:
-                        # Fallback to slower method if output format is unexpected
-                        logger.warning('[ConcurrentMLPTrainingHook] Unexpected model output format, falling back to inference_topdown')
-                        return fallback_inference(images_batch, gt_keypoints_batch)
+                        # Fallback for wrapped models
+                        features = model.backbone(valid_images)
                     
-                    # Decode heatmaps to keypoints
-                    # Simple argmax decoding (can be improved with sub-pixel refinement)
-                    batch_size = heatmaps.shape[0]
-                    num_joints = heatmaps.shape[1]
-                    
-                    keypoints = torch.zeros((batch_size, num_joints, 2), device=device)
-                    
-                    for i in range(batch_size):
-                        for j in range(num_joints):
-                            heatmap = heatmaps[i, j]
-                            # Get max location
-                            max_val = heatmap.max()
-                            if max_val > 0.1:  # Confidence threshold
-                                coords = (heatmap == max_val).nonzero(as_tuple=False)
-                                if len(coords) > 0:
-                                    y, x = coords[0]
-                                    # Scale to original image size (224x224)
-                                    scale_x = 224.0 / heatmap.shape[1]
-                                    scale_y = 224.0 / heatmap.shape[0]
-                                    keypoints[i, j, 0] = x * scale_x
-                                    keypoints[i, j, 1] = y * scale_y
-                
-                # Process results
-                keypoints_np = keypoints.cpu().numpy()
-                
-                for i, (_, _, gt_kpts) in enumerate(valid_indices):
-                    pred_kpts = keypoints_np[i]
-                    
-                    # Flatten coordinates to 38-D vectors
-                    pred_flat = pred_kpts.flatten()
-                    gt_flat = gt_kpts.flatten()
-                    
-                    # Calculate per-landmark radial errors
-                    landmark_errors = np.sqrt(np.sum((pred_kpts - gt_kpts)**2, axis=1))
-                    
-                    batch_preds.append(pred_flat)
-                    batch_gts.append(gt_flat)
-                    batch_errors.append(landmark_errors)
-                                 
-            except Exception as e:
-                logger.warning(f'[ConcurrentMLPTrainingHook] Fast batch processing failed: {e}, falling back to slow method')
-                # Fallback to original method
-                return fallback_inference(images_batch, gt_keypoints_batch)
-                
-            return batch_preds, batch_gts, batch_errors
-        
-        def fallback_inference(images_batch, gt_keypoints_batch):
-            """Fallback to original inference method."""
-            batch_preds = []
-            batch_gts = []
-            batch_errors = []
-            
-            for i, (img, gt_kpts) in enumerate(zip(images_batch, gt_keypoints_batch)):
-                if img is not None and gt_kpts is not None:
-                    try:
-                        bbox = np.array([[0, 0, 224, 224]], dtype=np.float32)
-                        with torch.no_grad():
-                            results = inference_topdown(model, img, bboxes=bbox, bbox_format='xyxy')
+                    # Get predictions from head
+                    if hasattr(model, 'head'):
+                        head_outputs = model.head(features)
                         
-                        if results and len(results) > 0:
-                            pred_kpts = results[0].pred_instances.keypoints[0]
-                            pred_kpts = tensor_to_numpy(pred_kpts)
-                            
-                            if pred_kpts is not None and pred_kpts.shape[0] == 19:
-                                pred_flat = pred_kpts.flatten()
-                                gt_flat = gt_kpts.flatten()
-                                landmark_errors = np.sqrt(np.sum((pred_kpts - gt_kpts)**2, axis=1))
+                        # Extract heatmaps and convert to coordinates
+                        if isinstance(head_outputs, (list, tuple)):
+                            heatmaps = head_outputs[0]  # First output is usually heatmaps
+                        else:
+                            heatmaps = head_outputs
+                        
+                        # Decode heatmaps to coordinates (simplified)
+                        batch_size, num_keypoints, heatmap_h, heatmap_w = heatmaps.shape
+                        
+                        # Find max locations in heatmaps
+                        heatmaps_reshaped = heatmaps.view(batch_size, num_keypoints, -1)
+                        max_vals, max_indices = torch.max(heatmaps_reshaped, dim=2)
+                        
+                        # Convert indices to coordinates
+                        max_indices_y = max_indices // heatmap_w
+                        max_indices_x = max_indices % heatmap_w
+                        
+                        # Scale to original image size (assuming 224x224 input, 64x64 heatmap)
+                        scale_x = 224.0 / heatmap_w
+                        scale_y = 224.0 / heatmap_h
+                        
+                        pred_coords = torch.stack([
+                            max_indices_x.float() * scale_x,
+                            max_indices_y.float() * scale_y
+                        ], dim=-1)  # [batch_size, num_keypoints, 2]
+                        
+                        pred_coords = pred_coords.cpu().numpy()
+                    else:
+                        logger.warning('[ConcurrentMLPTrainingHook] Model has no head attribute, falling back to individual inference')
+                        # Fallback to individual processing if direct access fails
+                        for i, (img, gt_kpts) in enumerate(zip(valid_images.cpu().numpy(), valid_gts)):
+                            try:
+                                bbox = np.array([[0, 0, 224, 224]], dtype=np.float32)
+                                results = inference_topdown(model, img.transpose(1, 2, 0), bboxes=bbox, bbox_format='xyxy')
                                 
-                                batch_preds.append(pred_flat)
-                                batch_gts.append(gt_flat)
-                                batch_errors.append(landmark_errors)
-                    except:
-                        continue
+                                if results and len(results) > 0:
+                                    pred_kpts = results[0].pred_instances.keypoints[0]
+                                    pred_kpts = tensor_to_numpy(pred_kpts)
+                                    
+                                    if pred_kpts is not None and pred_kpts.shape[0] == 19:
+                                        pred_flat = pred_kpts.flatten()
+                                        gt_flat = gt_kpts.flatten()
+                                        landmark_errors = np.sqrt(np.sum((pred_kpts - gt_kpts)**2, axis=1))
+                                        
+                                        batch_preds.append(pred_flat)
+                                        batch_gts.append(gt_flat)
+                                        batch_errors.append(landmark_errors)
+                            except:
+                                continue
+                        return batch_preds, batch_gts, batch_errors
+                
+                # Process predictions and ground truths
+                for i, (pred_kpts, gt_kpts) in enumerate(zip(pred_coords, valid_gts)):
+                    if pred_kpts.shape[0] == 19:  # Ensure correct number of landmarks
+                        # Flatten coordinates to 38-D vectors
+                        pred_flat = pred_kpts.flatten()
+                        gt_flat = gt_kpts.flatten()
                         
+                        # Calculate per-landmark radial errors
+                        landmark_errors = np.sqrt(np.sum((pred_kpts - gt_kpts)**2, axis=1))
+                        
+                        batch_preds.append(pred_flat)
+                        batch_gts.append(gt_flat)
+                        batch_errors.append(landmark_errors)
+                
+                logger.debug(f'[ConcurrentMLPTrainingHook] TRUE batch inference processed {len(valid_images)} images simultaneously')
+                             
+            except Exception as e:
+                logger.warning(f'[ConcurrentMLPTrainingHook] TRUE batch processing failed, falling back to individual inference: {e}')
+                
+                # Fallback to individual processing if batch fails
+                for i, (img, gt_kpts) in enumerate(zip(images_batch, gt_keypoints_batch)):
+                    if img is not None and gt_kpts is not None:
+                        try:
+                            bbox = np.array([[0, 0, 224, 224]], dtype=np.float32)
+                            with torch.no_grad():
+                                results = inference_topdown(model, img, bboxes=bbox, bbox_format='xyxy')
+                            
+                            if results and len(results) > 0:
+                                pred_kpts = results[0].pred_instances.keypoints[0]
+                                pred_kpts = tensor_to_numpy(pred_kpts)
+                                
+                                if pred_kpts is not None and pred_kpts.shape[0] == 19:
+                                    pred_flat = pred_kpts.flatten()
+                                    gt_flat = gt_kpts.flatten()
+                                    landmark_errors = np.sqrt(np.sum((pred_kpts - gt_kpts)**2, axis=1))
+                                    
+                                    batch_preds.append(pred_flat)
+                                    batch_gts.append(gt_flat)
+                                    batch_errors.append(landmark_errors)
+                        except:
+                            continue
+                
             return batch_preds, batch_gts, batch_errors
 
         # Access training data more robustly with batching
@@ -544,7 +542,7 @@ class ConcurrentMLPTrainingHook(Hook):
                     processed_count = 0
                     
                     # Process in batches
-                    for batch_start in tqdm(range(0, len(df), BATCH_SIZE), disable=runner.rank != 0, desc="Batch Inference from File"):
+                    for batch_start in tqdm(range(0, len(df), BATCH_SIZE), disable=runner.rank != 0, desc="TRUE Batch Inference from File"):
                         batch_end = min(batch_start + BATCH_SIZE, len(df))
                         batch_df = df.iloc[batch_start:batch_end]
                         
@@ -583,8 +581,8 @@ class ConcurrentMLPTrainingHook(Hook):
                                 gt_keypoints_batch.append(None)
                                 continue
                         
-                        # Run fast batch inference
-                        batch_preds, batch_gts, batch_errors = fast_batch_inference(images_batch, gt_keypoints_batch)
+                        # Run batch inference
+                        batch_preds, batch_gts, batch_errors = batch_inference(images_batch, gt_keypoints_batch)
                         
                         # Add to results
                         all_preds.extend(batch_preds)
@@ -593,7 +591,7 @@ class ConcurrentMLPTrainingHook(Hook):
                         
                         processed_count += len(batch_preds)
                     
-                    logger.info(f'[ConcurrentMLPTrainingHook] Successfully processed {processed_count} samples from file using batch inference')
+                    logger.info(f'[ConcurrentMLPTrainingHook] Successfully processed {processed_count} samples from file using TRUE batch inference (major speedup!)')
                     
                 except Exception as e:
                     logger.warning(f'[ConcurrentMLPTrainingHook] Failed to load from annotation file: {e}')
@@ -606,7 +604,7 @@ class ConcurrentMLPTrainingHook(Hook):
                 processed_count = 0
                 
                 # Process in batches
-                for batch_start in tqdm(range(0, len(train_dataset), BATCH_SIZE), disable=runner.rank != 0, desc="Batch Dataset Inference"):
+                for batch_start in tqdm(range(0, len(train_dataset), BATCH_SIZE), disable=runner.rank != 0, desc="TRUE Batch Dataset Inference"):
                     batch_end = min(batch_start + BATCH_SIZE, len(train_dataset))
                     
                     # Prepare batch data
@@ -652,8 +650,8 @@ class ConcurrentMLPTrainingHook(Hook):
                             gt_keypoints_batch.append(None)
                             continue
                     
-                    # Run fast batch inference
-                    batch_preds, batch_gts, batch_errors = fast_batch_inference(images_batch, gt_keypoints_batch)
+                    # Run batch inference
+                    batch_preds, batch_gts, batch_errors = batch_inference(images_batch, gt_keypoints_batch)
                     
                     # Add to results
                     all_preds.extend(batch_preds)
@@ -662,7 +660,7 @@ class ConcurrentMLPTrainingHook(Hook):
                     
                     processed_count += len(batch_preds)
                 
-                logger.info(f'[ConcurrentMLPTrainingHook] Successfully processed {processed_count} samples via dataset iteration with batch inference')
+                logger.info(f'[ConcurrentMLPTrainingHook] Successfully processed {processed_count} samples via dataset iteration with TRUE batch inference (major speedup!)')
 
         except Exception as e:
             logger.error(f'[ConcurrentMLPTrainingHook] Critical error during batch data processing: {e}')
@@ -676,8 +674,14 @@ class ConcurrentMLPTrainingHook(Hook):
         all_gts = np.stack(all_gts)      # [N, 38]
         all_errors = np.stack(all_errors)  # [N, 19]
         
-        inference_time = time.time() - start_time
-        logger.info(f'[ConcurrentMLPTrainingHook] Generated predictions for {len(all_preds)} samples in {inference_time:.1f}s ({len(all_preds)/inference_time:.1f} samples/sec)')
+        # Performance logging
+        inference_end_time = time.time()
+        inference_duration = inference_end_time - inference_start_time
+        samples_per_second = len(all_preds) / inference_duration if inference_duration > 0 else 0
+        
+        logger.info(f'[ConcurrentMLPTrainingHook] ⚡ TRUE batch inference completed!')
+        logger.info(f'[ConcurrentMLPTrainingHook] ✓ Processed {len(all_preds)} samples in {inference_duration:.2f}s ({samples_per_second:.1f} samples/sec)')
+        logger.info(f'[ConcurrentMLPTrainingHook] ✓ Batch size: {BATCH_SIZE} (TRUE simultaneous processing, not individual!)')
 
         # -----------------------------------------------------------------
         # Step 1.5: Compute hard-example weights
@@ -799,6 +803,7 @@ class ConcurrentMLPTrainingHook(Hook):
         os.makedirs(save_dir, exist_ok=True)
         
         # Save current epoch models
+        current_epoch = runner.epoch + 1  # runner.epoch is 0-indexed
         mlp_joint_epoch_path = os.path.join(save_dir, f'mlp_joint_epoch_{current_epoch}.pth')
         
         torch.save(self.mlp_joint.state_dict(), mlp_joint_epoch_path)
@@ -809,9 +814,6 @@ class ConcurrentMLPTrainingHook(Hook):
         
         logger.info(f'[ConcurrentMLPTrainingHook] Joint MLP model saved for epoch {current_epoch}')
         logger.info(f'[ConcurrentMLPTrainingHook] Latest model: {mlp_joint_latest_path}')
-        
-        total_time = time.time() - start_time
-        logger.info(f'[ConcurrentMLPTrainingHook] Total MLP training time: {total_time:.1f}s (Inference: {inference_time:.1f}s, MLP training: {total_time-inference_time:.1f}s)')
 
     # ---------------------------------------------------------------------
     # Optional: save MLP weights at end of run

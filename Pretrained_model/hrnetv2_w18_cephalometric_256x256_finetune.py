@@ -157,8 +157,6 @@ custom_hooks = [
         mlp_weight_decay=1e-4,             # MLP weight decay
         hard_example_threshold=5.0,        # MRE threshold for hard-example identification (pixels)
         hrnet_hard_example_weight=2.0,     # Weight multiplier for hard examples in next HRNet epoch (2x oversampling)
-        log_interval=20,                   # Log MLP training progress every 20 epochs
-        mlp_train_interval=1,              # Train MLP every HRNet epoch (never skip)
-        skip_first_n_epochs=0              # Don't skip any epochs - train MLP from the start
+        log_interval=20                    # Log MLP training progress every 20 epochs
     )
 ] 
