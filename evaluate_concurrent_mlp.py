@@ -3,9 +3,6 @@
 Concurrent Joint MLP Performance Evaluation Script
 This script evaluates the performance improvement from joint MLP refinement
 trained concurrently with HRNetV2.
-
-IMPORTANT: Uses TRUE batch inference (same as training hook) for consistency.
-This ensures evaluation results match the inference method used during training.
 """
 
 import os
@@ -106,84 +103,6 @@ class JointMLPRefinementModel(nn.Module):
         
         return adaptive_output
 
-def batch_hrnet_inference(images_batch, model, device):
-    """Run batch inference using MMPose's proper decoding pipeline."""
-    try:
-        if len(images_batch) == 0:
-            return []
-        
-        # Use MMPose's proper batch inference with data samples
-        from mmpose.structures import PoseDataSample
-        from mmengine.structures import InstanceData
-        
-        # Prepare data samples for batch inference
-        data_samples = []
-        inputs = []
-        
-        for img in images_batch:
-            # Convert image to tensor with proper preprocessing
-            if len(img.shape) == 3 and img.shape[-1] == 3:
-                img_tensor = torch.from_numpy(img).permute(2, 0, 1).float()  # HWC to CHW
-            else:
-                img_tensor = torch.from_numpy(img).float()
-            
-            inputs.append(img_tensor)
-            
-            # Create data sample with proper metadata
-            data_sample = PoseDataSample()
-            data_sample.set_metainfo({
-                'img_shape': (224, 224),
-                'ori_shape': (224, 224), 
-                'input_size': (224, 224),
-                'input_center': np.array([112.0, 112.0]),
-                'input_scale': np.array([224.0, 224.0]),
-                'flip_indices': list(range(19)),
-            })
-            
-            # Add instance data for proper pipeline
-            gt_instances = InstanceData()
-            gt_instances.bboxes = torch.tensor([[0, 0, 224, 224]], dtype=torch.float32)
-            gt_instances.bbox_scores = torch.tensor([1.0], dtype=torch.float32)
-            data_sample.gt_instances = gt_instances
-            
-            data_samples.append(data_sample)
-        
-        # Convert to batch tensor
-        inputs_batch = torch.stack(inputs).to(device)
-        
-        # Run batch inference using MMPose's proper pipeline
-        with torch.no_grad():
-            # Use model.predict for proper decoding
-            if hasattr(model, 'predict'):
-                results = model.predict(inputs_batch, data_samples)
-            else:
-                # Fallback to direct processing with proper codec
-                results = model.test_step({'inputs': inputs_batch, 'data_samples': data_samples})
-        
-        # Extract coordinates
-        batch_predictions = []
-        for result in results:
-            if hasattr(result, 'pred_instances') and hasattr(result.pred_instances, 'keypoints'):
-                keypoints = result.pred_instances.keypoints
-                if isinstance(keypoints, torch.Tensor):
-                    keypoints = keypoints.cpu().numpy()
-                
-                # Handle different keypoint formats
-                if keypoints.ndim == 3:  # [1, 19, 2]
-                    keypoints = keypoints[0]
-                elif keypoints.ndim == 2:  # [19, 2]
-                    pass
-                else:
-                    continue
-                
-                batch_predictions.append(keypoints)
-        
-        return np.array(batch_predictions) if batch_predictions else None
-                
-    except Exception as e:
-        print(f"Batch HRNet inference failed: {e}")
-        return None
-
 def apply_joint_mlp_refinement(predictions, mlp_joint, scaler_input, scaler_target, device):
     """Apply joint MLP refinement to predictions and return selection weights."""
     try:
@@ -274,7 +193,6 @@ def main():
     
     print("="*80)
     print("CONCURRENT JOINT MLP REFINEMENT EVALUATION")
-    print("✅ Using TRUE batch inference (consistent with training hook)")
     print("="*80)
     
     # Initialize MMPose scope
@@ -481,9 +399,8 @@ def main():
         print(f"ERROR: Failed to load joint scalers: {e}")
         return
     
-    # Evaluation on test set using TRUE batch inference (same as training hook)
-    print(f"\n🔄 Running evaluation using TRUE batch inference (consistent with training)...")
-    print(f"📊 Processing {len(test_df)} test samples in batches...")
+    # Evaluation on test set
+    print(f"\n🔄 Running evaluation on {len(test_df)} test samples...")
     
     # Storage for results
     hrnet_predictions = []
@@ -493,16 +410,7 @@ def main():
     
     from tqdm import tqdm
     
-    # Batch processing parameters
-    EVAL_BATCH_SIZE = 64  # Smaller than training for evaluation
-    
-    # Prepare all data first
-    all_images = []
-    all_gt_keypoints = []
-    valid_indices = []
-    
-    print("📋 Preparing evaluation data...")
-    for idx, row in test_df.iterrows():
+    for idx, row in tqdm(test_df.iterrows(), total=len(test_df), desc="Evaluating"):
         try:
             # Get image and ground truth
             img_array = np.array(row['Image'], dtype=np.uint8).reshape((224, 224, 3))
@@ -518,82 +426,39 @@ def main():
                     gt_keypoints.append([0, 0])
                     valid_gt = False
             
-            if valid_gt:
-                all_images.append(img_array)
-                all_gt_keypoints.append(np.array(gt_keypoints))
-                valid_indices.append(idx)
-            
-        except Exception as e:
-            continue
-    
-    if not all_images:
-        print("ERROR: No valid samples for evaluation")
-        return
-    
-    print(f"✓ Prepared {len(all_images)} valid samples for batch evaluation")
-    
-    # Process in batches using TRUE batch inference
-    for batch_start in tqdm(range(0, len(all_images), EVAL_BATCH_SIZE), desc="Batch Evaluation"):
-        batch_end = min(batch_start + EVAL_BATCH_SIZE, len(all_images))
-        
-        # Get batch data
-        batch_images = all_images[batch_start:batch_end]
-        batch_gt = all_gt_keypoints[batch_start:batch_end]
-        
-        try:
-            # Run TRUE batch HRNet inference (same method as training hook)
-            batch_hrnet_preds = batch_hrnet_inference(batch_images, hrnet_model, device)
-            
-            if batch_hrnet_preds is None:
-                # Fallback to individual inference if batch fails
-                print(f"⚠️  Batch inference failed for batch {batch_start//EVAL_BATCH_SIZE + 1}, using fallback...")
+            if not valid_gt:
+                continue
                 
-                for img, gt_kpts in zip(batch_images, batch_gt):
-                    try:
-                        bbox = np.array([[0, 0, 224, 224]], dtype=np.float32)
-                        results = inference_topdown(hrnet_model, img, bboxes=bbox, bbox_format='xyxy')
-                        
-                        if results and len(results) > 0:
-                            pred_kpts = results[0].pred_instances.keypoints[0]
-                            if isinstance(pred_kpts, torch.Tensor):
-                                pred_kpts = pred_kpts.cpu().numpy()
-                                
-                            if pred_kpts is not None and pred_kpts.shape[0] == 19:
-                                # Apply MLP refinement
-                                refined_kpts, selection_weights = apply_joint_mlp_refinement(
-                                    pred_kpts, mlp_joint, scaler_input, scaler_target, device
-                                )
-                                
-                                hrnet_predictions.append(pred_kpts)
-                                mlp_predictions.append(refined_kpts)
-                                ground_truths.append(gt_kpts)
-                                if selection_weights is not None:
-                                    all_selection_weights.append(selection_weights)
-                    except:
-                        continue
+            gt_keypoints = np.array(gt_keypoints)
+            
+            # Run HRNetV2 inference using the standard API
+            bbox = np.array([[0, 0, 224, 224]], dtype=np.float32)
+            results = inference_topdown(hrnet_model, img_array, bboxes=bbox, bbox_format='xyxy')
+            
+            if results and len(results) > 0:
+                pred_keypoints = results[0].pred_instances.keypoints[0]
+                if isinstance(pred_keypoints, torch.Tensor):
+                    pred_keypoints = pred_keypoints.cpu().numpy()
+            else:
+                continue
+
+            if pred_keypoints is None or pred_keypoints.shape[0] != 19:
                 continue
             
-            # Process batch predictions
-            for i, (pred_kpts, gt_kpts) in enumerate(zip(batch_hrnet_preds, batch_gt)):
-                if pred_kpts.shape[0] == 19:  # Ensure correct number of landmarks
-                    try:
-                        # Apply joint MLP refinement
-                        refined_kpts, selection_weights = apply_joint_mlp_refinement(
-                            pred_kpts, mlp_joint, scaler_input, scaler_target, device
-                        )
-                        
-                        # Store results
-                        hrnet_predictions.append(pred_kpts)
-                        mlp_predictions.append(refined_kpts)
-                        ground_truths.append(gt_kpts)
-                        if selection_weights is not None:
-                            all_selection_weights.append(selection_weights)
-                            
-                    except Exception as e:
-                        continue
-        
+            # Apply joint MLP refinement
+            refined_keypoints, selection_weights = apply_joint_mlp_refinement(
+                pred_keypoints, mlp_joint, scaler_input, scaler_target, device
+            )
+            
+            # Store results
+            hrnet_predictions.append(pred_keypoints)
+            mlp_predictions.append(refined_keypoints)
+            ground_truths.append(gt_keypoints)
+            if selection_weights is not None:
+                all_selection_weights.append(selection_weights)
+            
         except Exception as e:
-            print(f"Batch {batch_start//EVAL_BATCH_SIZE + 1} failed: {e}")
+            print(f"Failed to process sample {idx}: {e}")
             continue
     
     if len(hrnet_predictions) == 0:
