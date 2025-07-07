@@ -107,62 +107,78 @@ class JointMLPRefinementModel(nn.Module):
         return adaptive_output
 
 def batch_hrnet_inference(images_batch, model, device):
-    """Run TRUE batch inference using the same method as training hook."""
+    """Run batch inference using MMPose's proper decoding pipeline."""
     try:
         if len(images_batch) == 0:
             return []
         
-        # Convert to tensor batch [batch_size, C, H, W]
-        images_array = np.stack(images_batch)  # [N, H, W, C]
-        images_tensor = torch.from_numpy(images_array).permute(0, 3, 1, 2).float()  # [N, C, H, W]
-        images_tensor = images_tensor.to(device)
+        # Use MMPose's proper batch inference with data samples
+        from mmpose.structures import PoseDataSample
+        from mmengine.structures import InstanceData
         
-        # Normalize images (ImageNet normalization)
-        mean = torch.tensor([123.675, 116.28, 103.53]).view(1, 3, 1, 1).to(device)
-        std = torch.tensor([58.395, 57.12, 57.375]).view(1, 3, 1, 1).to(device)
-        images_tensor = (images_tensor - mean) / std
+        # Prepare data samples for batch inference
+        data_samples = []
+        inputs = []
         
-        # Run TRUE batch inference using model directly
-        with torch.no_grad():
-            # Get features from backbone
-            if hasattr(model, 'extract_feat'):
-                features = model.extract_feat(images_tensor)
+        for img in images_batch:
+            # Convert image to tensor with proper preprocessing
+            if len(img.shape) == 3 and img.shape[-1] == 3:
+                img_tensor = torch.from_numpy(img).permute(2, 0, 1).float()  # HWC to CHW
             else:
-                features = model.backbone(images_tensor)
+                img_tensor = torch.from_numpy(img).float()
             
-            # Get predictions from head
-            if hasattr(model, 'head'):
-                head_outputs = model.head(features)
-                
-                # Extract heatmaps and convert to coordinates
-                if isinstance(head_outputs, (list, tuple)):
-                    heatmaps = head_outputs[0]
-                else:
-                    heatmaps = head_outputs
-                
-                # Decode heatmaps to coordinates
-                batch_size, num_keypoints, heatmap_h, heatmap_w = heatmaps.shape
-                
-                # Find max locations in heatmaps
-                heatmaps_reshaped = heatmaps.view(batch_size, num_keypoints, -1)
-                max_vals, max_indices = torch.max(heatmaps_reshaped, dim=2)
-                
-                # Convert indices to coordinates
-                max_indices_y = max_indices // heatmap_w
-                max_indices_x = max_indices % heatmap_w
-                
-                # Scale to original image size
-                scale_x = 224.0 / heatmap_w
-                scale_y = 224.0 / heatmap_h
-                
-                pred_coords = torch.stack([
-                    max_indices_x.float() * scale_x,
-                    max_indices_y.float() * scale_y
-                ], dim=-1)  # [batch_size, num_keypoints, 2]
-                
-                return pred_coords.cpu().numpy()
+            inputs.append(img_tensor)
+            
+            # Create data sample with proper metadata
+            data_sample = PoseDataSample()
+            data_sample.set_metainfo({
+                'img_shape': (224, 224),
+                'ori_shape': (224, 224), 
+                'input_size': (224, 224),
+                'input_center': np.array([112.0, 112.0]),
+                'input_scale': np.array([224.0, 224.0]),
+                'flip_indices': list(range(19)),
+            })
+            
+            # Add instance data for proper pipeline
+            gt_instances = InstanceData()
+            gt_instances.bboxes = torch.tensor([[0, 0, 224, 224]], dtype=torch.float32)
+            gt_instances.bbox_scores = torch.tensor([1.0], dtype=torch.float32)
+            data_sample.gt_instances = gt_instances
+            
+            data_samples.append(data_sample)
+        
+        # Convert to batch tensor
+        inputs_batch = torch.stack(inputs).to(device)
+        
+        # Run batch inference using MMPose's proper pipeline
+        with torch.no_grad():
+            # Use model.predict for proper decoding
+            if hasattr(model, 'predict'):
+                results = model.predict(inputs_batch, data_samples)
             else:
-                return None
+                # Fallback to direct processing with proper codec
+                results = model.test_step({'inputs': inputs_batch, 'data_samples': data_samples})
+        
+        # Extract coordinates
+        batch_predictions = []
+        for result in results:
+            if hasattr(result, 'pred_instances') and hasattr(result.pred_instances, 'keypoints'):
+                keypoints = result.pred_instances.keypoints
+                if isinstance(keypoints, torch.Tensor):
+                    keypoints = keypoints.cpu().numpy()
+                
+                # Handle different keypoint formats
+                if keypoints.ndim == 3:  # [1, 19, 2]
+                    keypoints = keypoints[0]
+                elif keypoints.ndim == 2:  # [19, 2]
+                    pass
+                else:
+                    continue
+                
+                batch_predictions.append(keypoints)
+        
+        return np.array(batch_predictions) if batch_predictions else None
                 
     except Exception as e:
         print(f"Batch HRNet inference failed: {e}")

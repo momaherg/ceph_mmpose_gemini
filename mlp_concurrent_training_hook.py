@@ -370,8 +370,8 @@ class ConcurrentMLPTrainingHook(Hook):
         inference_start_time = time.time()
         
         train_dataset = runner.train_dataloader.dataset
-        logger.info(f'[ConcurrentMLPTrainingHook] 🚀 Generating predictions using TRUE batch inference...')
-        logger.info(f'[ConcurrentMLPTrainingHook] 📊 Batch size: {BATCH_SIZE} (simultaneous processing for maximum speed)')
+        logger.info(f'[ConcurrentMLPTrainingHook] 🚀 Generating predictions using proper MMPose batch inference...')
+        logger.info(f'[ConcurrentMLPTrainingHook] 📊 Batch size: {BATCH_SIZE} (using MMPose proper decoding pipeline)')
 
         def tensor_to_numpy(data):
             """Safely convert tensor to numpy, handling both tensor and numpy inputs."""
@@ -413,49 +413,82 @@ class ConcurrentMLPTrainingHook(Hook):
                 std = torch.tensor([58.395, 57.12, 57.375]).view(1, 3, 1, 1).to(self.device)
                 valid_images = (valid_images - mean) / std
                 
-                # Run TRUE batch inference using model directly (much faster!)
+                # Run batch inference using MMPose's proper pipeline
                 with torch.no_grad():
-                    # Get features from backbone
-                    if hasattr(model, 'extract_feat'):
-                        features = model.extract_feat(valid_images)
-                    else:
-                        # Fallback for wrapped models
-                        features = model.backbone(valid_images)
+                    # Use MMPose's proper batch inference with data samples
+                    from mmpose.structures import PoseDataSample
+                    from mmengine.structures import InstanceData
                     
-                    # Get predictions from head
-                    if hasattr(model, 'head'):
-                        head_outputs = model.head(features)
-                        
-                        # Extract heatmaps and convert to coordinates
-                        if isinstance(head_outputs, (list, tuple)):
-                            heatmaps = head_outputs[0]  # First output is usually heatmaps
+                    # Prepare data samples for batch inference
+                    data_samples = []
+                    inputs = []
+                    
+                    for img in valid_images:
+                        # Convert tensor to proper format
+                        if img.dim() == 3:  # CHW format
+                            inputs.append(img.cpu())
                         else:
-                            heatmaps = head_outputs
+                            inputs.append(img.cpu())
                         
-                        # Decode heatmaps to coordinates (simplified)
-                        batch_size, num_keypoints, heatmap_h, heatmap_w = heatmaps.shape
+                        # Create data sample with proper metadata
+                        data_sample = PoseDataSample()
+                        data_sample.set_metainfo({
+                            'img_shape': (224, 224),
+                            'ori_shape': (224, 224), 
+                            'input_size': (224, 224),
+                            'input_center': np.array([112.0, 112.0]),
+                            'input_scale': np.array([224.0, 224.0]),
+                            'flip_indices': list(range(19)),
+                        })
                         
-                        # Find max locations in heatmaps
-                        heatmaps_reshaped = heatmaps.view(batch_size, num_keypoints, -1)
-                        max_vals, max_indices = torch.max(heatmaps_reshaped, dim=2)
+                        # Add instance data for proper pipeline
+                        gt_instances = InstanceData()
+                        gt_instances.bboxes = torch.tensor([[0, 0, 224, 224]], dtype=torch.float32)
+                        gt_instances.bbox_scores = torch.tensor([1.0], dtype=torch.float32)
+                        data_sample.gt_instances = gt_instances
                         
-                        # Convert indices to coordinates
-                        max_indices_y = max_indices // heatmap_w
-                        max_indices_x = max_indices % heatmap_w
+                        data_samples.append(data_sample)
+                    
+                    # Convert to batch tensor
+                    inputs_batch = torch.stack(inputs).to(self.device)
+                    
+                    # Run batch inference using MMPose's proper pipeline
+                    try:
+                        if hasattr(model, 'predict'):
+                            results = model.predict(inputs_batch, data_samples)
+                        else:
+                            # Fallback to direct processing with proper codec
+                            results = model.test_step({'inputs': inputs_batch, 'data_samples': data_samples})
                         
-                        # Scale to original image size (assuming 224x224 input, 64x64 heatmap)
-                        scale_x = 224.0 / heatmap_w
-                        scale_y = 224.0 / heatmap_h
+                        # Extract coordinates
+                        for i, (result, gt_kpts) in enumerate(zip(results, valid_gts)):
+                            if hasattr(result, 'pred_instances') and hasattr(result.pred_instances, 'keypoints'):
+                                keypoints = result.pred_instances.keypoints
+                                if isinstance(keypoints, torch.Tensor):
+                                    keypoints = keypoints.cpu().numpy()
+                                
+                                # Handle different keypoint formats
+                                if keypoints.ndim == 3:  # [1, 19, 2]
+                                    keypoints = keypoints[0]
+                                elif keypoints.ndim == 2:  # [19, 2]
+                                    pass
+                                else:
+                                    continue
+                                
+                                if keypoints.shape[0] == 19:
+                                    pred_flat = keypoints.flatten()
+                                    gt_flat = gt_kpts.flatten()
+                                    landmark_errors = np.sqrt(np.sum((keypoints - gt_kpts)**2, axis=1))
+                                    
+                                    batch_preds.append(pred_flat)
+                                    batch_gts.append(gt_flat)
+                                    batch_errors.append(landmark_errors)
+                    
+                    except Exception as e:
+                        logger.warning(f'[ConcurrentMLPTrainingHook] Batch inference failed: {e}')
+                        logger.warning('[ConcurrentMLPTrainingHook] Falling back to individual inference')
                         
-                        pred_coords = torch.stack([
-                            max_indices_x.float() * scale_x,
-                            max_indices_y.float() * scale_y
-                        ], dim=-1)  # [batch_size, num_keypoints, 2]
-                        
-                        pred_coords = pred_coords.cpu().numpy()
-                    else:
-                        logger.warning('[ConcurrentMLPTrainingHook] Model has no head attribute, falling back to individual inference')
-                        # Fallback to individual processing if direct access fails
+                        # Fallback to individual processing if batch fails
                         for i, (img, gt_kpts) in enumerate(zip(valid_images.cpu().numpy(), valid_gts)):
                             try:
                                 bbox = np.array([[0, 0, 224, 224]], dtype=np.float32)
@@ -475,7 +508,6 @@ class ConcurrentMLPTrainingHook(Hook):
                                         batch_errors.append(landmark_errors)
                             except:
                                 continue
-                        return batch_preds, batch_gts, batch_errors
                 
                 # Process predictions and ground truths
                 for i, (pred_kpts, gt_kpts) in enumerate(zip(pred_coords, valid_gts)):
@@ -679,9 +711,9 @@ class ConcurrentMLPTrainingHook(Hook):
         inference_duration = inference_end_time - inference_start_time
         samples_per_second = len(all_preds) / inference_duration if inference_duration > 0 else 0
         
-        logger.info(f'[ConcurrentMLPTrainingHook] ⚡ TRUE batch inference completed!')
+        logger.info(f'[ConcurrentMLPTrainingHook] ⚡ Proper MMPose batch inference completed!')
         logger.info(f'[ConcurrentMLPTrainingHook] ✓ Processed {len(all_preds)} samples in {inference_duration:.2f}s ({samples_per_second:.1f} samples/sec)')
-        logger.info(f'[ConcurrentMLPTrainingHook] ✓ Batch size: {BATCH_SIZE} (TRUE simultaneous processing, not individual!)')
+        logger.info(f'[ConcurrentMLPTrainingHook] ✓ Batch size: {BATCH_SIZE} (using MMPose proper decoding pipeline)')
 
         # -----------------------------------------------------------------
         # Step 1.5: Compute hard-example weights
