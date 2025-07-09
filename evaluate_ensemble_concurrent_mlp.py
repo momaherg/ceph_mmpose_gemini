@@ -26,6 +26,144 @@ from typing import List, Dict, Tuple, Optional
 # Add current directory to path for custom modules
 sys.path.insert(0, os.getcwd())
 
+# Angle calculation functions
+def calculate_angle(p1: np.ndarray, p2: np.ndarray, p3: np.ndarray) -> float:
+    """Calculate angle at p2 between vectors p2->p1 and p2->p3 in degrees."""
+    v1 = p1 - p2
+    v2 = p3 - p2
+    
+    # Calculate angle using dot product
+    cos_angle = np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2))
+    cos_angle = np.clip(cos_angle, -1.0, 1.0)  # Handle numerical errors
+    angle_rad = np.arccos(cos_angle)
+    angle_deg = np.degrees(angle_rad)
+    
+    return angle_deg
+
+def ang(line1: List[np.ndarray], line2: List[np.ndarray]) -> float:
+    """Calculate angle between two lines defined by their endpoints."""
+    # Vector for line 1
+    v1 = line1[1] - line1[0]
+    # Vector for line 2
+    v2 = line2[1] - line2[0]
+    
+    # Calculate angle using dot product
+    cos_angle = np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2))
+    cos_angle = np.clip(cos_angle, -1.0, 1.0)
+    angle_rad = np.arccos(cos_angle)
+    angle_deg = np.degrees(angle_rad)
+    
+    return angle_deg
+
+def calculate_cephalometric_angles(coords: np.ndarray, landmark_names: List[str]) -> Dict[str, float]:
+    """Calculate cephalometric angles from landmark coordinates."""
+    # Create landmark index map
+    landmark_idx = {name: i for i, name in enumerate(landmark_names)}
+    
+    # Helper function to get landmark coordinates
+    def get_point(name: str) -> np.ndarray:
+        if name in landmark_idx:
+            return coords[landmark_idx[name]]
+        return np.array([0, 0])
+    
+    angles = {}
+    
+    # SNA angle
+    try:
+        s = get_point('sella')
+        n = get_point('nasion')
+        a = get_point('A_point')
+        if np.all(s > 0) and np.all(n > 0) and np.all(a > 0):
+            angles['SNA'] = 180 - ang([s, n], [n, a])
+        else:
+            angles['SNA'] = np.nan
+    except:
+        angles['SNA'] = np.nan
+    
+    # SNB angle
+    try:
+        s = get_point('sella')
+        n = get_point('nasion')
+        b = get_point('B_point')
+        if np.all(s > 0) and np.all(n > 0) and np.all(b > 0):
+            angles['SNB'] = 180 - ang([s, n], [n, b])
+        else:
+            angles['SNB'] = np.nan
+    except:
+        angles['SNB'] = np.nan
+    
+    # ANB angle
+    try:
+        a = get_point('A_point')
+        n = get_point('nasion')
+        b = get_point('B_point')
+        if np.all(a > 0) and np.all(n > 0) and np.all(b > 0):
+            if not np.isnan(angles.get('SNA', np.nan)) and not np.isnan(angles.get('SNB', np.nan)):
+                if angles['SNA'] - angles['SNB'] > 0:
+                    angles['ANB'] = 180 - ang([n, b], [a, n])
+                else:
+                    angles['ANB'] = -1 * (180 - ang([n, b], [a, n]))
+            else:
+                angles['ANB'] = np.nan
+        else:
+            angles['ANB'] = np.nan
+    except:
+        angles['ANB'] = np.nan
+    
+    # u1 angle (upper incisor to palatal plane)
+    try:
+        ans = get_point('ANS')
+        pns = get_point('PNS')
+        u_tip = get_point('upper_1_tip')
+        u_apex = get_point('upper_1_apex')
+        if np.all(ans > 0) and np.all(pns > 0) and np.all(u_tip > 0) and np.all(u_apex > 0):
+            angles['u1'] = 180 - ang([ans, pns], [u_tip, u_apex])
+        else:
+            angles['u1'] = np.nan
+    except:
+        angles['u1'] = np.nan
+    
+    # l1 angle (lower incisor to mandibular plane)
+    try:
+        go = get_point('Gonion')
+        mn = get_point('Menton')
+        l_tip = get_point('lower_1_tip')
+        l_apex = get_point('lower_1_apex')
+        if np.all(go > 0) and np.all(mn > 0) and np.all(l_tip > 0) and np.all(l_apex > 0):
+            angles['l1'] = 180 - ang([go, mn], [l_apex, l_tip])
+        else:
+            angles['l1'] = np.nan
+    except:
+        angles['l1'] = np.nan
+    
+    # SN-ANS/PNS angle (palatal plane to cranial base)
+    try:
+        ans = get_point('ANS')
+        pns = get_point('PNS')
+        s = get_point('sella')
+        n = get_point('nasion')
+        if np.all(ans > 0) and np.all(pns > 0) and np.all(s > 0) and np.all(n > 0):
+            angles['sn_ans_pns'] = 180 - ang([s, n], [ans, pns])
+        else:
+            angles['sn_ans_pns'] = np.nan
+    except:
+        angles['sn_ans_pns'] = np.nan
+    
+    # SN-Go/Mn angle (mandibular plane to cranial base)
+    try:
+        go = get_point('Gonion')
+        mn = get_point('Menton')
+        s = get_point('sella')
+        n = get_point('nasion')
+        if np.all(go > 0) and np.all(mn > 0) and np.all(s > 0) and np.all(n > 0):
+            angles['sn_mn_go'] = ang([s, n], [go, mn])
+        else:
+            angles['sn_mn_go'] = np.nan
+    except:
+        angles['sn_mn_go'] = np.nan
+    
+    return angles
+
 # Suppress warnings
 warnings.filterwarnings('ignore')
 
@@ -618,6 +756,279 @@ def save_all_models_combined(all_hrnet_preds: List[np.ndarray], all_mlp_preds: L
         print(f"   - Mean prediction std across models: {np.mean(model_stds):.3f} pixels")
         print(f"   - Max prediction std across models: {np.max(model_stds):.3f} pixels")
         print(f"   - Models show {'good' if np.mean(model_stds) > 0.5 else 'limited'} diversity")
+
+def save_angle_predictions_to_csv(ensemble_hrnet: np.ndarray, ensemble_mlp: np.ndarray,
+                                 all_hrnet_preds: List[np.ndarray], all_mlp_preds: List[np.ndarray],
+                                 gt_coords: np.ndarray, patient_ids: List[int],
+                                 landmark_names: List[str], output_dir: str):
+    """Save cephalometric angle calculations and errors to CSV files."""
+    print(f"\n📐 Calculating and saving cephalometric angles...")
+    
+    # Prepare data for angle CSV files
+    ensemble_angle_data = []
+    individual_angle_data = []
+    angle_names = ['SNA', 'SNB', 'ANB', 'u1', 'l1', 'sn_ans_pns', 'sn_mn_go']
+    
+    # Process each patient
+    for i, patient_id in enumerate(patient_ids):
+        # Calculate ground truth angles
+        gt_angles = calculate_cephalometric_angles(gt_coords[i], landmark_names)
+        
+        # Calculate ensemble predictions angles
+        ensemble_hrnet_angles = calculate_cephalometric_angles(ensemble_hrnet[i], landmark_names)
+        ensemble_mlp_angles = calculate_cephalometric_angles(ensemble_mlp[i], landmark_names)
+        
+        # Prepare ensemble angle row
+        ensemble_row = {'patient_id': patient_id}
+        
+        # Add ground truth and predictions for each angle
+        for angle_name in angle_names:
+            # Ground truth
+            gt_angle = gt_angles.get(angle_name, np.nan)
+            ensemble_row[f'gt_{angle_name}'] = gt_angle
+            
+            # Ensemble HRNetV2
+            hrnet_angle = ensemble_hrnet_angles.get(angle_name, np.nan)
+            hrnet_error = abs(hrnet_angle - gt_angle) if not np.isnan(gt_angle) and not np.isnan(hrnet_angle) else np.nan
+            ensemble_row[f'ensemble_hrnetv2_{angle_name}'] = hrnet_angle
+            ensemble_row[f'ensemble_hrnetv2_{angle_name}_error'] = hrnet_error
+            
+            # Ensemble MLP
+            mlp_angle = ensemble_mlp_angles.get(angle_name, np.nan)
+            mlp_error = abs(mlp_angle - gt_angle) if not np.isnan(gt_angle) and not np.isnan(mlp_angle) else np.nan
+            ensemble_row[f'ensemble_mlp_{angle_name}'] = mlp_angle
+            ensemble_row[f'ensemble_mlp_{angle_name}_error'] = mlp_error
+        
+        ensemble_angle_data.append(ensemble_row)
+        
+        # Calculate individual model angles
+        individual_row = {'patient_id': patient_id}
+        
+        # Add ground truth angles
+        for angle_name in angle_names:
+            individual_row[f'gt_{angle_name}'] = gt_angles.get(angle_name, np.nan)
+        
+        # Add individual model predictions
+        for model_idx in range(len(all_hrnet_preds)):
+            # HRNet model angles
+            model_hrnet_angles = calculate_cephalometric_angles(all_hrnet_preds[model_idx][i], landmark_names)
+            model_mlp_angles = calculate_cephalometric_angles(all_mlp_preds[model_idx][i], landmark_names)
+            
+            for angle_name in angle_names:
+                gt_angle = gt_angles.get(angle_name, np.nan)
+                
+                # HRNet model
+                hrnet_angle = model_hrnet_angles.get(angle_name, np.nan)
+                hrnet_error = abs(hrnet_angle - gt_angle) if not np.isnan(gt_angle) and not np.isnan(hrnet_angle) else np.nan
+                individual_row[f'model{model_idx+1}_hrnetv2_{angle_name}'] = hrnet_angle
+                individual_row[f'model{model_idx+1}_hrnetv2_{angle_name}_error'] = hrnet_error
+                
+                # MLP model
+                mlp_angle = model_mlp_angles.get(angle_name, np.nan)
+                mlp_error = abs(mlp_angle - gt_angle) if not np.isnan(gt_angle) and not np.isnan(mlp_angle) else np.nan
+                individual_row[f'model{model_idx+1}_mlp_{angle_name}'] = mlp_angle
+                individual_row[f'model{model_idx+1}_mlp_{angle_name}_error'] = mlp_error
+        
+        # Add ensemble angles at the end
+        for angle_name in angle_names:
+            individual_row[f'ensemble_hrnetv2_{angle_name}'] = ensemble_hrnet_angles.get(angle_name, np.nan)
+            individual_row[f'ensemble_hrnetv2_{angle_name}_error'] = ensemble_row[f'ensemble_hrnetv2_{angle_name}_error']
+            individual_row[f'ensemble_mlp_{angle_name}'] = ensemble_mlp_angles.get(angle_name, np.nan)
+            individual_row[f'ensemble_mlp_{angle_name}_error'] = ensemble_row[f'ensemble_mlp_{angle_name}_error']
+        
+        individual_angle_data.append(individual_row)
+    
+    # Create DataFrames and save to CSV
+    ensemble_angle_df = pd.DataFrame(ensemble_angle_data)
+    individual_angle_df = pd.DataFrame(individual_angle_data)
+    
+    # Save files
+    ensemble_angle_csv_path = os.path.join(output_dir, "ensemble_angle_predictions.csv")
+    individual_angle_csv_path = os.path.join(output_dir, "all_models_angle_predictions.csv")
+    
+    ensemble_angle_df.to_csv(ensemble_angle_csv_path, index=False)
+    individual_angle_df.to_csv(individual_angle_csv_path, index=False)
+    
+    print(f"   ✓ Ensemble angle predictions saved to: {os.path.basename(ensemble_angle_csv_path)}")
+    print(f"   ✓ All models angle predictions saved to: {os.path.basename(individual_angle_csv_path)}")
+    
+    # Calculate and print angle error statistics
+    print(f"\n📊 Angle Error Statistics:")
+    print(f"{'Angle':<15} {'GT Mean':<12} {'Ensemble MLP MAE':<20} {'Ensemble HRNet MAE':<20} {'Improvement':<15}")
+    print("-" * 85)
+    
+    for angle_name in angle_names:
+        # Get ground truth values
+        gt_values = ensemble_angle_df[f'gt_{angle_name}'].dropna()
+        
+        if len(gt_values) > 0:
+            gt_mean = gt_values.mean()
+            
+            # Get ensemble errors
+            mlp_errors = ensemble_angle_df[f'ensemble_mlp_{angle_name}_error'].dropna()
+            hrnet_errors = ensemble_angle_df[f'ensemble_hrnetv2_{angle_name}_error'].dropna()
+            
+            if len(mlp_errors) > 0 and len(hrnet_errors) > 0:
+                mlp_mae = mlp_errors.mean()
+                hrnet_mae = hrnet_errors.mean()
+                improvement = (hrnet_mae - mlp_mae) / hrnet_mae * 100 if hrnet_mae > 0 else 0
+                
+                print(f"{angle_name:<15} {gt_mean:<12.1f} {mlp_mae:<20.2f} {hrnet_mae:<20.2f} {improvement:<15.1f}%")
+    
+    # Create angle error visualization
+    create_angle_error_visualization(ensemble_angle_df, angle_names, output_dir)
+
+def create_angle_error_visualization(angle_df: pd.DataFrame, angle_names: List[str], output_dir: str):
+    """Create visualization of angle errors."""
+    fig, axes = plt.subplots(2, 2, figsize=(15, 12))
+    
+    # Plot 1: Average angle errors comparison
+    ax = axes[0, 0]
+    
+    mlp_errors = []
+    hrnet_errors = []
+    
+    for angle_name in angle_names:
+        mlp_err = angle_df[f'ensemble_mlp_{angle_name}_error'].dropna().mean()
+        hrnet_err = angle_df[f'ensemble_hrnetv2_{angle_name}_error'].dropna().mean()
+        mlp_errors.append(mlp_err)
+        hrnet_errors.append(hrnet_err)
+    
+    x = np.arange(len(angle_names))
+    width = 0.35
+    
+    bars1 = ax.bar(x - width/2, hrnet_errors, width, label='Ensemble HRNetV2', color='blue', alpha=0.7)
+    bars2 = ax.bar(x + width/2, mlp_errors, width, label='Ensemble MLP', color='red', alpha=0.7)
+    
+    ax.set_xlabel('Angle')
+    ax.set_ylabel('Mean Absolute Error (degrees)')
+    ax.set_title('Cephalometric Angle Errors')
+    ax.set_xticks(x)
+    ax.set_xticklabels(angle_names)
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    
+    # Add improvement percentage on top
+    for i, (h_err, m_err) in enumerate(zip(hrnet_errors, mlp_errors)):
+        if h_err > 0:
+            improvement = (h_err - m_err) / h_err * 100
+            color = 'green' if improvement > 0 else 'red'
+            ax.text(i, max(h_err, m_err) + 0.1, f'{improvement:+.0f}%', 
+                   ha='center', va='bottom', fontsize=8, color=color)
+    
+    # Plot 2: Error distribution for each angle
+    ax = axes[0, 1]
+    
+    # Box plot of errors
+    mlp_error_data = []
+    hrnet_error_data = []
+    labels = []
+    
+    for angle_name in angle_names:
+        mlp_err = angle_df[f'ensemble_mlp_{angle_name}_error'].dropna()
+        hrnet_err = angle_df[f'ensemble_hrnetv2_{angle_name}_error'].dropna()
+        
+        if len(mlp_err) > 0:
+            mlp_error_data.append(mlp_err)
+            hrnet_error_data.append(hrnet_err)
+            labels.append(angle_name)
+    
+    positions = np.arange(len(labels))
+    bp1 = ax.boxplot(hrnet_error_data, positions=positions - 0.2, widths=0.35, 
+                     patch_artist=True, boxprops=dict(facecolor='lightblue'))
+    bp2 = ax.boxplot(mlp_error_data, positions=positions + 0.2, widths=0.35, 
+                     patch_artist=True, boxprops=dict(facecolor='lightcoral'))
+    
+    ax.set_xlabel('Angle')
+    ax.set_ylabel('Error Distribution (degrees)')
+    ax.set_title('Angle Error Distributions')
+    ax.set_xticks(positions)
+    ax.set_xticklabels(labels)
+    ax.legend([bp1["boxes"][0], bp2["boxes"][0]], ['Ensemble HRNetV2', 'Ensemble MLP'])
+    ax.grid(True, alpha=0.3)
+    
+    # Plot 3: Patient-wise angle errors
+    ax = axes[1, 0]
+    
+    # Calculate total angle error per patient
+    patient_mlp_errors = []
+    patient_hrnet_errors = []
+    
+    for _, row in angle_df.iterrows():
+        mlp_total = 0
+        hrnet_total = 0
+        count = 0
+        
+        for angle_name in angle_names:
+            mlp_err = row[f'ensemble_mlp_{angle_name}_error']
+            hrnet_err = row[f'ensemble_hrnetv2_{angle_name}_error']
+            
+            if not np.isnan(mlp_err) and not np.isnan(hrnet_err):
+                mlp_total += mlp_err
+                hrnet_total += hrnet_err
+                count += 1
+        
+        if count > 0:
+            patient_mlp_errors.append(mlp_total / count)
+            patient_hrnet_errors.append(hrnet_total / count)
+    
+    ax.scatter(patient_hrnet_errors, patient_mlp_errors, alpha=0.6, color='purple')
+    
+    # Add diagonal line
+    max_error = max(max(patient_hrnet_errors), max(patient_mlp_errors))
+    ax.plot([0, max_error], [0, max_error], 'k--', alpha=0.5, label='Equal error line')
+    
+    # Add improvement region
+    ax.fill_between([0, max_error], [0, max_error], [0, 0], alpha=0.1, color='green', 
+                    label='MLP improvement region')
+    
+    ax.set_xlabel('Ensemble HRNetV2 Average Angle Error (degrees)')
+    ax.set_ylabel('Ensemble MLP Average Angle Error (degrees)')
+    ax.set_title('Patient-wise Angle Error Comparison')
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    
+    # Plot 4: Angle importance (by error magnitude)
+    ax = axes[1, 1]
+    
+    # Sort angles by average error
+    angle_importance = []
+    for i, angle_name in enumerate(angle_names):
+        avg_error = (mlp_errors[i] + hrnet_errors[i]) / 2
+        improvement = (hrnet_errors[i] - mlp_errors[i]) / hrnet_errors[i] * 100 if hrnet_errors[i] > 0 else 0
+        angle_importance.append((angle_name, avg_error, improvement))
+    
+    angle_importance.sort(key=lambda x: x[1], reverse=True)
+    
+    sorted_names = [x[0] for x in angle_importance]
+    sorted_errors = [x[1] for x in angle_importance]
+    sorted_improvements = [x[2] for x in angle_importance]
+    
+    bars = ax.barh(range(len(sorted_names)), sorted_errors, color='gray', alpha=0.7)
+    
+    # Color bars by improvement
+    for i, (bar, imp) in enumerate(zip(bars, sorted_improvements)):
+        if imp > 10:
+            bar.set_color('green')
+            bar.set_alpha(0.7)
+        elif imp < -5:
+            bar.set_color('red')
+            bar.set_alpha(0.7)
+    
+    ax.set_yticks(range(len(sorted_names)))
+    ax.set_yticklabels(sorted_names)
+    ax.set_xlabel('Average Error (degrees)')
+    ax.set_title('Angle Measurement Difficulty\n(Green: MLP improves >10%, Red: MLP worse)')
+    ax.grid(True, alpha=0.3, axis='x')
+    
+    plt.suptitle('Cephalometric Angle Analysis', fontsize=16, fontweight='bold')
+    plt.tight_layout()
+    
+    output_path = os.path.join(output_dir, 'angle_error_analysis.png')
+    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    
+    print(f"   ✓ Angle error visualization saved to: {os.path.basename(output_path)}")
 
 def calculate_per_patient_errors(pred_coords: np.ndarray, gt_coords: np.ndarray, patient_ids: List[int]) -> List[Tuple[int, float]]:
     """Calculate average error per patient and return sorted list of (patient_id, error)."""
@@ -1290,6 +1701,9 @@ def main():
     # Save all models combined
     save_all_models_combined(all_hrnet_preds, all_mlp_preds, ensemble_hrnet, ensemble_mlp, all_gt, all_patient_ids, landmark_names, output_dir)
     
+    # Save angle predictions
+    save_angle_predictions_to_csv(ensemble_hrnet, ensemble_mlp, all_hrnet_preds, all_mlp_preds, all_gt, all_patient_ids, landmark_names, output_dir)
+    
     # Create patient visualizations
     create_patient_visualizations(ensemble_hrnet, ensemble_mlp, all_hrnet_preds, all_mlp_preds, all_gt, all_patient_ids, test_df, landmark_names, output_dir)
 
@@ -1319,6 +1733,11 @@ def main():
     print(f"   - Worst 3 patients: worst_1_patient_*.png ... worst_3_patient_*.png")
     print(f"   - Performance summary: performance_summary.png")
     print(f"   Location: {os.path.join('ensemble_evaluation', 'patient_visualizations')}")
+    
+    print(f"\n📐 Cephalometric Angle Files:")
+    print(f"   - Ensemble angles: ensemble_angle_predictions.csv")
+    print(f"   - All models angles: all_models_angle_predictions.csv")
+    print(f"   - Angle error analysis: angle_error_analysis.png")
     
     # Quick summary
     ensemble_mre = ensemble_mlp_overall['mre']
