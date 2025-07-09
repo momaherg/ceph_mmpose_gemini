@@ -22,9 +22,58 @@ import matplotlib.patches as mpatches
 from sklearn.preprocessing import StandardScaler
 import joblib
 from typing import List, Dict, Tuple, Optional
+import json
 
 # Add current directory to path for custom modules
 sys.path.insert(0, os.getcwd())
+
+# Calibration constants
+RULER_LENGTH_MM = 10.0  # Standard cephalometric ruler length in mm
+
+def load_ruler_calibration_data(ruler_data_path: str) -> Dict[str, Dict]:
+    """Load ruler calibration data from JSON file."""
+    try:
+        with open(ruler_data_path, 'r') as f:
+            ruler_data = json.load(f)
+        print(f"✓ Loaded ruler calibration data for {len(ruler_data)} patients")
+        return ruler_data
+    except Exception as e:
+        print(f"⚠️  Failed to load ruler calibration data: {e}")
+        return {}
+
+def calculate_pixel_to_mm_ratio(ruler_data: Dict[str, Dict], patient_id: int) -> Optional[float]:
+    """Calculate the pixel to mm conversion ratio for a specific patient."""
+    patient_key = str(patient_id)
+    
+    if patient_key not in ruler_data:
+        return None
+    
+    patient_ruler = ruler_data[patient_key]
+    
+    # Check if ruler points are valid
+    if (patient_ruler.get('ruler_point_up_x') is None or 
+        patient_ruler.get('ruler_point_up_y') is None or
+        patient_ruler.get('ruler_point_down_x') is None or 
+        patient_ruler.get('ruler_point_down_y') is None):
+        return None
+    
+    # Calculate pixel distance between ruler points (in 600x600 space)
+    ruler_pixel_distance = np.sqrt(
+        (patient_ruler['ruler_point_down_x'] - patient_ruler['ruler_point_up_x'])**2 +
+        (patient_ruler['ruler_point_down_y'] - patient_ruler['ruler_point_up_y'])**2
+    )
+    
+    if ruler_pixel_distance == 0:
+        return None
+    
+    # Calculate mm per pixel ratio
+    mm_per_pixel_600 = RULER_LENGTH_MM / ruler_pixel_distance
+    
+    return mm_per_pixel_600
+
+def convert_errors_to_mm(errors_pixels: np.ndarray, mm_per_pixel: float) -> np.ndarray:
+    """Convert pixel errors to millimeter errors."""
+    return errors_pixels * mm_per_pixel
 
 # Angle calculation functions
 def calculate_angle(p1: np.ndarray, p2: np.ndarray, p3: np.ndarray) -> float:
@@ -653,6 +702,59 @@ def compute_metrics(pred_coords, gt_coords, landmark_names) -> Tuple[Dict, Dict]
     
     return overall_metrics, per_landmark_metrics
 
+def compute_metrics_with_mm(pred_coords, gt_coords, landmark_names, patient_ids, ruler_data) -> Tuple[Dict, Dict]:
+    """Compute evaluation metrics including mm conversions when calibration is available."""
+    # First compute pixel-based metrics
+    overall_metrics, per_landmark_metrics = compute_metrics(pred_coords, gt_coords, landmark_names)
+    
+    # Add mm conversions if ruler data is available
+    if ruler_data and len(patient_ids) > 0:
+        # Compute per-patient mm errors
+        all_mm_errors = []
+        calibrated_patients = 0
+        
+        for i, patient_id in enumerate(patient_ids):
+            mm_per_pixel_600 = calculate_pixel_to_mm_ratio(ruler_data, patient_id)
+            if mm_per_pixel_600:
+                mm_per_pixel_224 = mm_per_pixel_600 * (224.0 / 600.0)
+                calibrated_patients += 1
+                
+                # Convert patient errors to mm
+                valid_mask = (gt_coords[i, :, 0] > 0) & (gt_coords[i, :, 1] > 0)
+                if np.any(valid_mask):
+                    pixel_errors = np.sqrt(np.sum((pred_coords[i, valid_mask] - gt_coords[i, valid_mask])**2, axis=1))
+                    mm_errors = pixel_errors * mm_per_pixel_224
+                    all_mm_errors.extend(mm_errors)
+        
+        # Add mm statistics to overall metrics
+        if all_mm_errors:
+            overall_metrics['mre_mm'] = np.mean(all_mm_errors)
+            overall_metrics['std_mm'] = np.std(all_mm_errors)
+            overall_metrics['median_mm'] = np.median(all_mm_errors)
+            overall_metrics['p90_mm'] = np.percentile(all_mm_errors, 90)
+            overall_metrics['p95_mm'] = np.percentile(all_mm_errors, 95)
+            overall_metrics['max_mm'] = np.max(all_mm_errors)
+            overall_metrics['calibrated_patients'] = calibrated_patients
+            
+            # Add per-landmark mm metrics
+            for j, name in enumerate(landmark_names):
+                landmark_mm_errors = []
+                for i, patient_id in enumerate(patient_ids):
+                    mm_per_pixel_600 = calculate_pixel_to_mm_ratio(ruler_data, patient_id)
+                    if mm_per_pixel_600:
+                        mm_per_pixel_224 = mm_per_pixel_600 * (224.0 / 600.0)
+                        if gt_coords[i, j, 0] > 0 and gt_coords[i, j, 1] > 0:
+                            pixel_error = np.sqrt(np.sum((pred_coords[i, j] - gt_coords[i, j])**2))
+                            mm_error = pixel_error * mm_per_pixel_224
+                            landmark_mm_errors.append(mm_error)
+                
+                if landmark_mm_errors:
+                    per_landmark_metrics[name]['mre_mm'] = np.mean(landmark_mm_errors)
+                    per_landmark_metrics[name]['std_mm'] = np.std(landmark_mm_errors)
+                    per_landmark_metrics[name]['median_mm'] = np.median(landmark_mm_errors)
+    
+    return overall_metrics, per_landmark_metrics
+
 def create_ensemble_predictions(all_hrnet_preds: List[np.ndarray], 
                               all_mlp_preds: List[np.ndarray]) -> Tuple[np.ndarray, np.ndarray]:
     """Create ensemble predictions by averaging individual model predictions."""
@@ -670,7 +772,8 @@ def create_ensemble_predictions(all_hrnet_preds: List[np.ndarray],
 
 def save_ensemble_predictions_to_csv(ensemble_hrnet: np.ndarray, ensemble_mlp: np.ndarray,
                                    gt_coords: np.ndarray, patient_ids: List[int],
-                                   landmark_names: List[str], output_dir: str):
+                                   landmark_names: List[str], output_dir: str,
+                                   ruler_data: Optional[Dict[str, Dict]] = None):
     """Save ensemble predictions to CSV files with detailed per-landmark information."""
     print(f"\n💾 Saving detailed predictions to CSV...")
     
@@ -678,9 +781,24 @@ def save_ensemble_predictions_to_csv(ensemble_hrnet: np.ndarray, ensemble_mlp: n
     mlp_data = []
     hrnet_data = []
     
+    # Statistics for mm conversions
+    mm_conversion_count = 0
+    missing_calibration_count = 0
+    
     for i, patient_id in enumerate(patient_ids):
         mlp_row = {'patient_id': patient_id}
         hrnet_row = {'patient_id': patient_id}
+        
+        # Calculate pixel to mm ratio for this patient
+        mm_per_pixel_600 = None
+        mm_per_pixel_224 = None
+        if ruler_data:
+            mm_per_pixel_600 = calculate_pixel_to_mm_ratio(ruler_data, patient_id)
+            if mm_per_pixel_600:
+                mm_per_pixel_224 = mm_per_pixel_600 * (224.0 / 600.0)
+                mm_conversion_count += 1
+            else:
+                missing_calibration_count += 1
         
         # Add ground truth and predictions for each landmark
         for j, landmark in enumerate(landmark_names):
@@ -710,6 +828,12 @@ def save_ensemble_predictions_to_csv(ensemble_hrnet: np.ndarray, ensemble_mlp: n
             mlp_row[f'ensemble_mlp_{landmark}_error_224px'] = mlp_error_224
             mlp_row[f'ensemble_mlp_{landmark}_error_600px'] = mlp_error_600
             
+            # Add mm errors if calibration is available
+            if mm_per_pixel_224 and mm_per_pixel_600:
+                mlp_error_224_mm = mlp_error_224 * mm_per_pixel_224 if not np.isnan(mlp_error_224) else np.nan
+                mlp_error_600_mm = mlp_error_600 * mm_per_pixel_600 if not np.isnan(mlp_error_600) else np.nan
+                mlp_row[f'ensemble_mlp_{landmark}_error_mm'] = mlp_error_600_mm
+            
             # Ensemble HRNet predictions (scale to original 600x600)
             hrnet_x = ensemble_hrnet[i, j, 0]
             hrnet_y = ensemble_hrnet[i, j, 1]
@@ -724,6 +848,12 @@ def save_ensemble_predictions_to_csv(ensemble_hrnet: np.ndarray, ensemble_mlp: n
             hrnet_row[f'ensemble_hrnetv2_{landmark}_y'] = hrnet_y_scaled
             hrnet_row[f'ensemble_hrnetv2_{landmark}_error_224px'] = hrnet_error_224
             hrnet_row[f'ensemble_hrnetv2_{landmark}_error_600px'] = hrnet_error_600
+            
+            # Add mm errors if calibration is available
+            if mm_per_pixel_224 and mm_per_pixel_600:
+                hrnet_error_224_mm = hrnet_error_224 * mm_per_pixel_224 if not np.isnan(hrnet_error_224) else np.nan
+                hrnet_error_600_mm = hrnet_error_600 * mm_per_pixel_600 if not np.isnan(hrnet_error_600) else np.nan
+                hrnet_row[f'ensemble_hrnetv2_{landmark}_error_mm'] = hrnet_error_600_mm
         
         mlp_data.append(mlp_row)
         hrnet_data.append(hrnet_row)
@@ -746,27 +876,43 @@ def save_ensemble_predictions_to_csv(ensemble_hrnet: np.ndarray, ensemble_mlp: n
     print(f"\n📊 Summary:")
     print(f"   - Total patients: {len(patient_ids)}")
     print(f"   - Total landmarks per patient: {len(landmark_names)}")
+    if ruler_data:
+        print(f"   - Patients with mm calibration: {mm_conversion_count}/{len(patient_ids)}")
+        if missing_calibration_count > 0:
+            print(f"   - Patients missing calibration: {missing_calibration_count}")
     
     # Calculate overall mean errors
-    mlp_errors = []
-    hrnet_errors = []
+    mlp_errors_600 = []
+    hrnet_errors_600 = []
+    mlp_errors_mm = []
+    hrnet_errors_mm = []
     
     for col in mlp_df.columns:
-        if col.endswith('_error'):
-            mlp_errors.extend(mlp_df[col].dropna().values)
+        if col.endswith('_error_600px'):
+            mlp_errors_600.extend(mlp_df[col].dropna().values)
+        elif col.endswith('_error_mm'):
+            mlp_errors_mm.extend(mlp_df[col].dropna().values)
     
     for col in hrnet_df.columns:
-        if col.endswith('_error'):
-            hrnet_errors.extend(hrnet_df[col].dropna().values)
+        if col.endswith('_error_600px'):
+            hrnet_errors_600.extend(hrnet_df[col].dropna().values)
+        elif col.endswith('_error_mm'):
+            hrnet_errors_mm.extend(hrnet_df[col].dropna().values)
     
-    if mlp_errors:
-        print(f"   - Ensemble MLP mean error: {np.mean(mlp_errors):.3f} pixels")
-    if hrnet_errors:
-        print(f"   - Ensemble HRNetV2 mean error: {np.mean(hrnet_errors):.3f} pixels")
+    if mlp_errors_600:
+        print(f"   - Ensemble MLP mean error: {np.mean(mlp_errors_600):.3f} pixels (600x600)")
+    if hrnet_errors_600:
+        print(f"   - Ensemble HRNetV2 mean error: {np.mean(hrnet_errors_600):.3f} pixels (600x600)")
+    
+    if mlp_errors_mm:
+        print(f"   - Ensemble MLP mean error: {np.mean(mlp_errors_mm):.3f} mm")
+    if hrnet_errors_mm:
+        print(f"   - Ensemble HRNetV2 mean error: {np.mean(hrnet_errors_mm):.3f} mm")
 
 def save_individual_model_predictions(model_idx: int, hrnet_preds: np.ndarray, mlp_preds: np.ndarray,
                                     gt_coords: np.ndarray, patient_ids: List[int],
-                                    landmark_names: List[str], output_dir: str):
+                                    landmark_names: List[str], output_dir: str,
+                                    ruler_data: Optional[Dict[str, Dict]] = None):
     """Save individual model predictions to CSV files."""
     print(f"   💾 Saving Model {model_idx} predictions...")
     
@@ -777,6 +923,14 @@ def save_individual_model_predictions(model_idx: int, hrnet_preds: np.ndarray, m
     for i, patient_id in enumerate(patient_ids):
         mlp_row = {'patient_id': patient_id}
         hrnet_row = {'patient_id': patient_id}
+        
+        # Calculate pixel to mm ratio for this patient
+        mm_per_pixel_600 = None
+        mm_per_pixel_224 = None
+        if ruler_data:
+            mm_per_pixel_600 = calculate_pixel_to_mm_ratio(ruler_data, patient_id)
+            if mm_per_pixel_600:
+                mm_per_pixel_224 = mm_per_pixel_600 * (224.0 / 600.0)
         
         # Add ground truth and predictions for each landmark
         for j, landmark in enumerate(landmark_names):
@@ -806,6 +960,11 @@ def save_individual_model_predictions(model_idx: int, hrnet_preds: np.ndarray, m
             mlp_row[f'model{model_idx}_mlp_{landmark}_error_224px'] = mlp_error_224
             mlp_row[f'model{model_idx}_mlp_{landmark}_error_600px'] = mlp_error_600
             
+            # Add mm errors if calibration is available
+            if mm_per_pixel_224 and mm_per_pixel_600:
+                mlp_error_mm = mlp_error_600 * mm_per_pixel_600 if not np.isnan(mlp_error_600) else np.nan
+                mlp_row[f'model{model_idx}_mlp_{landmark}_error_mm'] = mlp_error_mm
+            
             # Model HRNet predictions (scale to original 600x600)
             hrnet_x = hrnet_preds[i, j, 0]
             hrnet_y = hrnet_preds[i, j, 1]
@@ -820,6 +979,11 @@ def save_individual_model_predictions(model_idx: int, hrnet_preds: np.ndarray, m
             hrnet_row[f'model{model_idx}_hrnetv2_{landmark}_y'] = hrnet_y_scaled
             hrnet_row[f'model{model_idx}_hrnetv2_{landmark}_error_224px'] = hrnet_error_224
             hrnet_row[f'model{model_idx}_hrnetv2_{landmark}_error_600px'] = hrnet_error_600
+            
+            # Add mm errors if calibration is available
+            if mm_per_pixel_224 and mm_per_pixel_600:
+                hrnet_error_mm = hrnet_error_600 * mm_per_pixel_600 if not np.isnan(hrnet_error_600) else np.nan
+                hrnet_row[f'model{model_idx}_hrnetv2_{landmark}_error_mm'] = hrnet_error_mm
         
         mlp_data.append(mlp_row)
         hrnet_data.append(hrnet_row)
@@ -841,7 +1005,8 @@ def save_individual_model_predictions(model_idx: int, hrnet_preds: np.ndarray, m
 def save_all_models_combined(all_hrnet_preds: List[np.ndarray], all_mlp_preds: List[np.ndarray],
                            ensemble_hrnet: np.ndarray, ensemble_mlp: np.ndarray,
                            gt_coords: np.ndarray, patient_ids: List[int],
-                           landmark_names: List[str], output_dir: str):
+                           landmark_names: List[str], output_dir: str,
+                           ruler_data: Optional[Dict[str, Dict]] = None):
     """Save all models and ensemble predictions in combined CSV files."""
     print(f"\n💾 Creating combined prediction files...")
     
@@ -852,6 +1017,14 @@ def save_all_models_combined(all_hrnet_preds: List[np.ndarray], all_mlp_preds: L
     for i, patient_id in enumerate(patient_ids):
         mlp_row = {'patient_id': patient_id}
         hrnet_row = {'patient_id': patient_id}
+        
+        # Calculate pixel to mm ratio for this patient
+        mm_per_pixel_600 = None
+        mm_per_pixel_224 = None
+        if ruler_data:
+            mm_per_pixel_600 = calculate_pixel_to_mm_ratio(ruler_data, patient_id)
+            if mm_per_pixel_600:
+                mm_per_pixel_224 = mm_per_pixel_600 * (224.0 / 600.0)
         
         # For each landmark
         for j, landmark in enumerate(landmark_names):
@@ -882,6 +1055,11 @@ def save_all_models_combined(all_hrnet_preds: List[np.ndarray], all_mlp_preds: L
                 mlp_row[f'model{model_idx+1}_mlp_{landmark}_error_224px'] = mlp_error_224
                 mlp_row[f'model{model_idx+1}_mlp_{landmark}_error_600px'] = mlp_error_600
                 
+                # Add mm error if calibration is available
+                if mm_per_pixel_600:
+                    mlp_error_mm = mlp_error_600 * mm_per_pixel_600 if not np.isnan(mlp_error_600) else np.nan
+                    mlp_row[f'model{model_idx+1}_mlp_{landmark}_error_mm'] = mlp_error_mm
+                
                 # HRNet predictions (scale to original 600x600)
                 hrnet_x = all_hrnet_preds[model_idx][i, j, 0]
                 hrnet_y = all_hrnet_preds[model_idx][i, j, 1]
@@ -895,6 +1073,11 @@ def save_all_models_combined(all_hrnet_preds: List[np.ndarray], all_mlp_preds: L
                 hrnet_row[f'model{model_idx+1}_hrnetv2_{landmark}_y'] = hrnet_y_scaled
                 hrnet_row[f'model{model_idx+1}_hrnetv2_{landmark}_error_224px'] = hrnet_error_224
                 hrnet_row[f'model{model_idx+1}_hrnetv2_{landmark}_error_600px'] = hrnet_error_600
+                
+                # Add mm error if calibration is available
+                if mm_per_pixel_600:
+                    hrnet_error_mm = hrnet_error_600 * mm_per_pixel_600 if not np.isnan(hrnet_error_600) else np.nan
+                    hrnet_row[f'model{model_idx+1}_hrnetv2_{landmark}_error_mm'] = hrnet_error_mm
             
             # Ensemble predictions (scale to original 600x600)
             # MLP ensemble
@@ -911,6 +1094,11 @@ def save_all_models_combined(all_hrnet_preds: List[np.ndarray], all_mlp_preds: L
             mlp_row[f'ensemble_mlp_{landmark}_error_224px'] = ens_mlp_error_224
             mlp_row[f'ensemble_mlp_{landmark}_error_600px'] = ens_mlp_error_600
             
+            # Add mm error if calibration is available
+            if mm_per_pixel_600:
+                ens_mlp_error_mm = ens_mlp_error_600 * mm_per_pixel_600 if not np.isnan(ens_mlp_error_600) else np.nan
+                mlp_row[f'ensemble_mlp_{landmark}_error_mm'] = ens_mlp_error_mm
+            
             # HRNet ensemble
             ens_hrnet_x = ensemble_hrnet[i, j, 0]
             ens_hrnet_y = ensemble_hrnet[i, j, 1]
@@ -924,6 +1112,11 @@ def save_all_models_combined(all_hrnet_preds: List[np.ndarray], all_mlp_preds: L
             hrnet_row[f'ensemble_hrnetv2_{landmark}_y'] = ens_hrnet_y_scaled
             hrnet_row[f'ensemble_hrnetv2_{landmark}_error_224px'] = ens_hrnet_error_224
             hrnet_row[f'ensemble_hrnetv2_{landmark}_error_600px'] = ens_hrnet_error_600
+            
+            # Add mm error if calibration is available
+            if mm_per_pixel_600:
+                ens_hrnet_error_mm = ens_hrnet_error_600 * mm_per_pixel_600 if not np.isnan(ens_hrnet_error_600) else np.nan
+                hrnet_row[f'ensemble_hrnetv2_{landmark}_error_mm'] = ens_hrnet_error_mm
         
         combined_mlp_data.append(mlp_row)
         combined_hrnet_data.append(hrnet_row)
@@ -967,7 +1160,8 @@ def save_all_models_combined(all_hrnet_preds: List[np.ndarray], all_mlp_preds: L
 def save_angle_predictions_to_csv(ensemble_hrnet: np.ndarray, ensemble_mlp: np.ndarray,
                                  all_hrnet_preds: List[np.ndarray], all_mlp_preds: List[np.ndarray],
                                  gt_coords: np.ndarray, patient_ids: List[int],
-                                 landmark_names: List[str], output_dir: str):
+                                 landmark_names: List[str], output_dir: str,
+                                 ruler_data: Optional[Dict[str, Dict]] = None):
     """Save cephalometric angle calculations, soft tissue measurements, and patient classification to CSV files."""
     print(f"\n📐 Calculating and saving cephalometric angles and measurements...")
     
@@ -985,6 +1179,13 @@ def save_angle_predictions_to_csv(ensemble_hrnet: np.ndarray, ensemble_mlp: np.n
     
     # Process each patient
     for i, patient_id in enumerate(patient_ids):
+        # Calculate pixel to mm ratio for this patient
+        mm_per_pixel_224 = None
+        if ruler_data:
+            mm_per_pixel_600 = calculate_pixel_to_mm_ratio(ruler_data, patient_id)
+            if mm_per_pixel_600:
+                mm_per_pixel_224 = mm_per_pixel_600 * (224.0 / 600.0)
+        
         # Calculate ground truth angles
         gt_angles = calculate_cephalometric_angles(gt_coords[i], landmark_names)
         gt_soft_tissue = calculate_soft_tissue_measurements(gt_coords[i], landmark_names)
@@ -1040,6 +1241,11 @@ def save_angle_predictions_to_csv(ensemble_hrnet: np.ndarray, ensemble_mlp: np.n
                 gt_st_scaled = gt_st * SCALE_FACTOR
                 ensemble_row[f'gt_{st_name}_224px'] = gt_st
                 ensemble_row[f'gt_{st_name}_600px'] = gt_st_scaled
+                
+                # Add mm measurement if calibration is available
+                if mm_per_pixel_224:
+                    gt_st_mm = gt_st * mm_per_pixel_224
+                    ensemble_row[f'gt_{st_name}_mm'] = gt_st_mm
             else:
                 ensemble_row[f'gt_{st_name}'] = gt_st
             
@@ -1055,6 +1261,13 @@ def save_angle_predictions_to_csv(ensemble_hrnet: np.ndarray, ensemble_mlp: np.n
                 ensemble_row[f'ensemble_hrnetv2_{st_name}_600px'] = hrnet_st_scaled
                 ensemble_row[f'ensemble_hrnetv2_{st_name}_error_224px'] = hrnet_st_error_224
                 ensemble_row[f'ensemble_hrnetv2_{st_name}_error_600px'] = hrnet_st_error_600
+                
+                # Add mm measurements if calibration is available
+                if mm_per_pixel_224:
+                    hrnet_st_mm = hrnet_st * mm_per_pixel_224 if not np.isnan(hrnet_st) else np.nan
+                    hrnet_st_error_mm = hrnet_st_error_224 * mm_per_pixel_224 if not np.isnan(hrnet_st_error_224) else np.nan
+                    ensemble_row[f'ensemble_hrnetv2_{st_name}_mm'] = hrnet_st_mm
+                    ensemble_row[f'ensemble_hrnetv2_{st_name}_error_mm'] = hrnet_st_error_mm
             else:
                 hrnet_st_error = abs(hrnet_st - gt_st) if not np.isnan(gt_st) and not np.isnan(hrnet_st) else np.nan
                 ensemble_row[f'ensemble_hrnetv2_{st_name}'] = hrnet_st
@@ -1072,6 +1285,13 @@ def save_angle_predictions_to_csv(ensemble_hrnet: np.ndarray, ensemble_mlp: np.n
                 ensemble_row[f'ensemble_mlp_{st_name}_600px'] = mlp_st_scaled
                 ensemble_row[f'ensemble_mlp_{st_name}_error_224px'] = mlp_st_error_224
                 ensemble_row[f'ensemble_mlp_{st_name}_error_600px'] = mlp_st_error_600
+                
+                # Add mm measurements if calibration is available
+                if mm_per_pixel_224:
+                    mlp_st_mm = mlp_st * mm_per_pixel_224 if not np.isnan(mlp_st) else np.nan
+                    mlp_st_error_mm = mlp_st_error_224 * mm_per_pixel_224 if not np.isnan(mlp_st_error_224) else np.nan
+                    ensemble_row[f'ensemble_mlp_{st_name}_mm'] = mlp_st_mm
+                    ensemble_row[f'ensemble_mlp_{st_name}_error_mm'] = mlp_st_error_mm
             else:
                 mlp_st_error = abs(mlp_st - gt_st) if not np.isnan(gt_st) and not np.isnan(mlp_st) else np.nan
                 ensemble_row[f'ensemble_mlp_{st_name}'] = mlp_st
@@ -1261,6 +1481,17 @@ def save_angle_predictions_to_csv(ensemble_hrnet: np.ndarray, ensemble_mlp: np.n
                 
                 unit = '°' if 'angle' in st_name else 'px'
                 print(f"{st_name:<20} {gt_mean:<12.1f}{unit} {mlp_mae:<20.2f} {hrnet_mae:<20.2f} {improvement:<15.1f}%")
+                
+                # Also print mm errors for E-line measurements if available
+                if 'eline' in st_name and ruler_data:
+                    mlp_errors_mm = ensemble_angle_df[f'ensemble_mlp_{st_name}_error_mm'].dropna()
+                    hrnet_errors_mm = ensemble_angle_df[f'ensemble_hrnetv2_{st_name}_error_mm'].dropna()
+                    
+                    if len(mlp_errors_mm) > 0 and len(hrnet_errors_mm) > 0:
+                        mlp_mae_mm = mlp_errors_mm.mean()
+                        hrnet_mae_mm = hrnet_errors_mm.mean()
+                        improvement_mm = (hrnet_mae_mm - mlp_mae_mm) / hrnet_mae_mm * 100 if hrnet_mae_mm > 0 else 0
+                        print(f"   (in mm)            {'':<12} {mlp_mae_mm:<20.2f} {hrnet_mae_mm:<20.2f} {improvement_mm:<15.1f}%")
     
     # Calculate and print classification metrics
     print(f"\n🏷️  Patient Classification Metrics (based on ANB angle):")
@@ -1775,15 +2006,28 @@ def print_results_table(results: Dict[str, Dict], landmark_names: List[str]):
     
     # Overall performance table
     print(f"\n🏷️  OVERALL PERFORMANCE:")
-    header = f"{'Model':<20} {'MRE':<10} {'Std':<10} {'Median':<10} {'P90':<10} {'P95':<10} {'Samples':<10}"
+    
+    # Check if mm metrics are available
+    has_mm_metrics = any('mre_mm' in metrics['overall'] for metrics in results.values())
+    
+    if has_mm_metrics:
+        header = f"{'Model':<20} {'MRE (px)':<10} {'MRE (mm)':<10} {'Std (px)':<10} {'Std (mm)':<10} {'Median (px)':<12} {'Median (mm)':<12} {'Samples':<10}"
+    else:
+        header = f"{'Model':<20} {'MRE':<10} {'Std':<10} {'Median':<10} {'P90':<10} {'P95':<10} {'Samples':<10}"
     print(header)
     print("-" * len(header))
     
     for model_name, metrics in results.items():
         overall = metrics['overall']
-        print(f"{model_name:<20} {overall['mre']:<10.3f} {overall['std']:<10.3f} "
-              f"{overall['median']:<10.3f} {overall['p90']:<10.3f} {overall['p95']:<10.3f} "
-              f"{overall['count']:<10}")
+        if has_mm_metrics and 'mre_mm' in overall:
+            print(f"{model_name:<20} {overall['mre']:<10.3f} {overall['mre_mm']:<10.3f} "
+                  f"{overall['std']:<10.3f} {overall['std_mm']:<10.3f} "
+                  f"{overall['median']:<12.3f} {overall['median_mm']:<12.3f} "
+                  f"{overall['count']:<10}")
+        else:
+            print(f"{model_name:<20} {overall['mre']:<10.3f} {overall['std']:<10.3f} "
+                  f"{overall['median']:<10.3f} {overall['p90']:<10.3f} {overall['p95']:<10.3f} "
+                  f"{overall['count']:<10}")
     
     # Key landmarks performance
     key_landmarks = ['sella', 'Gonion', 'PNS', 'A_point', 'B_point', 'ANS', 'nasion']
@@ -1793,15 +2037,28 @@ def print_results_table(results: Dict[str, Dict], landmark_names: List[str]):
     
     for landmark in available_landmarks:
         print(f"\n{landmark.upper()}:")
-        header = f"{'Model':<20} {'MRE':<10} {'Std':<10} {'Median':<10} {'Count':<10}"
+        
+        # Check if mm metrics are available for this landmark
+        has_landmark_mm = any(landmark in metrics['per_landmark'] and 'mre_mm' in metrics['per_landmark'][landmark] 
+                             for metrics in results.values())
+        
+        if has_landmark_mm:
+            header = f"{'Model':<20} {'MRE (px)':<10} {'MRE (mm)':<10} {'Std (px)':<10} {'Std (mm)':<10} {'Count':<10}"
+        else:
+            header = f"{'Model':<20} {'MRE':<10} {'Std':<10} {'Median':<10} {'Count':<10}"
         print(header)
         print("-" * len(header))
         
         for model_name, metrics in results.items():
             if landmark in metrics['per_landmark']:
                 lm_metrics = metrics['per_landmark'][landmark]
-                print(f"{model_name:<20} {lm_metrics['mre']:<10.3f} {lm_metrics['std']:<10.3f} "
-                      f"{lm_metrics['median']:<10.3f} {lm_metrics['count']:<10}")
+                if has_landmark_mm and 'mre_mm' in lm_metrics:
+                    print(f"{model_name:<20} {lm_metrics['mre']:<10.3f} {lm_metrics['mre_mm']:<10.3f} "
+                          f"{lm_metrics['std']:<10.3f} {lm_metrics['std_mm']:<10.3f} "
+                          f"{lm_metrics['count']:<10}")
+                else:
+                    print(f"{model_name:<20} {lm_metrics['mre']:<10.3f} {lm_metrics['std']:<10.3f} "
+                          f"{lm_metrics['median']:<10.3f} {lm_metrics['count']:<10}")
     
     # Improvement analysis (compare with first individual model)
     if len(results) > 2:  # At least 2 individual models + ensemble
@@ -2010,6 +2267,10 @@ def main():
     data_file_path = "/content/drive/MyDrive/Lala's Masters/train_data_pure_old_numpy.json"
     main_df = pd.read_json(data_file_path)
     
+    # Load ruler calibration data
+    ruler_data_path = "data/patient_ruler_data.json"
+    ruler_data = load_ruler_calibration_data(ruler_data_path)
+    
     # Split test data
     if args.test_split_file:
         print(f"Loading test set from external file: {args.test_split_file}")
@@ -2091,8 +2352,12 @@ def main():
         
         # Compute metrics for individual model if requested
         if args.evaluate_individual:
-            hrnet_overall, hrnet_per_landmark = compute_metrics(hrnet_preds, gt_coords, landmark_names)
-            mlp_overall, mlp_per_landmark = compute_metrics(mlp_preds, gt_coords, landmark_names)
+            if ruler_data:
+                hrnet_overall, hrnet_per_landmark = compute_metrics_with_mm(hrnet_preds, gt_coords, landmark_names, patient_ids, ruler_data)
+                mlp_overall, mlp_per_landmark = compute_metrics_with_mm(mlp_preds, gt_coords, landmark_names, patient_ids, ruler_data)
+            else:
+                hrnet_overall, hrnet_per_landmark = compute_metrics(hrnet_preds, gt_coords, landmark_names)
+                mlp_overall, mlp_per_landmark = compute_metrics(mlp_preds, gt_coords, landmark_names)
             
             results[f'Model {i} HRNet (Test)'] = {'overall': hrnet_overall, 'per_landmark': hrnet_per_landmark}
             results[f'Model {i} MLP (Test)'] = {'overall': mlp_overall, 'per_landmark': mlp_per_landmark}
@@ -2141,8 +2406,12 @@ def main():
     
     # Evaluate ensemble
     print(f"\n🔄 Computing ensemble metrics...")
-    ensemble_hrnet_overall, ensemble_hrnet_per_landmark = compute_metrics(ensemble_hrnet, all_gt, landmark_names)
-    ensemble_mlp_overall, ensemble_mlp_per_landmark = compute_metrics(ensemble_mlp, all_gt, landmark_names)
+    if ruler_data:
+        ensemble_hrnet_overall, ensemble_hrnet_per_landmark = compute_metrics_with_mm(ensemble_hrnet, all_gt, landmark_names, all_patient_ids, ruler_data)
+        ensemble_mlp_overall, ensemble_mlp_per_landmark = compute_metrics_with_mm(ensemble_mlp, all_gt, landmark_names, all_patient_ids, ruler_data)
+    else:
+        ensemble_hrnet_overall, ensemble_hrnet_per_landmark = compute_metrics(ensemble_hrnet, all_gt, landmark_names)
+        ensemble_mlp_overall, ensemble_mlp_per_landmark = compute_metrics(ensemble_mlp, all_gt, landmark_names)
     
     results['Ensemble HRNet (Test)'] = {'overall': ensemble_hrnet_overall, 'per_landmark': ensemble_hrnet_per_landmark}
     results['Ensemble MLP (Test)'] = {'overall': ensemble_mlp_overall, 'per_landmark': ensemble_mlp_per_landmark}
@@ -2162,7 +2431,7 @@ def main():
     os.makedirs(output_dir, exist_ok=True)
     
     # Save ensemble predictions to CSV with patient details
-    save_ensemble_predictions_to_csv(ensemble_hrnet, ensemble_mlp, all_gt, all_patient_ids, landmark_names, output_dir)
+    save_ensemble_predictions_to_csv(ensemble_hrnet, ensemble_mlp, all_gt, all_patient_ids, landmark_names, output_dir, ruler_data)
     
     # Save detailed comparison (test results)
     comparison_data = []
@@ -2243,13 +2512,13 @@ def main():
     print(f"\n💾 Saving individual model predictions...")
     for i in range(len(all_hrnet_preds)):
         save_individual_model_predictions(i+1, all_hrnet_preds[i], all_mlp_preds[i], 
-                                        all_gt, all_patient_ids, landmark_names, output_dir)
+                                        all_gt, all_patient_ids, landmark_names, output_dir, ruler_data)
     
     # Save all models combined
-    save_all_models_combined(all_hrnet_preds, all_mlp_preds, ensemble_hrnet, ensemble_mlp, all_gt, all_patient_ids, landmark_names, output_dir)
+    save_all_models_combined(all_hrnet_preds, all_mlp_preds, ensemble_hrnet, ensemble_mlp, all_gt, all_patient_ids, landmark_names, output_dir, ruler_data)
     
     # Save angle predictions
-    save_angle_predictions_to_csv(ensemble_hrnet, ensemble_mlp, all_hrnet_preds, all_mlp_preds, all_gt, all_patient_ids, landmark_names, output_dir)
+    save_angle_predictions_to_csv(ensemble_hrnet, ensemble_mlp, all_hrnet_preds, all_mlp_preds, all_gt, all_patient_ids, landmark_names, output_dir, ruler_data)
     
     # Create patient visualizations
     create_patient_visualizations(ensemble_hrnet, ensemble_mlp, all_hrnet_preds, all_mlp_preds, all_gt, all_patient_ids, test_df, landmark_names, output_dir)
@@ -2288,7 +2557,9 @@ def main():
     print(f"   - Classification analysis: classification_analysis.png")
     print(f"   Note: Files include ANB angle, soft tissue measurements, and patient classifications")
     print(f"   Note: Coordinates are scaled to original 600x600 image space")
-    print(f"   Note: Errors are provided in both 224x224 (model space) and 600x600 (original space)")
+    print(f"   Note: Errors are provided in pixels (224x224 and 600x600) and mm (when calibration available)")
+    if ruler_data:
+        print(f"   Note: Millimeter calibration applied using {RULER_LENGTH_MM}mm ruler measurements")
     
     # Quick summary
     ensemble_mre = ensemble_mlp_overall['mre']
@@ -2296,6 +2567,18 @@ def main():
     print(f"\n🎉 Ensemble Evaluation Summary:")
     print(f"📊 {len(all_hrnet_preds)} models successfully evaluated")
     print(f"🎯 Ensemble MLP MRE: {ensemble_mre:.3f} pixels (224x224) / {ensemble_mre_600:.3f} pixels (600x600)")
+    
+    # Show mm errors if available in metrics
+    if 'mre_mm' in ensemble_mlp_overall:
+        ensemble_mre_mm = ensemble_mlp_overall['mre_mm']
+        calibrated_patients = ensemble_mlp_overall.get('calibrated_patients', 0)
+        print(f"🎯 Ensemble MLP MRE: {ensemble_mre_mm:.3f} mm (from {calibrated_patients} patients with calibration)")
+        
+        if 'mre_mm' in ensemble_hrnet_overall:
+            hrnet_mre_mm = ensemble_hrnet_overall['mre_mm']
+            improvement_mm = (hrnet_mre_mm - ensemble_mre_mm) / hrnet_mre_mm * 100 if hrnet_mre_mm > 0 else 0
+            print(f"🎯 Ensemble HRNetV2 MRE: {hrnet_mre_mm:.3f} mm")
+            print(f"📈 MLP improvement over HRNetV2: {improvement_mm:+.1f}% (in mm)")
     
     if len(all_hrnet_preds) > 1 and args.evaluate_individual:
         individual_mres = [results[f'Model {i+1} MLP (Test)']['overall']['mre'] for i in range(len(all_hrnet_preds))]
@@ -2306,12 +2589,20 @@ def main():
     # Sella-specific summary
     if 'sella' in landmark_names:
         # Test set sella performance
-        test_sella_results = [(name, metrics['per_landmark'].get('sella', {}).get('mre', 0)) 
-                             for name, metrics in results.items() if 'MLP' in name]
+        test_sella_results = []
+        for name, metrics in results.items():
+            if 'MLP' in name and 'sella' in metrics['per_landmark']:
+                sella_metrics = metrics['per_landmark']['sella']
+                mre_px = sella_metrics.get('mre', 0)
+                mre_mm = sella_metrics.get('mre_mm', None)
+                test_sella_results.append((name, mre_px, mre_mm))
         
         print(f"\n🎯 SELLA LANDMARK PERFORMANCE (TEST SET):")
-        for model_name, sella_mre in test_sella_results:
-            print(f"   {model_name}: {sella_mre:.3f} pixels")
+        for model_name, sella_mre_px, sella_mre_mm in test_sella_results:
+            if sella_mre_mm is not None:
+                print(f"   {model_name}: {sella_mre_px:.3f} pixels / {sella_mre_mm:.3f} mm")
+            else:
+                print(f"   {model_name}: {sella_mre_px:.3f} pixels")
         
         # Validation set sella performance if available
         if validation_results:
