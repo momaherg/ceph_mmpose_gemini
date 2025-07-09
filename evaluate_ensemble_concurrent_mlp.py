@@ -717,7 +717,7 @@ def compute_metrics_with_mm(pred_coords, gt_coords, landmark_names, patient_ids,
         for i, patient_id in enumerate(patient_ids):
             mm_per_pixel_600 = calculate_pixel_to_mm_ratio(ruler_data, patient_id)
             if mm_per_pixel_600:
-                mm_per_pixel_224 = mm_per_pixel_600 * (224.0 / 600.0)
+                mm_per_pixel_224 = mm_per_pixel_600 * SCALE_FACTOR
                 calibrated_patients += 1
                 
                 # Convert patient errors to mm
@@ -743,7 +743,7 @@ def compute_metrics_with_mm(pred_coords, gt_coords, landmark_names, patient_ids,
                 for i, patient_id in enumerate(patient_ids):
                     mm_per_pixel_600 = calculate_pixel_to_mm_ratio(ruler_data, patient_id)
                     if mm_per_pixel_600:
-                        mm_per_pixel_224 = mm_per_pixel_600 * (224.0 / 600.0)
+                        mm_per_pixel_224 = mm_per_pixel_600 * SCALE_FACTOR
                         if gt_coords[i, j, 0] > 0 and gt_coords[i, j, 1] > 0:
                             pixel_error = np.sqrt(np.sum((pred_coords[i, j] - gt_coords[i, j])**2))
                             mm_error = pixel_error * mm_per_pixel_224
@@ -796,7 +796,7 @@ def save_ensemble_predictions_to_csv(ensemble_hrnet: np.ndarray, ensemble_mlp: n
         if ruler_data:
             mm_per_pixel_600 = calculate_pixel_to_mm_ratio(ruler_data, patient_id)
             if mm_per_pixel_600:
-                mm_per_pixel_224 = mm_per_pixel_600 * (224.0 / 600.0)
+                mm_per_pixel_224 = mm_per_pixel_600 * SCALE_FACTOR
                 mm_conversion_count += 1
             else:
                 missing_calibration_count += 1
@@ -931,7 +931,7 @@ def save_individual_model_predictions(model_idx: int, hrnet_preds: np.ndarray, m
         if ruler_data:
             mm_per_pixel_600 = calculate_pixel_to_mm_ratio(ruler_data, patient_id)
             if mm_per_pixel_600:
-                mm_per_pixel_224 = mm_per_pixel_600 * (224.0 / 600.0)
+                mm_per_pixel_224 = mm_per_pixel_600 * SCALE_FACTOR
         
         # Add ground truth and predictions for each landmark
         for j, landmark in enumerate(landmark_names):
@@ -1025,7 +1025,7 @@ def save_all_models_combined(all_hrnet_preds: List[np.ndarray], all_mlp_preds: L
         if ruler_data:
             mm_per_pixel_600 = calculate_pixel_to_mm_ratio(ruler_data, patient_id)
             if mm_per_pixel_600:
-                mm_per_pixel_224 = mm_per_pixel_600 * (224.0 / 600.0)
+                mm_per_pixel_224 = mm_per_pixel_600 * SCALE_FACTOR
         
         # For each landmark
         for j, landmark in enumerate(landmark_names):
@@ -1185,7 +1185,7 @@ def save_angle_predictions_to_csv(ensemble_hrnet: np.ndarray, ensemble_mlp: np.n
         if ruler_data:
             mm_per_pixel_600 = calculate_pixel_to_mm_ratio(ruler_data, patient_id)
             if mm_per_pixel_600:
-                mm_per_pixel_224 = mm_per_pixel_600 * (224.0 / 600.0)
+                mm_per_pixel_224 = mm_per_pixel_600 * SCALE_FACTOR
         
         # Calculate ground truth angles
         gt_angles = calculate_cephalometric_angles(gt_coords[i], landmark_names)
@@ -1504,7 +1504,7 @@ def save_angle_predictions_to_csv(ensemble_hrnet: np.ndarray, ensemble_mlp: np.n
                             mm_per_pixel_224 = None
                             mm_per_pixel_600 = calculate_pixel_to_mm_ratio(ruler_data, patient_id)
                             if mm_per_pixel_600:
-                                mm_per_pixel_224 = mm_per_pixel_600 * (224.0 / 600.0)
+                                mm_per_pixel_224 = mm_per_pixel_600 * SCALE_FACTOR
                                 
                                 gt_st = calculate_soft_tissue_measurements(gt_coords[i], landmark_names).get(st_name, np.nan)
                                 if not np.isnan(gt_st):
