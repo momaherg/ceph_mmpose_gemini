@@ -330,6 +330,11 @@ def safe_torch_load(*args, **kwargs):
 
 torch.load = safe_torch_load
 
+# Image scaling constants
+ORIGINAL_IMAGE_SIZE = 600
+MODEL_INPUT_SIZE = 224
+SCALE_FACTOR = ORIGINAL_IMAGE_SIZE / MODEL_INPUT_SIZE  # 2.6786
+
 class JointMLPRefinementModel(nn.Module):
     """Joint MLP model for landmark coordinate refinement with adaptive selection."""
     def __init__(self, input_dim=38, hidden_dim=500, output_dim=38):
@@ -679,32 +684,46 @@ def save_ensemble_predictions_to_csv(ensemble_hrnet: np.ndarray, ensemble_mlp: n
         
         # Add ground truth and predictions for each landmark
         for j, landmark in enumerate(landmark_names):
-            # Ground truth
+            # Ground truth (scale to original 600x600)
             gt_x = gt_coords[i, j, 0]
             gt_y = gt_coords[i, j, 1]
+            gt_x_scaled = gt_x * SCALE_FACTOR if gt_x > 0 else 0
+            gt_y_scaled = gt_y * SCALE_FACTOR if gt_y > 0 else 0
             
-            mlp_row[f'gt_{landmark}_x'] = gt_x
-            mlp_row[f'gt_{landmark}_y'] = gt_y
-            hrnet_row[f'gt_{landmark}_x'] = gt_x
-            hrnet_row[f'gt_{landmark}_y'] = gt_y
+            mlp_row[f'gt_{landmark}_x'] = gt_x_scaled
+            mlp_row[f'gt_{landmark}_y'] = gt_y_scaled
+            hrnet_row[f'gt_{landmark}_x'] = gt_x_scaled
+            hrnet_row[f'gt_{landmark}_y'] = gt_y_scaled
             
-            # Ensemble MLP predictions
+            # Ensemble MLP predictions (scale to original 600x600)
             mlp_x = ensemble_mlp[i, j, 0]
             mlp_y = ensemble_mlp[i, j, 1]
-            mlp_error = np.sqrt((mlp_x - gt_x)**2 + (mlp_y - gt_y)**2) if gt_x > 0 and gt_y > 0 else np.nan
+            mlp_x_scaled = mlp_x * SCALE_FACTOR
+            mlp_y_scaled = mlp_y * SCALE_FACTOR
             
-            mlp_row[f'ensemble_mlp_{landmark}_x'] = mlp_x
-            mlp_row[f'ensemble_mlp_{landmark}_y'] = mlp_y
-            mlp_row[f'ensemble_mlp_{landmark}_error'] = mlp_error
+            # Error in both 224x224 and 600x600 scales
+            mlp_error_224 = np.sqrt((mlp_x - gt_x)**2 + (mlp_y - gt_y)**2) if gt_x > 0 and gt_y > 0 else np.nan
+            mlp_error_600 = mlp_error_224 * SCALE_FACTOR if not np.isnan(mlp_error_224) else np.nan
             
-            # Ensemble HRNet predictions
+            mlp_row[f'ensemble_mlp_{landmark}_x'] = mlp_x_scaled
+            mlp_row[f'ensemble_mlp_{landmark}_y'] = mlp_y_scaled
+            mlp_row[f'ensemble_mlp_{landmark}_error_224px'] = mlp_error_224
+            mlp_row[f'ensemble_mlp_{landmark}_error_600px'] = mlp_error_600
+            
+            # Ensemble HRNet predictions (scale to original 600x600)
             hrnet_x = ensemble_hrnet[i, j, 0]
             hrnet_y = ensemble_hrnet[i, j, 1]
-            hrnet_error = np.sqrt((hrnet_x - gt_x)**2 + (hrnet_y - gt_y)**2) if gt_x > 0 and gt_y > 0 else np.nan
+            hrnet_x_scaled = hrnet_x * SCALE_FACTOR
+            hrnet_y_scaled = hrnet_y * SCALE_FACTOR
             
-            hrnet_row[f'ensemble_hrnetv2_{landmark}_x'] = hrnet_x
-            hrnet_row[f'ensemble_hrnetv2_{landmark}_y'] = hrnet_y
-            hrnet_row[f'ensemble_hrnetv2_{landmark}_error'] = hrnet_error
+            # Error in both 224x224 and 600x600 scales
+            hrnet_error_224 = np.sqrt((hrnet_x - gt_x)**2 + (hrnet_y - gt_y)**2) if gt_x > 0 and gt_y > 0 else np.nan
+            hrnet_error_600 = hrnet_error_224 * SCALE_FACTOR if not np.isnan(hrnet_error_224) else np.nan
+            
+            hrnet_row[f'ensemble_hrnetv2_{landmark}_x'] = hrnet_x_scaled
+            hrnet_row[f'ensemble_hrnetv2_{landmark}_y'] = hrnet_y_scaled
+            hrnet_row[f'ensemble_hrnetv2_{landmark}_error_224px'] = hrnet_error_224
+            hrnet_row[f'ensemble_hrnetv2_{landmark}_error_600px'] = hrnet_error_600
         
         mlp_data.append(mlp_row)
         hrnet_data.append(hrnet_row)
@@ -761,32 +780,46 @@ def save_individual_model_predictions(model_idx: int, hrnet_preds: np.ndarray, m
         
         # Add ground truth and predictions for each landmark
         for j, landmark in enumerate(landmark_names):
-            # Ground truth
+            # Ground truth (scale to original 600x600)
             gt_x = gt_coords[i, j, 0]
             gt_y = gt_coords[i, j, 1]
+            gt_x_scaled = gt_x * SCALE_FACTOR if gt_x > 0 else 0
+            gt_y_scaled = gt_y * SCALE_FACTOR if gt_y > 0 else 0
             
-            mlp_row[f'gt_{landmark}_x'] = gt_x
-            mlp_row[f'gt_{landmark}_y'] = gt_y
-            hrnet_row[f'gt_{landmark}_x'] = gt_x
-            hrnet_row[f'gt_{landmark}_y'] = gt_y
+            mlp_row[f'gt_{landmark}_x'] = gt_x_scaled
+            mlp_row[f'gt_{landmark}_y'] = gt_y_scaled
+            hrnet_row[f'gt_{landmark}_x'] = gt_x_scaled
+            hrnet_row[f'gt_{landmark}_y'] = gt_y_scaled
             
-            # Model MLP predictions
+            # Model MLP predictions (scale to original 600x600)
             mlp_x = mlp_preds[i, j, 0]
             mlp_y = mlp_preds[i, j, 1]
-            mlp_error = np.sqrt((mlp_x - gt_x)**2 + (mlp_y - gt_y)**2) if gt_x > 0 and gt_y > 0 else np.nan
+            mlp_x_scaled = mlp_x * SCALE_FACTOR
+            mlp_y_scaled = mlp_y * SCALE_FACTOR
             
-            mlp_row[f'model{model_idx}_mlp_{landmark}_x'] = mlp_x
-            mlp_row[f'model{model_idx}_mlp_{landmark}_y'] = mlp_y
-            mlp_row[f'model{model_idx}_mlp_{landmark}_error'] = mlp_error
+            # Error in both scales
+            mlp_error_224 = np.sqrt((mlp_x - gt_x)**2 + (mlp_y - gt_y)**2) if gt_x > 0 and gt_y > 0 else np.nan
+            mlp_error_600 = mlp_error_224 * SCALE_FACTOR if not np.isnan(mlp_error_224) else np.nan
             
-            # Model HRNet predictions
+            mlp_row[f'model{model_idx}_mlp_{landmark}_x'] = mlp_x_scaled
+            mlp_row[f'model{model_idx}_mlp_{landmark}_y'] = mlp_y_scaled
+            mlp_row[f'model{model_idx}_mlp_{landmark}_error_224px'] = mlp_error_224
+            mlp_row[f'model{model_idx}_mlp_{landmark}_error_600px'] = mlp_error_600
+            
+            # Model HRNet predictions (scale to original 600x600)
             hrnet_x = hrnet_preds[i, j, 0]
             hrnet_y = hrnet_preds[i, j, 1]
-            hrnet_error = np.sqrt((hrnet_x - gt_x)**2 + (hrnet_y - gt_y)**2) if gt_x > 0 and gt_y > 0 else np.nan
+            hrnet_x_scaled = hrnet_x * SCALE_FACTOR
+            hrnet_y_scaled = hrnet_y * SCALE_FACTOR
             
-            hrnet_row[f'model{model_idx}_hrnetv2_{landmark}_x'] = hrnet_x
-            hrnet_row[f'model{model_idx}_hrnetv2_{landmark}_y'] = hrnet_y
-            hrnet_row[f'model{model_idx}_hrnetv2_{landmark}_error'] = hrnet_error
+            # Error in both scales
+            hrnet_error_224 = np.sqrt((hrnet_x - gt_x)**2 + (hrnet_y - gt_y)**2) if gt_x > 0 and gt_y > 0 else np.nan
+            hrnet_error_600 = hrnet_error_224 * SCALE_FACTOR if not np.isnan(hrnet_error_224) else np.nan
+            
+            hrnet_row[f'model{model_idx}_hrnetv2_{landmark}_x'] = hrnet_x_scaled
+            hrnet_row[f'model{model_idx}_hrnetv2_{landmark}_y'] = hrnet_y_scaled
+            hrnet_row[f'model{model_idx}_hrnetv2_{landmark}_error_224px'] = hrnet_error_224
+            hrnet_row[f'model{model_idx}_hrnetv2_{landmark}_error_600px'] = hrnet_error_600
         
         mlp_data.append(mlp_row)
         hrnet_data.append(hrnet_row)
@@ -822,53 +855,75 @@ def save_all_models_combined(all_hrnet_preds: List[np.ndarray], all_mlp_preds: L
         
         # For each landmark
         for j, landmark in enumerate(landmark_names):
-            # Ground truth
+            # Ground truth (scale to original 600x600)
             gt_x = gt_coords[i, j, 0]
             gt_y = gt_coords[i, j, 1]
+            gt_x_scaled = gt_x * SCALE_FACTOR if gt_x > 0 else 0
+            gt_y_scaled = gt_y * SCALE_FACTOR if gt_y > 0 else 0
             
-            mlp_row[f'gt_{landmark}_x'] = gt_x
-            mlp_row[f'gt_{landmark}_y'] = gt_y
-            hrnet_row[f'gt_{landmark}_x'] = gt_x
-            hrnet_row[f'gt_{landmark}_y'] = gt_y
+            mlp_row[f'gt_{landmark}_x'] = gt_x_scaled
+            mlp_row[f'gt_{landmark}_y'] = gt_y_scaled
+            hrnet_row[f'gt_{landmark}_x'] = gt_x_scaled
+            hrnet_row[f'gt_{landmark}_y'] = gt_y_scaled
             
             # Individual model predictions
             for model_idx in range(len(all_hrnet_preds)):
-                # MLP predictions
+                # MLP predictions (scale to original 600x600)
                 mlp_x = all_mlp_preds[model_idx][i, j, 0]
                 mlp_y = all_mlp_preds[model_idx][i, j, 1]
-                mlp_error = np.sqrt((mlp_x - gt_x)**2 + (mlp_y - gt_y)**2) if gt_x > 0 and gt_y > 0 else np.nan
+                mlp_x_scaled = mlp_x * SCALE_FACTOR
+                mlp_y_scaled = mlp_y * SCALE_FACTOR
                 
-                mlp_row[f'model{model_idx+1}_mlp_{landmark}_x'] = mlp_x
-                mlp_row[f'model{model_idx+1}_mlp_{landmark}_y'] = mlp_y
-                mlp_row[f'model{model_idx+1}_mlp_{landmark}_error'] = mlp_error
+                mlp_error_224 = np.sqrt((mlp_x - gt_x)**2 + (mlp_y - gt_y)**2) if gt_x > 0 and gt_y > 0 else np.nan
+                mlp_error_600 = mlp_error_224 * SCALE_FACTOR if not np.isnan(mlp_error_224) else np.nan
                 
-                # HRNet predictions
+                mlp_row[f'model{model_idx+1}_mlp_{landmark}_x'] = mlp_x_scaled
+                mlp_row[f'model{model_idx+1}_mlp_{landmark}_y'] = mlp_y_scaled
+                mlp_row[f'model{model_idx+1}_mlp_{landmark}_error_224px'] = mlp_error_224
+                mlp_row[f'model{model_idx+1}_mlp_{landmark}_error_600px'] = mlp_error_600
+                
+                # HRNet predictions (scale to original 600x600)
                 hrnet_x = all_hrnet_preds[model_idx][i, j, 0]
                 hrnet_y = all_hrnet_preds[model_idx][i, j, 1]
-                hrnet_error = np.sqrt((hrnet_x - gt_x)**2 + (hrnet_y - gt_y)**2) if gt_x > 0 and gt_y > 0 else np.nan
+                hrnet_x_scaled = hrnet_x * SCALE_FACTOR
+                hrnet_y_scaled = hrnet_y * SCALE_FACTOR
                 
-                hrnet_row[f'model{model_idx+1}_hrnetv2_{landmark}_x'] = hrnet_x
-                hrnet_row[f'model{model_idx+1}_hrnetv2_{landmark}_y'] = hrnet_y
-                hrnet_row[f'model{model_idx+1}_hrnetv2_{landmark}_error'] = hrnet_error
+                hrnet_error_224 = np.sqrt((hrnet_x - gt_x)**2 + (hrnet_y - gt_y)**2) if gt_x > 0 and gt_y > 0 else np.nan
+                hrnet_error_600 = hrnet_error_224 * SCALE_FACTOR if not np.isnan(hrnet_error_224) else np.nan
+                
+                hrnet_row[f'model{model_idx+1}_hrnetv2_{landmark}_x'] = hrnet_x_scaled
+                hrnet_row[f'model{model_idx+1}_hrnetv2_{landmark}_y'] = hrnet_y_scaled
+                hrnet_row[f'model{model_idx+1}_hrnetv2_{landmark}_error_224px'] = hrnet_error_224
+                hrnet_row[f'model{model_idx+1}_hrnetv2_{landmark}_error_600px'] = hrnet_error_600
             
-            # Ensemble predictions
+            # Ensemble predictions (scale to original 600x600)
             # MLP ensemble
             ens_mlp_x = ensemble_mlp[i, j, 0]
             ens_mlp_y = ensemble_mlp[i, j, 1]
-            ens_mlp_error = np.sqrt((ens_mlp_x - gt_x)**2 + (ens_mlp_y - gt_y)**2) if gt_x > 0 and gt_y > 0 else np.nan
+            ens_mlp_x_scaled = ens_mlp_x * SCALE_FACTOR
+            ens_mlp_y_scaled = ens_mlp_y * SCALE_FACTOR
             
-            mlp_row[f'ensemble_mlp_{landmark}_x'] = ens_mlp_x
-            mlp_row[f'ensemble_mlp_{landmark}_y'] = ens_mlp_y
-            mlp_row[f'ensemble_mlp_{landmark}_error'] = ens_mlp_error
+            ens_mlp_error_224 = np.sqrt((ens_mlp_x - gt_x)**2 + (ens_mlp_y - gt_y)**2) if gt_x > 0 and gt_y > 0 else np.nan
+            ens_mlp_error_600 = ens_mlp_error_224 * SCALE_FACTOR if not np.isnan(ens_mlp_error_224) else np.nan
+            
+            mlp_row[f'ensemble_mlp_{landmark}_x'] = ens_mlp_x_scaled
+            mlp_row[f'ensemble_mlp_{landmark}_y'] = ens_mlp_y_scaled
+            mlp_row[f'ensemble_mlp_{landmark}_error_224px'] = ens_mlp_error_224
+            mlp_row[f'ensemble_mlp_{landmark}_error_600px'] = ens_mlp_error_600
             
             # HRNet ensemble
             ens_hrnet_x = ensemble_hrnet[i, j, 0]
             ens_hrnet_y = ensemble_hrnet[i, j, 1]
-            ens_hrnet_error = np.sqrt((ens_hrnet_x - gt_x)**2 + (ens_hrnet_y - gt_y)**2) if gt_x > 0 and gt_y > 0 else np.nan
+            ens_hrnet_x_scaled = ens_hrnet_x * SCALE_FACTOR
+            ens_hrnet_y_scaled = ens_hrnet_y * SCALE_FACTOR
             
-            hrnet_row[f'ensemble_hrnetv2_{landmark}_x'] = ens_hrnet_x
-            hrnet_row[f'ensemble_hrnetv2_{landmark}_y'] = ens_hrnet_y
-            hrnet_row[f'ensemble_hrnetv2_{landmark}_error'] = ens_hrnet_error
+            ens_hrnet_error_224 = np.sqrt((ens_hrnet_x - gt_x)**2 + (ens_hrnet_y - gt_y)**2) if gt_x > 0 and gt_y > 0 else np.nan
+            ens_hrnet_error_600 = ens_hrnet_error_224 * SCALE_FACTOR if not np.isnan(ens_hrnet_error_224) else np.nan
+            
+            hrnet_row[f'ensemble_hrnetv2_{landmark}_x'] = ens_hrnet_x_scaled
+            hrnet_row[f'ensemble_hrnetv2_{landmark}_y'] = ens_hrnet_y_scaled
+            hrnet_row[f'ensemble_hrnetv2_{landmark}_error_224px'] = ens_hrnet_error_224
+            hrnet_row[f'ensemble_hrnetv2_{landmark}_error_600px'] = ens_hrnet_error_600
         
         combined_mlp_data.append(mlp_row)
         combined_hrnet_data.append(hrnet_row)
@@ -979,19 +1034,48 @@ def save_angle_predictions_to_csv(ensemble_hrnet: np.ndarray, ensemble_mlp: np.n
         for st_name in soft_tissue_names:
             # Ground truth
             gt_st = gt_soft_tissue.get(st_name, np.nan)
-            ensemble_row[f'gt_{st_name}'] = gt_st
+            
+            # Scale E-line distances to 600x600, but not angles
+            if 'eline' in st_name and not np.isnan(gt_st):
+                gt_st_scaled = gt_st * SCALE_FACTOR
+                ensemble_row[f'gt_{st_name}_224px'] = gt_st
+                ensemble_row[f'gt_{st_name}_600px'] = gt_st_scaled
+            else:
+                ensemble_row[f'gt_{st_name}'] = gt_st
             
             # Ensemble HRNetV2
             hrnet_st = ensemble_hrnet_soft_tissue.get(st_name, np.nan)
-            hrnet_st_error = abs(hrnet_st - gt_st) if not np.isnan(gt_st) and not np.isnan(hrnet_st) else np.nan
-            ensemble_row[f'ensemble_hrnetv2_{st_name}'] = hrnet_st
-            ensemble_row[f'ensemble_hrnetv2_{st_name}_error'] = hrnet_st_error
+            
+            if 'eline' in st_name and not np.isnan(hrnet_st):
+                hrnet_st_scaled = hrnet_st * SCALE_FACTOR
+                hrnet_st_error_224 = abs(hrnet_st - gt_st) if not np.isnan(gt_st) else np.nan
+                hrnet_st_error_600 = hrnet_st_error_224 * SCALE_FACTOR if not np.isnan(hrnet_st_error_224) else np.nan
+                
+                ensemble_row[f'ensemble_hrnetv2_{st_name}_224px'] = hrnet_st
+                ensemble_row[f'ensemble_hrnetv2_{st_name}_600px'] = hrnet_st_scaled
+                ensemble_row[f'ensemble_hrnetv2_{st_name}_error_224px'] = hrnet_st_error_224
+                ensemble_row[f'ensemble_hrnetv2_{st_name}_error_600px'] = hrnet_st_error_600
+            else:
+                hrnet_st_error = abs(hrnet_st - gt_st) if not np.isnan(gt_st) and not np.isnan(hrnet_st) else np.nan
+                ensemble_row[f'ensemble_hrnetv2_{st_name}'] = hrnet_st
+                ensemble_row[f'ensemble_hrnetv2_{st_name}_error'] = hrnet_st_error
             
             # Ensemble MLP
             mlp_st = ensemble_mlp_soft_tissue.get(st_name, np.nan)
-            mlp_st_error = abs(mlp_st - gt_st) if not np.isnan(gt_st) and not np.isnan(mlp_st) else np.nan
-            ensemble_row[f'ensemble_mlp_{st_name}'] = mlp_st
-            ensemble_row[f'ensemble_mlp_{st_name}_error'] = mlp_st_error
+            
+            if 'eline' in st_name and not np.isnan(mlp_st):
+                mlp_st_scaled = mlp_st * SCALE_FACTOR
+                mlp_st_error_224 = abs(mlp_st - gt_st) if not np.isnan(gt_st) else np.nan
+                mlp_st_error_600 = mlp_st_error_224 * SCALE_FACTOR if not np.isnan(mlp_st_error_224) else np.nan
+                
+                ensemble_row[f'ensemble_mlp_{st_name}_224px'] = mlp_st
+                ensemble_row[f'ensemble_mlp_{st_name}_600px'] = mlp_st_scaled
+                ensemble_row[f'ensemble_mlp_{st_name}_error_224px'] = mlp_st_error_224
+                ensemble_row[f'ensemble_mlp_{st_name}_error_600px'] = mlp_st_error_600
+            else:
+                mlp_st_error = abs(mlp_st - gt_st) if not np.isnan(gt_st) and not np.isnan(mlp_st) else np.nan
+                ensemble_row[f'ensemble_mlp_{st_name}'] = mlp_st
+                ensemble_row[f'ensemble_mlp_{st_name}_error'] = mlp_st_error
         
         # Add patient classification
         ensemble_row['gt_classification'] = gt_class
@@ -1048,15 +1132,37 @@ def save_angle_predictions_to_csv(ensemble_hrnet: np.ndarray, ensemble_mlp: np.n
                 
                 # HRNet model
                 hrnet_st = model_hrnet_soft_tissue.get(st_name, np.nan)
-                hrnet_st_error = abs(hrnet_st - gt_st) if not np.isnan(gt_st) and not np.isnan(hrnet_st) else np.nan
-                individual_row[f'model{model_idx+1}_hrnetv2_{st_name}'] = hrnet_st
-                individual_row[f'model{model_idx+1}_hrnetv2_{st_name}_error'] = hrnet_st_error
+                
+                if 'eline' in st_name and not np.isnan(hrnet_st):
+                    hrnet_st_scaled = hrnet_st * SCALE_FACTOR
+                    hrnet_st_error_224 = abs(hrnet_st - gt_st) if not np.isnan(gt_st) else np.nan
+                    hrnet_st_error_600 = hrnet_st_error_224 * SCALE_FACTOR if not np.isnan(hrnet_st_error_224) else np.nan
+                    
+                    individual_row[f'model{model_idx+1}_hrnetv2_{st_name}_224px'] = hrnet_st
+                    individual_row[f'model{model_idx+1}_hrnetv2_{st_name}_600px'] = hrnet_st_scaled
+                    individual_row[f'model{model_idx+1}_hrnetv2_{st_name}_error_224px'] = hrnet_st_error_224
+                    individual_row[f'model{model_idx+1}_hrnetv2_{st_name}_error_600px'] = hrnet_st_error_600
+                else:
+                    hrnet_st_error = abs(hrnet_st - gt_st) if not np.isnan(gt_st) and not np.isnan(hrnet_st) else np.nan
+                    individual_row[f'model{model_idx+1}_hrnetv2_{st_name}'] = hrnet_st
+                    individual_row[f'model{model_idx+1}_hrnetv2_{st_name}_error'] = hrnet_st_error
                 
                 # MLP model
                 mlp_st = model_mlp_soft_tissue.get(st_name, np.nan)
-                mlp_st_error = abs(mlp_st - gt_st) if not np.isnan(gt_st) and not np.isnan(mlp_st) else np.nan
-                individual_row[f'model{model_idx+1}_mlp_{st_name}'] = mlp_st
-                individual_row[f'model{model_idx+1}_mlp_{st_name}_error'] = mlp_st_error
+                
+                if 'eline' in st_name and not np.isnan(mlp_st):
+                    mlp_st_scaled = mlp_st * SCALE_FACTOR
+                    mlp_st_error_224 = abs(mlp_st - gt_st) if not np.isnan(gt_st) else np.nan
+                    mlp_st_error_600 = mlp_st_error_224 * SCALE_FACTOR if not np.isnan(mlp_st_error_224) else np.nan
+                    
+                    individual_row[f'model{model_idx+1}_mlp_{st_name}_224px'] = mlp_st
+                    individual_row[f'model{model_idx+1}_mlp_{st_name}_600px'] = mlp_st_scaled
+                    individual_row[f'model{model_idx+1}_mlp_{st_name}_error_224px'] = mlp_st_error_224
+                    individual_row[f'model{model_idx+1}_mlp_{st_name}_error_600px'] = mlp_st_error_600
+                else:
+                    mlp_st_error = abs(mlp_st - gt_st) if not np.isnan(gt_st) and not np.isnan(mlp_st) else np.nan
+                    individual_row[f'model{model_idx+1}_mlp_{st_name}'] = mlp_st
+                    individual_row[f'model{model_idx+1}_mlp_{st_name}_error'] = mlp_st_error
             
             # Add classifications
             individual_row[f'model{model_idx+1}_hrnetv2_classification'] = model_hrnet_class
@@ -1071,10 +1177,21 @@ def save_angle_predictions_to_csv(ensemble_hrnet: np.ndarray, ensemble_mlp: np.n
         
         # Add ensemble soft tissue
         for st_name in soft_tissue_names:
-            individual_row[f'ensemble_hrnetv2_{st_name}'] = ensemble_hrnet_soft_tissue.get(st_name, np.nan)
-            individual_row[f'ensemble_hrnetv2_{st_name}_error'] = ensemble_row[f'ensemble_hrnetv2_{st_name}_error']
-            individual_row[f'ensemble_mlp_{st_name}'] = ensemble_mlp_soft_tissue.get(st_name, np.nan)
-            individual_row[f'ensemble_mlp_{st_name}_error'] = ensemble_row[f'ensemble_mlp_{st_name}_error']
+            if 'eline' in st_name:
+                individual_row[f'ensemble_hrnetv2_{st_name}_224px'] = ensemble_row.get(f'ensemble_hrnetv2_{st_name}_224px', np.nan)
+                individual_row[f'ensemble_hrnetv2_{st_name}_600px'] = ensemble_row.get(f'ensemble_hrnetv2_{st_name}_600px', np.nan)
+                individual_row[f'ensemble_hrnetv2_{st_name}_error_224px'] = ensemble_row.get(f'ensemble_hrnetv2_{st_name}_error_224px', np.nan)
+                individual_row[f'ensemble_hrnetv2_{st_name}_error_600px'] = ensemble_row.get(f'ensemble_hrnetv2_{st_name}_error_600px', np.nan)
+                
+                individual_row[f'ensemble_mlp_{st_name}_224px'] = ensemble_row.get(f'ensemble_mlp_{st_name}_224px', np.nan)
+                individual_row[f'ensemble_mlp_{st_name}_600px'] = ensemble_row.get(f'ensemble_mlp_{st_name}_600px', np.nan)
+                individual_row[f'ensemble_mlp_{st_name}_error_224px'] = ensemble_row.get(f'ensemble_mlp_{st_name}_error_224px', np.nan)
+                individual_row[f'ensemble_mlp_{st_name}_error_600px'] = ensemble_row.get(f'ensemble_mlp_{st_name}_error_600px', np.nan)
+            else:
+                individual_row[f'ensemble_hrnetv2_{st_name}'] = ensemble_hrnet_soft_tissue.get(st_name, np.nan)
+                individual_row[f'ensemble_hrnetv2_{st_name}_error'] = ensemble_row.get(f'ensemble_hrnetv2_{st_name}_error', np.nan)
+                individual_row[f'ensemble_mlp_{st_name}'] = ensemble_mlp_soft_tissue.get(st_name, np.nan)
+                individual_row[f'ensemble_mlp_{st_name}_error'] = ensemble_row.get(f'ensemble_mlp_{st_name}_error', np.nan)
         
         # Add ensemble classifications
         individual_row['ensemble_hrnetv2_classification'] = ensemble_hrnet_class
@@ -1130,8 +1247,12 @@ def save_angle_predictions_to_csv(ensemble_hrnet: np.ndarray, ensemble_mlp: np.n
             gt_mean = gt_values.mean()
             
             # Get ensemble errors
-            mlp_errors = ensemble_angle_df[f'ensemble_mlp_{st_name}_error'].dropna()
-            hrnet_errors = ensemble_angle_df[f'ensemble_hrnetv2_{st_name}_error'].dropna()
+            if 'eline' in st_name:
+                mlp_errors = ensemble_angle_df[f'ensemble_mlp_{st_name}_error_224px'].dropna()
+                hrnet_errors = ensemble_angle_df[f'ensemble_hrnetv2_{st_name}_error_224px'].dropna()
+            else:
+                mlp_errors = ensemble_angle_df[f'ensemble_mlp_{st_name}_error'].dropna()
+                hrnet_errors = ensemble_angle_df[f'ensemble_hrnetv2_{st_name}_error'].dropna()
             
             if len(mlp_errors) > 0 and len(hrnet_errors) > 0:
                 mlp_mae = mlp_errors.mean()
@@ -1865,6 +1986,7 @@ def main():
     print("="*80)
     print("ENSEMBLE CONCURRENT JOINT MLP EVALUATION")
     print("="*80)
+    print(f"📏 Image scaling: {MODEL_INPUT_SIZE}x{MODEL_INPUT_SIZE} → {ORIGINAL_IMAGE_SIZE}x{ORIGINAL_IMAGE_SIZE} (scale factor: {SCALE_FACTOR:.4f})")
     
     # Initialize MMPose scope
     init_default_scope('mmpose')
@@ -2165,12 +2287,15 @@ def main():
     print(f"   - Angle error analysis: angle_error_analysis.png")
     print(f"   - Classification analysis: classification_analysis.png")
     print(f"   Note: Files include ANB angle, soft tissue measurements, and patient classifications")
+    print(f"   Note: Coordinates are scaled to original 600x600 image space")
+    print(f"   Note: Errors are provided in both 224x224 (model space) and 600x600 (original space)")
     
     # Quick summary
     ensemble_mre = ensemble_mlp_overall['mre']
+    ensemble_mre_600 = ensemble_mre * SCALE_FACTOR
     print(f"\n🎉 Ensemble Evaluation Summary:")
     print(f"📊 {len(all_hrnet_preds)} models successfully evaluated")
-    print(f"🎯 Ensemble MLP MRE: {ensemble_mre:.3f} pixels")
+    print(f"🎯 Ensemble MLP MRE: {ensemble_mre:.3f} pixels (224x224) / {ensemble_mre_600:.3f} pixels (600x600)")
     
     if len(all_hrnet_preds) > 1 and args.evaluate_individual:
         individual_mres = [results[f'Model {i+1} MLP (Test)']['overall']['mre'] for i in range(len(all_hrnet_preds))]
