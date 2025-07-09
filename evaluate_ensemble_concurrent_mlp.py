@@ -248,11 +248,11 @@ def classify_patient(anb_angle: float) -> str:
     if np.isnan(anb_angle):
         return 'Unknown'
     
-    if 1 < anb_angle < 4:
+    if 0 < anb_angle < 4:
         return 'Class I'
     elif anb_angle >= 4:
         return 'Class II'
-    else:  # anb_angle <= 1
+    else:  # anb_angle <= 0
         return 'Class III'
 
 def calculate_classification_metrics(true_labels: List[str], pred_labels: List[str]) -> Dict[str, any]:
