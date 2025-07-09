@@ -164,6 +164,158 @@ def calculate_cephalometric_angles(coords: np.ndarray, landmark_names: List[str]
     
     return angles
 
+def calculate_perpendicular_distance(point: np.ndarray, line_start: np.ndarray, line_end: np.ndarray) -> float:
+    """Calculate perpendicular distance from a point to a line defined by two points."""
+    # Vector from line_start to line_end
+    line_vec = line_end - line_start
+    # Vector from line_start to point
+    point_vec = point - line_start
+    
+    # Project point_vec onto line_vec
+    line_length = np.linalg.norm(line_vec)
+    if line_length == 0:
+        return np.linalg.norm(point_vec)
+    
+    line_unitvec = line_vec / line_length
+    proj_length = np.dot(point_vec, line_unitvec)
+    
+    # Find the closest point on the line
+    if proj_length < 0:
+        closest_point = line_start
+    elif proj_length > line_length:
+        closest_point = line_end
+    else:
+        closest_point = line_start + proj_length * line_unitvec
+    
+    # Calculate distance
+    return np.linalg.norm(point - closest_point)
+
+def calculate_soft_tissue_measurements(coords: np.ndarray, landmark_names: List[str]) -> Dict[str, float]:
+    """Calculate soft tissue measurements including Nasolabial angle and E-line distances."""
+    # Create landmark index map
+    landmark_idx = {name: i for i, name in enumerate(landmark_names)}
+    
+    # Helper function to get landmark coordinates
+    def get_point(name: str) -> np.ndarray:
+        if name in landmark_idx:
+            return coords[landmark_idx[name]]
+        return np.array([0, 0])
+    
+    measurements = {}
+    
+    # Nasolabial Angle
+    try:
+        tip_nose = get_point('Tip_of_the_nose')
+        subnasal = get_point('Subnasal')
+        upper_lip = get_point('Upper_lip')
+        
+        if np.all(tip_nose > 0) and np.all(subnasal > 0) and np.all(upper_lip > 0):
+            # Angle at subnasal between tip_nose and upper_lip
+            nasolabial = ang([subnasal, tip_nose], [subnasal, upper_lip])
+            measurements['nasolabial_angle'] = nasolabial
+        else:
+            measurements['nasolabial_angle'] = np.nan
+    except:
+        measurements['nasolabial_angle'] = np.nan
+    
+    # E-Line measurements
+    try:
+        tip_nose = get_point('Tip_of_the_nose')
+        st_pogonion = get_point('ST_Pogonion')
+        upper_lip = get_point('Upper_lip')
+        lower_lip = get_point('Lower_lip')
+        
+        if (np.all(tip_nose > 0) and np.all(st_pogonion > 0) and 
+            np.all(upper_lip > 0) and np.all(lower_lip > 0)):
+            
+            # Calculate perpendicular distances to E-line
+            upper_lip_dist = calculate_perpendicular_distance(upper_lip, tip_nose, st_pogonion)
+            lower_lip_dist = calculate_perpendicular_distance(lower_lip, tip_nose, st_pogonion)
+            
+            measurements['upper_lip_to_eline'] = upper_lip_dist
+            measurements['lower_lip_to_eline'] = lower_lip_dist
+        else:
+            measurements['upper_lip_to_eline'] = np.nan
+            measurements['lower_lip_to_eline'] = np.nan
+    except:
+        measurements['upper_lip_to_eline'] = np.nan
+        measurements['lower_lip_to_eline'] = np.nan
+    
+    return measurements
+
+def classify_patient(anb_angle: float) -> str:
+    """Classify patient based on ANB angle."""
+    if np.isnan(anb_angle):
+        return 'Unknown'
+    
+    if 1 < anb_angle < 4:
+        return 'Class I'
+    elif anb_angle >= 4:
+        return 'Class II'
+    else:  # anb_angle <= 1
+        return 'Class III'
+
+def calculate_classification_metrics(true_labels: List[str], pred_labels: List[str]) -> Dict[str, any]:
+    """Calculate classification metrics including accuracy, precision, recall, F1, and confusion matrix."""
+    from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, confusion_matrix
+    
+    # Filter out 'Unknown' classifications
+    valid_indices = [(t != 'Unknown' and p != 'Unknown') for t, p in zip(true_labels, pred_labels)]
+    true_valid = [t for t, v in zip(true_labels, valid_indices) if v]
+    pred_valid = [p for p, v in zip(pred_labels, valid_indices) if v]
+    
+    if not true_valid:
+        return {
+            'accuracy': np.nan,
+            'precision': np.nan,
+            'recall': np.nan,
+            'f1_score': np.nan,
+            'confusion_matrix': None,
+            'n_samples': 0
+        }
+    
+    # Calculate metrics
+    classes = ['Class I', 'Class II', 'Class III']
+    
+    # Ensure all classes are represented
+    true_valid_encoded = [classes.index(c) if c in classes else -1 for c in true_valid]
+    pred_valid_encoded = [classes.index(c) if c in classes else -1 for c in pred_valid]
+    
+    accuracy = accuracy_score(true_valid_encoded, pred_valid_encoded)
+    
+    # Calculate per-class metrics with macro averaging
+    precision = precision_score(true_valid_encoded, pred_valid_encoded, average='macro', zero_division=0)
+    recall = recall_score(true_valid_encoded, pred_valid_encoded, average='macro', zero_division=0)
+    f1 = f1_score(true_valid_encoded, pred_valid_encoded, average='macro', zero_division=0)
+    
+    # Confusion matrix
+    cm = confusion_matrix(true_valid_encoded, pred_valid_encoded, labels=[0, 1, 2])
+    
+    # Also calculate per-class metrics
+    per_class_metrics = {}
+    for i, class_name in enumerate(classes):
+        class_true = [1 if t == i else 0 for t in true_valid_encoded]
+        class_pred = [1 if p == i else 0 for p in pred_valid_encoded]
+        
+        if sum(class_true) > 0:  # If this class exists in ground truth
+            per_class_metrics[class_name] = {
+                'precision': precision_score(class_true, class_pred, zero_division=0),
+                'recall': recall_score(class_true, class_pred, zero_division=0),
+                'f1': f1_score(class_true, class_pred, zero_division=0),
+                'support': sum(class_true)
+            }
+    
+    return {
+        'accuracy': accuracy,
+        'precision': precision,
+        'recall': recall,
+        'f1_score': f1,
+        'confusion_matrix': cm,
+        'class_names': classes,
+        'per_class': per_class_metrics,
+        'n_samples': len(true_valid)
+    }
+
 # Suppress warnings
 warnings.filterwarnings('ignore')
 
@@ -761,22 +913,46 @@ def save_angle_predictions_to_csv(ensemble_hrnet: np.ndarray, ensemble_mlp: np.n
                                  all_hrnet_preds: List[np.ndarray], all_mlp_preds: List[np.ndarray],
                                  gt_coords: np.ndarray, patient_ids: List[int],
                                  landmark_names: List[str], output_dir: str):
-    """Save cephalometric angle calculations and errors to CSV files."""
-    print(f"\n📐 Calculating and saving cephalometric angles...")
+    """Save cephalometric angle calculations, soft tissue measurements, and patient classification to CSV files."""
+    print(f"\n📐 Calculating and saving cephalometric angles and measurements...")
     
     # Prepare data for angle CSV files
     ensemble_angle_data = []
     individual_angle_data = []
     angle_names = ['SNA', 'SNB', 'ANB', 'u1', 'l1', 'sn_ans_pns', 'sn_mn_go']
+    soft_tissue_names = ['nasolabial_angle', 'upper_lip_to_eline', 'lower_lip_to_eline']
+    
+    # Lists for classification analysis
+    gt_classifications = []
+    ensemble_hrnet_classifications = []
+    ensemble_mlp_classifications = []
+    individual_model_classifications = [[] for _ in range(len(all_hrnet_preds))]
     
     # Process each patient
     for i, patient_id in enumerate(patient_ids):
         # Calculate ground truth angles
         gt_angles = calculate_cephalometric_angles(gt_coords[i], landmark_names)
+        gt_soft_tissue = calculate_soft_tissue_measurements(gt_coords[i], landmark_names)
         
         # Calculate ensemble predictions angles
         ensemble_hrnet_angles = calculate_cephalometric_angles(ensemble_hrnet[i], landmark_names)
+        ensemble_hrnet_soft_tissue = calculate_soft_tissue_measurements(ensemble_hrnet[i], landmark_names)
+        
         ensemble_mlp_angles = calculate_cephalometric_angles(ensemble_mlp[i], landmark_names)
+        ensemble_mlp_soft_tissue = calculate_soft_tissue_measurements(ensemble_mlp[i], landmark_names)
+        
+        # Patient classification based on ANB angle
+        gt_anb = gt_angles.get('ANB', np.nan)
+        gt_class = classify_patient(gt_anb)
+        gt_classifications.append(gt_class)
+        
+        ensemble_hrnet_anb = ensemble_hrnet_angles.get('ANB', np.nan)
+        ensemble_hrnet_class = classify_patient(ensemble_hrnet_anb)
+        ensemble_hrnet_classifications.append(ensemble_hrnet_class)
+        
+        ensemble_mlp_anb = ensemble_mlp_angles.get('ANB', np.nan)
+        ensemble_mlp_class = classify_patient(ensemble_mlp_anb)
+        ensemble_mlp_classifications.append(ensemble_mlp_class)
         
         # Prepare ensemble angle row
         ensemble_row = {'patient_id': patient_id}
@@ -799,20 +975,57 @@ def save_angle_predictions_to_csv(ensemble_hrnet: np.ndarray, ensemble_mlp: np.n
             ensemble_row[f'ensemble_mlp_{angle_name}'] = mlp_angle
             ensemble_row[f'ensemble_mlp_{angle_name}_error'] = mlp_error
         
+        # Add soft tissue measurements
+        for st_name in soft_tissue_names:
+            # Ground truth
+            gt_st = gt_soft_tissue.get(st_name, np.nan)
+            ensemble_row[f'gt_{st_name}'] = gt_st
+            
+            # Ensemble HRNetV2
+            hrnet_st = ensemble_hrnet_soft_tissue.get(st_name, np.nan)
+            hrnet_st_error = abs(hrnet_st - gt_st) if not np.isnan(gt_st) and not np.isnan(hrnet_st) else np.nan
+            ensemble_row[f'ensemble_hrnetv2_{st_name}'] = hrnet_st
+            ensemble_row[f'ensemble_hrnetv2_{st_name}_error'] = hrnet_st_error
+            
+            # Ensemble MLP
+            mlp_st = ensemble_mlp_soft_tissue.get(st_name, np.nan)
+            mlp_st_error = abs(mlp_st - gt_st) if not np.isnan(gt_st) and not np.isnan(mlp_st) else np.nan
+            ensemble_row[f'ensemble_mlp_{st_name}'] = mlp_st
+            ensemble_row[f'ensemble_mlp_{st_name}_error'] = mlp_st_error
+        
+        # Add patient classification
+        ensemble_row['gt_classification'] = gt_class
+        ensemble_row['ensemble_hrnetv2_classification'] = ensemble_hrnet_class
+        ensemble_row['ensemble_mlp_classification'] = ensemble_mlp_class
+        
         ensemble_angle_data.append(ensemble_row)
         
         # Calculate individual model angles
         individual_row = {'patient_id': patient_id}
         
-        # Add ground truth angles
+        # Add ground truth angles and soft tissue
         for angle_name in angle_names:
             individual_row[f'gt_{angle_name}'] = gt_angles.get(angle_name, np.nan)
+        for st_name in soft_tissue_names:
+            individual_row[f'gt_{st_name}'] = gt_soft_tissue.get(st_name, np.nan)
+        individual_row['gt_classification'] = gt_class
         
         # Add individual model predictions
         for model_idx in range(len(all_hrnet_preds)):
             # HRNet model angles
             model_hrnet_angles = calculate_cephalometric_angles(all_hrnet_preds[model_idx][i], landmark_names)
+            model_hrnet_soft_tissue = calculate_soft_tissue_measurements(all_hrnet_preds[model_idx][i], landmark_names)
+            
             model_mlp_angles = calculate_cephalometric_angles(all_mlp_preds[model_idx][i], landmark_names)
+            model_mlp_soft_tissue = calculate_soft_tissue_measurements(all_mlp_preds[model_idx][i], landmark_names)
+            
+            # Classifications
+            model_hrnet_anb = model_hrnet_angles.get('ANB', np.nan)
+            model_hrnet_class = classify_patient(model_hrnet_anb)
+            individual_model_classifications[model_idx].append(model_hrnet_class)
+            
+            model_mlp_anb = model_mlp_angles.get('ANB', np.nan)
+            model_mlp_class = classify_patient(model_mlp_anb)
             
             for angle_name in angle_names:
                 gt_angle = gt_angles.get(angle_name, np.nan)
@@ -828,6 +1041,26 @@ def save_angle_predictions_to_csv(ensemble_hrnet: np.ndarray, ensemble_mlp: np.n
                 mlp_error = abs(mlp_angle - gt_angle) if not np.isnan(gt_angle) and not np.isnan(mlp_angle) else np.nan
                 individual_row[f'model{model_idx+1}_mlp_{angle_name}'] = mlp_angle
                 individual_row[f'model{model_idx+1}_mlp_{angle_name}_error'] = mlp_error
+            
+            # Add soft tissue for individual models
+            for st_name in soft_tissue_names:
+                gt_st = gt_soft_tissue.get(st_name, np.nan)
+                
+                # HRNet model
+                hrnet_st = model_hrnet_soft_tissue.get(st_name, np.nan)
+                hrnet_st_error = abs(hrnet_st - gt_st) if not np.isnan(gt_st) and not np.isnan(hrnet_st) else np.nan
+                individual_row[f'model{model_idx+1}_hrnetv2_{st_name}'] = hrnet_st
+                individual_row[f'model{model_idx+1}_hrnetv2_{st_name}_error'] = hrnet_st_error
+                
+                # MLP model
+                mlp_st = model_mlp_soft_tissue.get(st_name, np.nan)
+                mlp_st_error = abs(mlp_st - gt_st) if not np.isnan(gt_st) and not np.isnan(mlp_st) else np.nan
+                individual_row[f'model{model_idx+1}_mlp_{st_name}'] = mlp_st
+                individual_row[f'model{model_idx+1}_mlp_{st_name}_error'] = mlp_st_error
+            
+            # Add classifications
+            individual_row[f'model{model_idx+1}_hrnetv2_classification'] = model_hrnet_class
+            individual_row[f'model{model_idx+1}_mlp_classification'] = model_mlp_class
         
         # Add ensemble angles at the end
         for angle_name in angle_names:
@@ -835,6 +1068,17 @@ def save_angle_predictions_to_csv(ensemble_hrnet: np.ndarray, ensemble_mlp: np.n
             individual_row[f'ensemble_hrnetv2_{angle_name}_error'] = ensemble_row[f'ensemble_hrnetv2_{angle_name}_error']
             individual_row[f'ensemble_mlp_{angle_name}'] = ensemble_mlp_angles.get(angle_name, np.nan)
             individual_row[f'ensemble_mlp_{angle_name}_error'] = ensemble_row[f'ensemble_mlp_{angle_name}_error']
+        
+        # Add ensemble soft tissue
+        for st_name in soft_tissue_names:
+            individual_row[f'ensemble_hrnetv2_{st_name}'] = ensemble_hrnet_soft_tissue.get(st_name, np.nan)
+            individual_row[f'ensemble_hrnetv2_{st_name}_error'] = ensemble_row[f'ensemble_hrnetv2_{st_name}_error']
+            individual_row[f'ensemble_mlp_{st_name}'] = ensemble_mlp_soft_tissue.get(st_name, np.nan)
+            individual_row[f'ensemble_mlp_{st_name}_error'] = ensemble_row[f'ensemble_mlp_{st_name}_error']
+        
+        # Add ensemble classifications
+        individual_row['ensemble_hrnetv2_classification'] = ensemble_hrnet_class
+        individual_row['ensemble_mlp_classification'] = ensemble_mlp_class
         
         individual_angle_data.append(individual_row)
     
@@ -854,9 +1098,10 @@ def save_angle_predictions_to_csv(ensemble_hrnet: np.ndarray, ensemble_mlp: np.n
     
     # Calculate and print angle error statistics
     print(f"\n📊 Angle Error Statistics:")
-    print(f"{'Angle':<15} {'GT Mean':<12} {'Ensemble MLP MAE':<20} {'Ensemble HRNet MAE':<20} {'Improvement':<15}")
-    print("-" * 85)
+    print(f"{'Measurement':<20} {'GT Mean':<12} {'Ensemble MLP MAE':<20} {'Ensemble HRNet MAE':<20} {'Improvement':<15}")
+    print("-" * 95)
     
+    # Print angle statistics
     for angle_name in angle_names:
         # Get ground truth values
         gt_values = ensemble_angle_df[f'gt_{angle_name}'].dropna()
@@ -873,13 +1118,64 @@ def save_angle_predictions_to_csv(ensemble_hrnet: np.ndarray, ensemble_mlp: np.n
                 hrnet_mae = hrnet_errors.mean()
                 improvement = (hrnet_mae - mlp_mae) / hrnet_mae * 100 if hrnet_mae > 0 else 0
                 
-                print(f"{angle_name:<15} {gt_mean:<12.1f} {mlp_mae:<20.2f} {hrnet_mae:<20.2f} {improvement:<15.1f}%")
+                print(f"{angle_name:<20} {gt_mean:<12.1f} {mlp_mae:<20.2f} {hrnet_mae:<20.2f} {improvement:<15.1f}%")
     
-    # Create angle error visualization
-    create_angle_error_visualization(ensemble_angle_df, angle_names, output_dir)
+    # Print soft tissue statistics
+    print("\n📏 Soft Tissue Measurement Statistics:")
+    for st_name in soft_tissue_names:
+        # Get ground truth values
+        gt_values = ensemble_angle_df[f'gt_{st_name}'].dropna()
+        
+        if len(gt_values) > 0:
+            gt_mean = gt_values.mean()
+            
+            # Get ensemble errors
+            mlp_errors = ensemble_angle_df[f'ensemble_mlp_{st_name}_error'].dropna()
+            hrnet_errors = ensemble_angle_df[f'ensemble_hrnetv2_{st_name}_error'].dropna()
+            
+            if len(mlp_errors) > 0 and len(hrnet_errors) > 0:
+                mlp_mae = mlp_errors.mean()
+                hrnet_mae = hrnet_errors.mean()
+                improvement = (hrnet_mae - mlp_mae) / hrnet_mae * 100 if hrnet_mae > 0 else 0
+                
+                unit = '°' if 'angle' in st_name else 'px'
+                print(f"{st_name:<20} {gt_mean:<12.1f}{unit} {mlp_mae:<20.2f} {hrnet_mae:<20.2f} {improvement:<15.1f}%")
+    
+    # Calculate and print classification metrics
+    print(f"\n🏷️  Patient Classification Metrics (based on ANB angle):")
+    print("-" * 70)
+    
+    # Ensemble HRNetV2 classification metrics
+    hrnet_metrics = calculate_classification_metrics(gt_classifications, ensemble_hrnet_classifications)
+    print(f"\nEnsemble HRNetV2 Classification:")
+    print(f"  Accuracy: {hrnet_metrics['accuracy']:.3f}")
+    print(f"  Precision (macro): {hrnet_metrics['precision']:.3f}")
+    print(f"  Recall (macro): {hrnet_metrics['recall']:.3f}")
+    print(f"  F1-Score (macro): {hrnet_metrics['f1_score']:.3f}")
+    print(f"  Valid samples: {hrnet_metrics['n_samples']}")
+    
+    # Ensemble MLP classification metrics
+    mlp_metrics = calculate_classification_metrics(gt_classifications, ensemble_mlp_classifications)
+    print(f"\nEnsemble MLP Classification:")
+    print(f"  Accuracy: {mlp_metrics['accuracy']:.3f}")
+    print(f"  Precision (macro): {mlp_metrics['precision']:.3f}")
+    print(f"  Recall (macro): {mlp_metrics['recall']:.3f}")
+    print(f"  F1-Score (macro): {mlp_metrics['f1_score']:.3f}")
+    print(f"  Valid samples: {mlp_metrics['n_samples']}")
+    
+    # Save classification metrics
+    classification_results = {
+        'ensemble_hrnetv2': hrnet_metrics,
+        'ensemble_mlp': mlp_metrics
+    }
+    
+    # Create comprehensive visualization
+    create_angle_error_visualization(ensemble_angle_df, angle_names, soft_tissue_names, output_dir)
+    create_classification_visualization(classification_results, output_dir)
 
-def create_angle_error_visualization(angle_df: pd.DataFrame, angle_names: List[str], output_dir: str):
-    """Create visualization of angle errors."""
+def create_angle_error_visualization(angle_df: pd.DataFrame, angle_names: List[str], 
+                                   soft_tissue_names: List[str], output_dir: str):
+    """Create visualization of angle and soft tissue measurement errors."""
     fig, axes = plt.subplots(2, 2, figsize=(15, 12))
     
     # Plot 1: Average angle errors comparison
@@ -1402,6 +1698,135 @@ def print_results_table(results: Dict[str, Dict], landmark_names: List[str]):
                 print(f"   Ensemble MLP (Test): {ensemble_mre:.3f} pixels")
                 print(f"   Improvement: {improvement:+.1f}%")
 
+def create_classification_visualization(classification_results: Dict[str, Dict], output_dir: str):
+    """Create visualization of patient classification results."""
+    fig, axes = plt.subplots(2, 2, figsize=(15, 12))
+    
+    # Extract metrics
+    hrnet_metrics = classification_results['ensemble_hrnetv2']
+    mlp_metrics = classification_results['ensemble_mlp']
+    
+    # Plot 1: Confusion Matrices
+    ax = axes[0, 0]
+    if hrnet_metrics['confusion_matrix'] is not None:
+        im = ax.imshow(hrnet_metrics['confusion_matrix'], cmap='Blues', interpolation='nearest')
+        
+        # Add text annotations
+        for i in range(len(hrnet_metrics['class_names'])):
+            for j in range(len(hrnet_metrics['class_names'])):
+                text = ax.text(j, i, str(hrnet_metrics['confusion_matrix'][i, j]),
+                             ha="center", va="center", color="black")
+        
+        ax.set_xticks(range(len(hrnet_metrics['class_names'])))
+        ax.set_yticks(range(len(hrnet_metrics['class_names'])))
+        ax.set_xticklabels(hrnet_metrics['class_names'])
+        ax.set_yticklabels(hrnet_metrics['class_names'])
+        ax.set_xlabel('Predicted')
+        ax.set_ylabel('True')
+        ax.set_title('Ensemble HRNetV2 Confusion Matrix')
+        plt.colorbar(im, ax=ax)
+    
+    ax = axes[0, 1]
+    if mlp_metrics['confusion_matrix'] is not None:
+        im = ax.imshow(mlp_metrics['confusion_matrix'], cmap='Reds', interpolation='nearest')
+        
+        # Add text annotations
+        for i in range(len(mlp_metrics['class_names'])):
+            for j in range(len(mlp_metrics['class_names'])):
+                text = ax.text(j, i, str(mlp_metrics['confusion_matrix'][i, j]),
+                             ha="center", va="center", color="black")
+        
+        ax.set_xticks(range(len(mlp_metrics['class_names'])))
+        ax.set_yticks(range(len(mlp_metrics['class_names'])))
+        ax.set_xticklabels(mlp_metrics['class_names'])
+        ax.set_yticklabels(mlp_metrics['class_names'])
+        ax.set_xlabel('Predicted')
+        ax.set_ylabel('True')
+        ax.set_title('Ensemble MLP Confusion Matrix')
+        plt.colorbar(im, ax=ax)
+    
+    # Plot 2: Overall metrics comparison
+    ax = axes[1, 0]
+    metrics_names = ['Accuracy', 'Precision', 'Recall', 'F1-Score']
+    hrnet_values = [hrnet_metrics['accuracy'], hrnet_metrics['precision'], 
+                    hrnet_metrics['recall'], hrnet_metrics['f1_score']]
+    mlp_values = [mlp_metrics['accuracy'], mlp_metrics['precision'], 
+                  mlp_metrics['recall'], mlp_metrics['f1_score']]
+    
+    x = np.arange(len(metrics_names))
+    width = 0.35
+    
+    bars1 = ax.bar(x - width/2, hrnet_values, width, label='Ensemble HRNetV2', color='blue', alpha=0.7)
+    bars2 = ax.bar(x + width/2, mlp_values, width, label='Ensemble MLP', color='red', alpha=0.7)
+    
+    ax.set_ylabel('Score')
+    ax.set_title('Classification Metrics Comparison')
+    ax.set_xticks(x)
+    ax.set_xticklabels(metrics_names)
+    ax.legend()
+    ax.set_ylim(0, 1.1)
+    ax.grid(True, alpha=0.3)
+    
+    # Add value labels on bars
+    for bars in [bars1, bars2]:
+        for bar in bars:
+            height = bar.get_height()
+            ax.annotate(f'{height:.3f}',
+                       xy=(bar.get_x() + bar.get_width() / 2, height),
+                       xytext=(0, 3),  # 3 points vertical offset
+                       textcoords="offset points",
+                       ha='center', va='bottom',
+                       fontsize=8)
+    
+    # Plot 3: Per-class performance
+    ax = axes[1, 1]
+    
+    # Get per-class metrics
+    classes = hrnet_metrics['class_names']
+    per_class_data = []
+    
+    for class_name in classes:
+        hrnet_class = hrnet_metrics['per_class'].get(class_name, {})
+        mlp_class = mlp_metrics['per_class'].get(class_name, {})
+        
+        per_class_data.append({
+            'class': class_name,
+            'hrnet_f1': hrnet_class.get('f1', 0),
+            'mlp_f1': mlp_class.get('f1', 0),
+            'support': hrnet_class.get('support', 0)
+        })
+    
+    if per_class_data:
+        class_names = [d['class'] for d in per_class_data]
+        hrnet_f1s = [d['hrnet_f1'] for d in per_class_data]
+        mlp_f1s = [d['mlp_f1'] for d in per_class_data]
+        supports = [d['support'] for d in per_class_data]
+        
+        x = np.arange(len(class_names))
+        bars1 = ax.bar(x - width/2, hrnet_f1s, width, label='Ensemble HRNetV2', color='blue', alpha=0.7)
+        bars2 = ax.bar(x + width/2, mlp_f1s, width, label='Ensemble MLP', color='red', alpha=0.7)
+        
+        ax.set_ylabel('F1-Score')
+        ax.set_title('Per-Class F1-Score Comparison')
+        ax.set_xticks(x)
+        ax.set_xticklabels(class_names)
+        ax.legend()
+        ax.set_ylim(0, 1.1)
+        ax.grid(True, alpha=0.3)
+        
+        # Add sample counts
+        for i, (x_pos, support) in enumerate(zip(x, supports)):
+            ax.text(x_pos, -0.05, f'n={support}', ha='center', va='top', fontsize=8)
+    
+    plt.suptitle('Patient Classification Analysis (ANB-based)', fontsize=16, fontweight='bold')
+    plt.tight_layout()
+    
+    output_path = os.path.join(output_dir, 'classification_analysis.png')
+    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    
+    print(f"   ✓ Classification visualization saved to: {os.path.basename(output_path)}")
+
 def main():
     """Main ensemble evaluation function."""
     
@@ -1735,9 +2160,11 @@ def main():
     print(f"   Location: {os.path.join('ensemble_evaluation', 'patient_visualizations')}")
     
     print(f"\n📐 Cephalometric Angle Files:")
-    print(f"   - Ensemble angles: ensemble_angle_predictions.csv")
-    print(f"   - All models angles: all_models_angle_predictions.csv")
+    print(f"   - Ensemble angles & soft tissue: ensemble_angle_predictions.csv")
+    print(f"   - All models angles & soft tissue: all_models_angle_predictions.csv")
     print(f"   - Angle error analysis: angle_error_analysis.png")
+    print(f"   - Classification analysis: classification_analysis.png")
+    print(f"   Note: Files include ANB angle, soft tissue measurements, and patient classifications")
     
     # Quick summary
     ensemble_mre = ensemble_mlp_overall['mre']
