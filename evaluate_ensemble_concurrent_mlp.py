@@ -255,11 +255,12 @@ def load_model_components(model_dir: str, device: torch.device, config_path: str
     return hrnet_model, mlp_joint, scaler_input, scaler_target, model_type, hrnet_checkpoint_name
 
 def evaluate_single_model(hrnet_model, mlp_joint, scaler_input, scaler_target, 
-                         test_df, landmark_names, landmark_cols, device) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Evaluate a single model and return predictions."""
+                         test_df, landmark_names, landmark_cols, device) -> Tuple[np.ndarray, np.ndarray, np.ndarray, List[int]]:
+    """Evaluate a single model and return predictions with patient IDs."""
     hrnet_predictions = []
     mlp_predictions = []
     ground_truths = []
+    patient_ids = []
     
     print(f"   🔄 Running inference on {len(test_df)} samples...")
     
@@ -307,14 +308,15 @@ def evaluate_single_model(hrnet_model, mlp_joint, scaler_input, scaler_target,
             hrnet_predictions.append(pred_keypoints)
             mlp_predictions.append(refined_keypoints)
             ground_truths.append(gt_keypoints)
+            patient_ids.append(row['patient_id'])
             
         except Exception as e:
             continue
     
     if len(hrnet_predictions) == 0:
-        return None, None, None
+        return None, None, None, []
     
-    return np.array(hrnet_predictions), np.array(mlp_predictions), np.array(ground_truths)
+    return np.array(hrnet_predictions), np.array(mlp_predictions), np.array(ground_truths), patient_ids
 
 def compute_metrics(pred_coords, gt_coords, landmark_names) -> Tuple[Dict, Dict]:
     """Compute comprehensive evaluation metrics."""
@@ -368,6 +370,88 @@ def create_ensemble_predictions(all_hrnet_preds: List[np.ndarray],
     print(f"   ✓ Ensemble shape: {ensemble_hrnet.shape}")
     
     return ensemble_hrnet, ensemble_mlp
+
+def save_ensemble_predictions_to_csv(ensemble_hrnet: np.ndarray, ensemble_mlp: np.ndarray,
+                                   gt_coords: np.ndarray, patient_ids: List[int],
+                                   landmark_names: List[str], output_dir: str):
+    """Save ensemble predictions to CSV files with detailed per-landmark information."""
+    print(f"\n💾 Saving detailed predictions to CSV...")
+    
+    # Prepare data for both CSV files
+    mlp_data = []
+    hrnet_data = []
+    
+    for i, patient_id in enumerate(patient_ids):
+        mlp_row = {'patient_id': patient_id}
+        hrnet_row = {'patient_id': patient_id}
+        
+        # Add ground truth and predictions for each landmark
+        for j, landmark in enumerate(landmark_names):
+            # Ground truth
+            gt_x = gt_coords[i, j, 0]
+            gt_y = gt_coords[i, j, 1]
+            
+            mlp_row[f'gt_{landmark}_x'] = gt_x
+            mlp_row[f'gt_{landmark}_y'] = gt_y
+            hrnet_row[f'gt_{landmark}_x'] = gt_x
+            hrnet_row[f'gt_{landmark}_y'] = gt_y
+            
+            # Ensemble MLP predictions
+            mlp_x = ensemble_mlp[i, j, 0]
+            mlp_y = ensemble_mlp[i, j, 1]
+            mlp_error = np.sqrt((mlp_x - gt_x)**2 + (mlp_y - gt_y)**2) if gt_x > 0 and gt_y > 0 else np.nan
+            
+            mlp_row[f'ensemble_mlp_{landmark}_x'] = mlp_x
+            mlp_row[f'ensemble_mlp_{landmark}_y'] = mlp_y
+            mlp_row[f'ensemble_mlp_{landmark}_error'] = mlp_error
+            
+            # Ensemble HRNet predictions
+            hrnet_x = ensemble_hrnet[i, j, 0]
+            hrnet_y = ensemble_hrnet[i, j, 1]
+            hrnet_error = np.sqrt((hrnet_x - gt_x)**2 + (hrnet_y - gt_y)**2) if gt_x > 0 and gt_y > 0 else np.nan
+            
+            hrnet_row[f'ensemble_hrnetv2_{landmark}_x'] = hrnet_x
+            hrnet_row[f'ensemble_hrnetv2_{landmark}_y'] = hrnet_y
+            hrnet_row[f'ensemble_hrnetv2_{landmark}_error'] = hrnet_error
+        
+        mlp_data.append(mlp_row)
+        hrnet_data.append(hrnet_row)
+    
+    # Create DataFrames and save to CSV
+    mlp_df = pd.DataFrame(mlp_data)
+    hrnet_df = pd.DataFrame(hrnet_data)
+    
+    # Save files
+    mlp_csv_path = os.path.join(output_dir, "ensemble_mlp_predictions_detailed.csv")
+    hrnet_csv_path = os.path.join(output_dir, "ensemble_hrnetv2_predictions_detailed.csv")
+    
+    mlp_df.to_csv(mlp_csv_path, index=False)
+    hrnet_df.to_csv(hrnet_csv_path, index=False)
+    
+    print(f"   ✓ Ensemble MLP predictions saved to: {mlp_csv_path}")
+    print(f"   ✓ Ensemble HRNetV2 predictions saved to: {hrnet_csv_path}")
+    
+    # Print summary statistics
+    print(f"\n📊 Summary:")
+    print(f"   - Total patients: {len(patient_ids)}")
+    print(f"   - Total landmarks per patient: {len(landmark_names)}")
+    
+    # Calculate overall mean errors
+    mlp_errors = []
+    hrnet_errors = []
+    
+    for col in mlp_df.columns:
+        if col.endswith('_error'):
+            mlp_errors.extend(mlp_df[col].dropna().values)
+    
+    for col in hrnet_df.columns:
+        if col.endswith('_error'):
+            hrnet_errors.extend(hrnet_df[col].dropna().values)
+    
+    if mlp_errors:
+        print(f"   - Ensemble MLP mean error: {np.mean(mlp_errors):.3f} pixels")
+    if hrnet_errors:
+        print(f"   - Ensemble HRNetV2 mean error: {np.mean(hrnet_errors):.3f} pixels")
 
 def print_results_table(results: Dict[str, Dict], landmark_names: List[str]):
     """Print formatted results table."""
@@ -526,6 +610,7 @@ def main():
     all_hrnet_preds = []
     all_mlp_preds = []
     all_gt = None
+    all_patient_ids = None
     results = {}
     validation_results = {}
     
@@ -540,7 +625,7 @@ def main():
         all_model_components.append((hrnet_model, mlp_joint, scaler_input, scaler_target, model_type, checkpoint_name))
         
         # Evaluate this model on test set
-        hrnet_preds, mlp_preds, gt_coords = evaluate_single_model(
+        hrnet_preds, mlp_preds, gt_coords, patient_ids = evaluate_single_model(
             hrnet_model, mlp_joint, scaler_input, scaler_target,
             test_df, landmark_names, landmark_cols, device
         )
@@ -556,6 +641,9 @@ def main():
         
         if all_gt is None:
             all_gt = gt_coords
+        
+        if all_patient_ids is None:
+            all_patient_ids = patient_ids
         
         # Compute metrics for individual model if requested
         if args.evaluate_individual:
@@ -578,7 +666,7 @@ def main():
                     print(f"      ✓ Loaded validation set: {len(val_df)} samples")
                     
                     # Evaluate on validation set
-                    val_hrnet_preds, val_mlp_preds, val_gt_coords = evaluate_single_model(
+                    val_hrnet_preds, val_mlp_preds, val_gt_coords, val_patient_ids = evaluate_single_model(
                         hrnet_model, mlp_joint, scaler_input, scaler_target,
                         val_df, landmark_names, landmark_cols, device
                     )
@@ -628,6 +716,9 @@ def main():
     # Save results
     output_dir = os.path.join(args.base_work_dir, "ensemble_evaluation")
     os.makedirs(output_dir, exist_ok=True)
+    
+    # Save ensemble predictions to CSV with patient details
+    save_ensemble_predictions_to_csv(ensemble_hrnet, ensemble_mlp, all_gt, all_patient_ids, landmark_names, output_dir)
     
     # Save detailed comparison (test results)
     comparison_data = []
