@@ -281,6 +281,7 @@ def calculate_soft_tissue_measurements(coords: np.ndarray, landmark_names: List[
             upper_lip_dist = calculate_perpendicular_distance(upper_lip, tip_nose, st_pogonion)
             lower_lip_dist = calculate_perpendicular_distance(lower_lip, tip_nose, st_pogonion)
             
+            # Store distances in 224x224 space
             measurements['upper_lip_to_eline'] = upper_lip_dist
             measurements['lower_lip_to_eline'] = lower_lip_dist
         else:
@@ -1460,27 +1461,89 @@ def save_angle_predictions_to_csv(ensemble_hrnet: np.ndarray, ensemble_mlp: np.n
     # Print soft tissue statistics
     print("\n📏 Soft Tissue Measurement Statistics:")
     for st_name in soft_tissue_names:
-        # Get ground truth values
-        gt_values = ensemble_angle_df[f'gt_{st_name}'].dropna()
-        
-        if len(gt_values) > 0:
-            gt_mean = gt_values.mean()
+        # For E-line measurements, we need to calculate them from the coordinates
+        if 'eline' in st_name:
+            # Calculate ground truth E-line measurements
+            gt_values = []
+            mlp_errors = []
+            hrnet_errors = []
             
-            # Get ensemble errors
-            if 'eline' in st_name:
-                mlp_errors = ensemble_angle_df[f'ensemble_mlp_{st_name}_error_224px'].dropna()
-                hrnet_errors = ensemble_angle_df[f'ensemble_hrnetv2_{st_name}_error_224px'].dropna()
-            else:
+            for i, patient_id in enumerate(patient_ids):
+                # Calculate ground truth measurement
+                gt_st = calculate_soft_tissue_measurements(gt_coords[i], landmark_names).get(st_name, np.nan)
+                if not np.isnan(gt_st):
+                    gt_values.append(gt_st)
+                    
+                    # Calculate ensemble predictions
+                    mlp_st = calculate_soft_tissue_measurements(ensemble_mlp[i], landmark_names).get(st_name, np.nan)
+                    hrnet_st = calculate_soft_tissue_measurements(ensemble_hrnet[i], landmark_names).get(st_name, np.nan)
+                    
+                    if not np.isnan(mlp_st):
+                        mlp_errors.append(abs(mlp_st - gt_st))
+                    if not np.isnan(hrnet_st):
+                        hrnet_errors.append(abs(hrnet_st - gt_st))
+            
+            if gt_values:
+                gt_mean = np.mean(gt_values)
+                
+                if mlp_errors and hrnet_errors:
+                    mlp_mae = np.mean(mlp_errors)
+                    hrnet_mae = np.mean(hrnet_errors)
+                    improvement = (hrnet_mae - mlp_mae) / hrnet_mae * 100 if hrnet_mae > 0 else 0
+                    
+                    # Convert to mm if calibration is available
+                    if ruler_data:
+                        print(f"{st_name:<20} {gt_mean:<12.1f}px {mlp_mae:<20.2f} {hrnet_mae:<20.2f} {improvement:<15.1f}%")
+                        
+                        # Calculate mm statistics
+                        gt_values_mm = []
+                        mlp_errors_mm = []
+                        hrnet_errors_mm = []
+                        
+                        for i, patient_id in enumerate(patient_ids):
+                            mm_per_pixel_224 = None
+                            mm_per_pixel_600 = calculate_pixel_to_mm_ratio(ruler_data, patient_id)
+                            if mm_per_pixel_600:
+                                mm_per_pixel_224 = mm_per_pixel_600 * (224.0 / 600.0)
+                                
+                                gt_st = calculate_soft_tissue_measurements(gt_coords[i], landmark_names).get(st_name, np.nan)
+                                if not np.isnan(gt_st):
+                                    gt_values_mm.append(gt_st * mm_per_pixel_224)
+                                    
+                                    mlp_st = calculate_soft_tissue_measurements(ensemble_mlp[i], landmark_names).get(st_name, np.nan)
+                                    hrnet_st = calculate_soft_tissue_measurements(ensemble_hrnet[i], landmark_names).get(st_name, np.nan)
+                                    
+                                    if not np.isnan(mlp_st):
+                                        mlp_errors_mm.append(abs(mlp_st - gt_st) * mm_per_pixel_224)
+                                    if not np.isnan(hrnet_st):
+                                        hrnet_errors_mm.append(abs(hrnet_st - gt_st) * mm_per_pixel_224)
+                        
+                        if gt_values_mm:
+                            gt_mean_mm = np.mean(gt_values_mm)
+                            mlp_mae_mm = np.mean(mlp_errors_mm)
+                            hrnet_mae_mm = np.mean(hrnet_errors_mm)
+                            improvement_mm = (hrnet_mae_mm - mlp_mae_mm) / hrnet_mae_mm * 100 if hrnet_mae_mm > 0 else 0
+                            print(f"   (in mm)            {gt_mean_mm:<12.1f}mm {mlp_mae_mm:<20.2f} {hrnet_mae_mm:<20.2f} {improvement_mm:<15.1f}%")
+                    else:
+                        print(f"{st_name:<20} {gt_mean:<12.1f}px {mlp_mae:<20.2f} {hrnet_mae:<20.2f} {improvement:<15.1f}%")
+        else:
+            # For non-E-line measurements (e.g., nasolabial angle)
+            gt_values = ensemble_angle_df[f'gt_{st_name}'].dropna()
+            
+            if len(gt_values) > 0:
+                gt_mean = gt_values.mean()
+                
+                # Get ensemble errors
                 mlp_errors = ensemble_angle_df[f'ensemble_mlp_{st_name}_error'].dropna()
                 hrnet_errors = ensemble_angle_df[f'ensemble_hrnetv2_{st_name}_error'].dropna()
-            
-            if len(mlp_errors) > 0 and len(hrnet_errors) > 0:
-                mlp_mae = mlp_errors.mean()
-                hrnet_mae = hrnet_errors.mean()
-                improvement = (hrnet_mae - mlp_mae) / hrnet_mae * 100 if hrnet_mae > 0 else 0
                 
-                unit = '°' if 'angle' in st_name else 'px'
-                print(f"{st_name:<20} {gt_mean:<12.1f}{unit} {mlp_mae:<20.2f} {hrnet_mae:<20.2f} {improvement:<15.1f}%")
+                if len(mlp_errors) > 0 and len(hrnet_errors) > 0:
+                    mlp_mae = mlp_errors.mean()
+                    hrnet_mae = hrnet_errors.mean()
+                    improvement = (hrnet_mae - mlp_mae) / hrnet_mae * 100 if hrnet_mae > 0 else 0
+                    
+                    unit = '°'
+                    print(f"{st_name:<20} {gt_mean:<12.1f}{unit} {mlp_mae:<20.2f} {hrnet_mae:<20.2f} {improvement:<15.1f}%")
                 
                 # Also print mm errors for E-line measurements if available
                 if 'eline' in st_name and ruler_data:
