@@ -17,6 +17,8 @@ from mmpose.apis import init_model, inference_topdown
 import glob
 import argparse
 import matplotlib.pyplot as plt
+from matplotlib.patches import Circle
+import matplotlib.patches as mpatches
 from sklearn.preprocessing import StandardScaler
 import joblib
 from typing import List, Dict, Tuple, Optional
@@ -453,6 +455,490 @@ def save_ensemble_predictions_to_csv(ensemble_hrnet: np.ndarray, ensemble_mlp: n
     if hrnet_errors:
         print(f"   - Ensemble HRNetV2 mean error: {np.mean(hrnet_errors):.3f} pixels")
 
+def save_individual_model_predictions(model_idx: int, hrnet_preds: np.ndarray, mlp_preds: np.ndarray,
+                                    gt_coords: np.ndarray, patient_ids: List[int],
+                                    landmark_names: List[str], output_dir: str):
+    """Save individual model predictions to CSV files."""
+    print(f"   💾 Saving Model {model_idx} predictions...")
+    
+    # Prepare data for both CSV files
+    mlp_data = []
+    hrnet_data = []
+    
+    for i, patient_id in enumerate(patient_ids):
+        mlp_row = {'patient_id': patient_id}
+        hrnet_row = {'patient_id': patient_id}
+        
+        # Add ground truth and predictions for each landmark
+        for j, landmark in enumerate(landmark_names):
+            # Ground truth
+            gt_x = gt_coords[i, j, 0]
+            gt_y = gt_coords[i, j, 1]
+            
+            mlp_row[f'gt_{landmark}_x'] = gt_x
+            mlp_row[f'gt_{landmark}_y'] = gt_y
+            hrnet_row[f'gt_{landmark}_x'] = gt_x
+            hrnet_row[f'gt_{landmark}_y'] = gt_y
+            
+            # Model MLP predictions
+            mlp_x = mlp_preds[i, j, 0]
+            mlp_y = mlp_preds[i, j, 1]
+            mlp_error = np.sqrt((mlp_x - gt_x)**2 + (mlp_y - gt_y)**2) if gt_x > 0 and gt_y > 0 else np.nan
+            
+            mlp_row[f'model{model_idx}_mlp_{landmark}_x'] = mlp_x
+            mlp_row[f'model{model_idx}_mlp_{landmark}_y'] = mlp_y
+            mlp_row[f'model{model_idx}_mlp_{landmark}_error'] = mlp_error
+            
+            # Model HRNet predictions
+            hrnet_x = hrnet_preds[i, j, 0]
+            hrnet_y = hrnet_preds[i, j, 1]
+            hrnet_error = np.sqrt((hrnet_x - gt_x)**2 + (hrnet_y - gt_y)**2) if gt_x > 0 and gt_y > 0 else np.nan
+            
+            hrnet_row[f'model{model_idx}_hrnetv2_{landmark}_x'] = hrnet_x
+            hrnet_row[f'model{model_idx}_hrnetv2_{landmark}_y'] = hrnet_y
+            hrnet_row[f'model{model_idx}_hrnetv2_{landmark}_error'] = hrnet_error
+        
+        mlp_data.append(mlp_row)
+        hrnet_data.append(hrnet_row)
+    
+    # Create DataFrames and save to CSV
+    mlp_df = pd.DataFrame(mlp_data)
+    hrnet_df = pd.DataFrame(hrnet_data)
+    
+    # Save files
+    mlp_csv_path = os.path.join(output_dir, f"model{model_idx}_mlp_predictions_detailed.csv")
+    hrnet_csv_path = os.path.join(output_dir, f"model{model_idx}_hrnetv2_predictions_detailed.csv")
+    
+    mlp_df.to_csv(mlp_csv_path, index=False)
+    hrnet_df.to_csv(hrnet_csv_path, index=False)
+    
+    print(f"      ✓ Model {model_idx} MLP predictions saved")
+    print(f"      ✓ Model {model_idx} HRNet predictions saved")
+
+def save_all_models_combined(all_hrnet_preds: List[np.ndarray], all_mlp_preds: List[np.ndarray],
+                           ensemble_hrnet: np.ndarray, ensemble_mlp: np.ndarray,
+                           gt_coords: np.ndarray, patient_ids: List[int],
+                           landmark_names: List[str], output_dir: str):
+    """Save all models and ensemble predictions in combined CSV files."""
+    print(f"\n💾 Creating combined prediction files...")
+    
+    # Prepare data for combined CSV files
+    combined_mlp_data = []
+    combined_hrnet_data = []
+    
+    for i, patient_id in enumerate(patient_ids):
+        mlp_row = {'patient_id': patient_id}
+        hrnet_row = {'patient_id': patient_id}
+        
+        # For each landmark
+        for j, landmark in enumerate(landmark_names):
+            # Ground truth
+            gt_x = gt_coords[i, j, 0]
+            gt_y = gt_coords[i, j, 1]
+            
+            mlp_row[f'gt_{landmark}_x'] = gt_x
+            mlp_row[f'gt_{landmark}_y'] = gt_y
+            hrnet_row[f'gt_{landmark}_x'] = gt_x
+            hrnet_row[f'gt_{landmark}_y'] = gt_y
+            
+            # Individual model predictions
+            for model_idx in range(len(all_hrnet_preds)):
+                # MLP predictions
+                mlp_x = all_mlp_preds[model_idx][i, j, 0]
+                mlp_y = all_mlp_preds[model_idx][i, j, 1]
+                mlp_error = np.sqrt((mlp_x - gt_x)**2 + (mlp_y - gt_y)**2) if gt_x > 0 and gt_y > 0 else np.nan
+                
+                mlp_row[f'model{model_idx+1}_mlp_{landmark}_x'] = mlp_x
+                mlp_row[f'model{model_idx+1}_mlp_{landmark}_y'] = mlp_y
+                mlp_row[f'model{model_idx+1}_mlp_{landmark}_error'] = mlp_error
+                
+                # HRNet predictions
+                hrnet_x = all_hrnet_preds[model_idx][i, j, 0]
+                hrnet_y = all_hrnet_preds[model_idx][i, j, 1]
+                hrnet_error = np.sqrt((hrnet_x - gt_x)**2 + (hrnet_y - gt_y)**2) if gt_x > 0 and gt_y > 0 else np.nan
+                
+                hrnet_row[f'model{model_idx+1}_hrnetv2_{landmark}_x'] = hrnet_x
+                hrnet_row[f'model{model_idx+1}_hrnetv2_{landmark}_y'] = hrnet_y
+                hrnet_row[f'model{model_idx+1}_hrnetv2_{landmark}_error'] = hrnet_error
+            
+            # Ensemble predictions
+            # MLP ensemble
+            ens_mlp_x = ensemble_mlp[i, j, 0]
+            ens_mlp_y = ensemble_mlp[i, j, 1]
+            ens_mlp_error = np.sqrt((ens_mlp_x - gt_x)**2 + (ens_mlp_y - gt_y)**2) if gt_x > 0 and gt_y > 0 else np.nan
+            
+            mlp_row[f'ensemble_mlp_{landmark}_x'] = ens_mlp_x
+            mlp_row[f'ensemble_mlp_{landmark}_y'] = ens_mlp_y
+            mlp_row[f'ensemble_mlp_{landmark}_error'] = ens_mlp_error
+            
+            # HRNet ensemble
+            ens_hrnet_x = ensemble_hrnet[i, j, 0]
+            ens_hrnet_y = ensemble_hrnet[i, j, 1]
+            ens_hrnet_error = np.sqrt((ens_hrnet_x - gt_x)**2 + (ens_hrnet_y - gt_y)**2) if gt_x > 0 and gt_y > 0 else np.nan
+            
+            hrnet_row[f'ensemble_hrnetv2_{landmark}_x'] = ens_hrnet_x
+            hrnet_row[f'ensemble_hrnetv2_{landmark}_y'] = ens_hrnet_y
+            hrnet_row[f'ensemble_hrnetv2_{landmark}_error'] = ens_hrnet_error
+        
+        combined_mlp_data.append(mlp_row)
+        combined_hrnet_data.append(hrnet_row)
+    
+    # Create DataFrames and save to CSV
+    combined_mlp_df = pd.DataFrame(combined_mlp_data)
+    combined_hrnet_df = pd.DataFrame(combined_hrnet_data)
+    
+    # Save files
+    combined_mlp_csv_path = os.path.join(output_dir, "all_models_mlp_predictions_combined.csv")
+    combined_hrnet_csv_path = os.path.join(output_dir, "all_models_hrnetv2_predictions_combined.csv")
+    
+    combined_mlp_df.to_csv(combined_mlp_csv_path, index=False)
+    combined_hrnet_df.to_csv(combined_hrnet_csv_path, index=False)
+    
+    print(f"   ✓ Combined MLP predictions saved to: {os.path.basename(combined_mlp_csv_path)}")
+    print(f"   ✓ Combined HRNetV2 predictions saved to: {os.path.basename(combined_hrnet_csv_path)}")
+    
+    # Print model diversity statistics
+    print(f"\n📊 Model Diversity Analysis:")
+    
+    # Calculate standard deviation across models for each prediction
+    model_stds = []
+    for i in range(len(patient_ids)):
+        for j in range(len(landmark_names)):
+            # Skip invalid landmarks
+            if gt_coords[i, j, 0] > 0 and gt_coords[i, j, 1] > 0:
+                # MLP predictions across models
+                mlp_preds_x = [all_mlp_preds[m][i, j, 0] for m in range(len(all_mlp_preds))]
+                mlp_preds_y = [all_mlp_preds[m][i, j, 1] for m in range(len(all_mlp_preds))]
+                
+                std_x = np.std(mlp_preds_x)
+                std_y = np.std(mlp_preds_y)
+                model_stds.append(np.sqrt(std_x**2 + std_y**2))
+    
+    if model_stds:
+        print(f"   - Mean prediction std across models: {np.mean(model_stds):.3f} pixels")
+        print(f"   - Max prediction std across models: {np.max(model_stds):.3f} pixels")
+        print(f"   - Models show {'good' if np.mean(model_stds) > 0.5 else 'limited'} diversity")
+
+def calculate_per_patient_errors(pred_coords: np.ndarray, gt_coords: np.ndarray, patient_ids: List[int]) -> List[Tuple[int, float]]:
+    """Calculate average error per patient and return sorted list of (patient_id, error)."""
+    patient_errors = []
+    
+    for i, patient_id in enumerate(patient_ids):
+        # Calculate errors for all landmarks of this patient
+        valid_mask = (gt_coords[i, :, 0] > 0) & (gt_coords[i, :, 1] > 0)
+        if np.any(valid_mask):
+            errors = np.sqrt(np.sum((pred_coords[i, valid_mask] - gt_coords[i, valid_mask])**2, axis=1))
+            avg_error = np.mean(errors)
+            patient_errors.append((patient_id, avg_error))
+    
+    # Sort by error (ascending)
+    patient_errors.sort(key=lambda x: x[1])
+    return patient_errors
+
+def visualize_patient_predictions(patient_idx: int, patient_id: int, 
+                                 gt_coords: np.ndarray, ensemble_hrnet: np.ndarray, ensemble_mlp: np.ndarray,
+                                 all_hrnet_preds: List[np.ndarray], all_mlp_preds: List[np.ndarray],
+                                 landmark_names: List[str], image_data: Optional[np.ndarray],
+                                 output_path: str, title_suffix: str = ""):
+    """Create visualization for a single patient showing GT and predictions."""
+    
+    fig, axes = plt.subplots(2, 2, figsize=(16, 16))
+    axes = axes.flatten()
+    
+    # Define colors
+    gt_color = 'green'
+    ensemble_hrnet_color = 'blue'
+    ensemble_mlp_color = 'red'
+    individual_model_colors = ['cyan', 'magenta', 'yellow', 'orange', 'purple']
+    
+    # Get patient data
+    gt = gt_coords[patient_idx]
+    ens_hrnet = ensemble_hrnet[patient_idx]
+    ens_mlp = ensemble_mlp[patient_idx]
+    
+    # Calculate errors
+    valid_mask = (gt[:, 0] > 0) & (gt[:, 1] > 0)
+    hrnet_errors = np.sqrt(np.sum((ens_hrnet[valid_mask] - gt[valid_mask])**2, axis=1))
+    mlp_errors = np.sqrt(np.sum((ens_mlp[valid_mask] - gt[valid_mask])**2, axis=1))
+    avg_hrnet_error = np.mean(hrnet_errors)
+    avg_mlp_error = np.mean(mlp_errors)
+    
+    # Plot 1: Ground Truth vs Ensemble HRNetV2
+    ax = axes[0]
+    if image_data is not None:
+        ax.imshow(image_data, cmap='gray')
+    
+    # Plot points
+    for i, (g, p) in enumerate(zip(gt[valid_mask], ens_hrnet[valid_mask])):
+        ax.scatter(g[0], g[1], c=gt_color, s=50, marker='o', alpha=0.8, edgecolors='black', linewidth=1)
+        ax.scatter(p[0], p[1], c=ensemble_hrnet_color, s=30, marker='^', alpha=0.8)
+        # Draw line between GT and prediction
+        ax.plot([g[0], p[0]], [g[1], p[1]], 'gray', alpha=0.3, linewidth=0.5)
+    
+    ax.set_title(f'Patient {patient_id}: GT vs Ensemble HRNetV2\nMean Error: {avg_hrnet_error:.2f} pixels', fontsize=12)
+    ax.axis('equal')
+    ax.set_xlim(0, 224)
+    ax.set_ylim(224, 0)  # Invert y-axis for image coordinates
+    
+    # Plot 2: Ground Truth vs Ensemble MLP
+    ax = axes[1]
+    if image_data is not None:
+        ax.imshow(image_data, cmap='gray')
+    
+    for i, (g, p) in enumerate(zip(gt[valid_mask], ens_mlp[valid_mask])):
+        ax.scatter(g[0], g[1], c=gt_color, s=50, marker='o', alpha=0.8, edgecolors='black', linewidth=1)
+        ax.scatter(p[0], p[1], c=ensemble_mlp_color, s=30, marker='s', alpha=0.8)
+        ax.plot([g[0], p[0]], [g[1], p[1]], 'gray', alpha=0.3, linewidth=0.5)
+    
+    ax.set_title(f'Patient {patient_id}: GT vs Ensemble MLP\nMean Error: {avg_mlp_error:.2f} pixels', fontsize=12)
+    ax.axis('equal')
+    ax.set_xlim(0, 224)
+    ax.set_ylim(224, 0)
+    
+    # Plot 3: All Models Comparison
+    ax = axes[2]
+    if image_data is not None:
+        ax.imshow(image_data, cmap='gray')
+    
+    # Plot GT
+    ax.scatter(gt[valid_mask, 0], gt[valid_mask, 1], c=gt_color, s=100, marker='o', 
+               alpha=0.8, edgecolors='black', linewidth=2, label='Ground Truth')
+    
+    # Plot individual models
+    for model_idx in range(len(all_mlp_preds)):
+        model_pred = all_mlp_preds[model_idx][patient_idx]
+        color = individual_model_colors[model_idx % len(individual_model_colors)]
+        ax.scatter(model_pred[valid_mask, 0], model_pred[valid_mask, 1], 
+                  c=color, s=30, marker='x', alpha=0.6, label=f'Model {model_idx+1}')
+    
+    # Plot ensemble
+    ax.scatter(ens_mlp[valid_mask, 0], ens_mlp[valid_mask, 1], 
+              c=ensemble_mlp_color, s=50, marker='s', alpha=0.8, label='Ensemble MLP')
+    
+    ax.set_title(f'Patient {patient_id}: All Models Comparison', fontsize=12)
+    ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+    ax.axis('equal')
+    ax.set_xlim(0, 224)
+    ax.set_ylim(224, 0)
+    
+    # Plot 4: Per-Landmark Errors
+    ax = axes[3]
+    
+    # Get landmark names for valid landmarks
+    valid_landmark_names = [landmark_names[i] for i in range(len(landmark_names)) if valid_mask[i]]
+    hrnet_landmark_errors = hrnet_errors
+    mlp_landmark_errors = mlp_errors
+    
+    x = np.arange(len(valid_landmark_names))
+    width = 0.35
+    
+    bars1 = ax.bar(x - width/2, hrnet_landmark_errors, width, label='Ensemble HRNetV2', color=ensemble_hrnet_color, alpha=0.7)
+    bars2 = ax.bar(x + width/2, mlp_landmark_errors, width, label='Ensemble MLP', color=ensemble_mlp_color, alpha=0.7)
+    
+    ax.set_xlabel('Landmark')
+    ax.set_ylabel('Error (pixels)')
+    ax.set_title(f'Patient {patient_id}: Per-Landmark Errors')
+    ax.set_xticks(x)
+    ax.set_xticklabels(valid_landmark_names, rotation=45, ha='right')
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    
+    # Add improvement percentage on top of bars
+    for i, (h_err, m_err) in enumerate(zip(hrnet_landmark_errors, mlp_landmark_errors)):
+        if h_err > 0:
+            improvement = (h_err - m_err) / h_err * 100
+            color = 'green' if improvement > 0 else 'red'
+            ax.text(i, max(h_err, m_err) + 0.5, f'{improvement:+.0f}%', 
+                   ha='center', va='bottom', fontsize=8, color=color)
+    
+    plt.suptitle(f'Patient {patient_id} {title_suffix}', fontsize=16, fontweight='bold')
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    
+    print(f"   ✓ Saved visualization: {os.path.basename(output_path)}")
+
+def create_patient_visualizations(ensemble_hrnet: np.ndarray, ensemble_mlp: np.ndarray,
+                                all_hrnet_preds: List[np.ndarray], all_mlp_preds: List[np.ndarray],
+                                gt_coords: np.ndarray, patient_ids: List[int],
+                                test_df: pd.DataFrame, landmark_names: List[str], 
+                                output_dir: str):
+    """Create visualizations for best and worst performing patients."""
+    print(f"\n🎨 Creating patient visualizations...")
+    
+    # Create visualization directory
+    viz_dir = os.path.join(output_dir, "patient_visualizations")
+    os.makedirs(viz_dir, exist_ok=True)
+    
+    # Calculate per-patient errors for ensemble MLP
+    patient_errors = calculate_per_patient_errors(ensemble_mlp, gt_coords, patient_ids)
+    
+    # Get best 5 and worst 3 patients
+    best_patients = patient_errors[:5]  # First 5 (lowest errors)
+    worst_patients = patient_errors[-3:]  # Last 3 (highest errors)
+    
+    print(f"\n📊 Best 5 patients (lowest average error):")
+    for i, (pid, error) in enumerate(best_patients, 1):
+        print(f"   {i}. Patient {pid}: {error:.2f} pixels")
+    
+    print(f"\n📊 Worst 3 patients (highest average error):")
+    for i, (pid, error) in enumerate(worst_patients, 1):
+        print(f"   {i}. Patient {pid}: {error:.2f} pixels")
+    
+    # Create visualizations for best patients
+    print(f"\n🎨 Creating visualizations for best patients...")
+    for rank, (patient_id, error) in enumerate(best_patients, 1):
+        # Find patient index
+        patient_idx = patient_ids.index(patient_id)
+        
+        # Try to get image data
+        image_data = None
+        try:
+            # Find the row in test_df for this patient
+            patient_row = test_df[test_df['patient_id'] == patient_id].iloc[0]
+            if 'Image' in patient_row:
+                image_data = np.array(patient_row['Image'], dtype=np.uint8).reshape((224, 224, 3))
+        except:
+            pass
+        
+        output_path = os.path.join(viz_dir, f"best_{rank}_patient_{patient_id}.png")
+        visualize_patient_predictions(
+            patient_idx, patient_id, gt_coords, ensemble_hrnet, ensemble_mlp,
+            all_hrnet_preds, all_mlp_preds, landmark_names, image_data,
+            output_path, f"(Best #{rank}, Avg Error: {error:.2f} pixels)"
+        )
+    
+    # Create visualizations for worst patients
+    print(f"\n🎨 Creating visualizations for worst patients...")
+    for rank, (patient_id, error) in enumerate(worst_patients, 1):
+        # Find patient index
+        patient_idx = patient_ids.index(patient_id)
+        
+        # Try to get image data
+        image_data = None
+        try:
+            patient_row = test_df[test_df['patient_id'] == patient_id].iloc[0]
+            if 'Image' in patient_row:
+                image_data = np.array(patient_row['Image'], dtype=np.uint8).reshape((224, 224, 3))
+        except:
+            pass
+        
+        output_path = os.path.join(viz_dir, f"worst_{rank}_patient_{patient_id}.png")
+        visualize_patient_predictions(
+            patient_idx, patient_id, gt_coords, ensemble_hrnet, ensemble_mlp,
+            all_hrnet_preds, all_mlp_preds, landmark_names, image_data,
+            output_path, f"(Worst #{rank}, Avg Error: {error:.2f} pixels)"
+        )
+    
+    # Create summary visualization
+    create_summary_visualization(patient_errors, ensemble_hrnet, ensemble_mlp, 
+                               gt_coords, patient_ids, landmark_names, viz_dir)
+
+def create_summary_visualization(patient_errors: List[Tuple[int, float]], 
+                               ensemble_hrnet: np.ndarray, ensemble_mlp: np.ndarray,
+                               gt_coords: np.ndarray, patient_ids: List[int],
+                               landmark_names: List[str], output_dir: str):
+    """Create summary visualization of overall performance."""
+    fig, axes = plt.subplots(2, 2, figsize=(15, 12))
+    
+    # Plot 1: Patient error distribution
+    ax = axes[0, 0]
+    errors = [err for _, err in patient_errors]
+    ax.hist(errors, bins=30, alpha=0.7, color='blue', edgecolor='black')
+    ax.axvline(np.mean(errors), color='red', linestyle='--', linewidth=2, label=f'Mean: {np.mean(errors):.2f}')
+    ax.axvline(np.median(errors), color='green', linestyle='--', linewidth=2, label=f'Median: {np.median(errors):.2f}')
+    ax.set_xlabel('Average Error per Patient (pixels)')
+    ax.set_ylabel('Number of Patients')
+    ax.set_title('Patient Error Distribution')
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    
+    # Plot 2: Per-landmark performance comparison
+    ax = axes[0, 1]
+    
+    # Calculate per-landmark errors for both methods
+    landmark_errors_hrnet = []
+    landmark_errors_mlp = []
+    
+    for j, landmark in enumerate(landmark_names):
+        valid_mask = (gt_coords[:, j, 0] > 0) & (gt_coords[:, j, 1] > 0)
+        if np.any(valid_mask):
+            hrnet_errors = np.sqrt(np.sum((ensemble_hrnet[valid_mask, j] - gt_coords[valid_mask, j])**2, axis=1))
+            mlp_errors = np.sqrt(np.sum((ensemble_mlp[valid_mask, j] - gt_coords[valid_mask, j])**2, axis=1))
+            landmark_errors_hrnet.append(np.mean(hrnet_errors))
+            landmark_errors_mlp.append(np.mean(mlp_errors))
+        else:
+            landmark_errors_hrnet.append(0)
+            landmark_errors_mlp.append(0)
+    
+    # Sort landmarks by MLP error for better visualization
+    sorted_indices = np.argsort(landmark_errors_mlp)[::-1]
+    sorted_landmarks = [landmark_names[i] for i in sorted_indices]
+    sorted_hrnet = [landmark_errors_hrnet[i] for i in sorted_indices]
+    sorted_mlp = [landmark_errors_mlp[i] for i in sorted_indices]
+    
+    x = np.arange(len(sorted_landmarks))
+    width = 0.35
+    
+    bars1 = ax.barh(x - width/2, sorted_hrnet, width, label='Ensemble HRNetV2', color='blue', alpha=0.7)
+    bars2 = ax.barh(x + width/2, sorted_mlp, width, label='Ensemble MLP', color='red', alpha=0.7)
+    
+    ax.set_ylabel('Landmark')
+    ax.set_xlabel('Mean Error (pixels)')
+    ax.set_title('Per-Landmark Error Comparison')
+    ax.set_yticks(x)
+    ax.set_yticklabels(sorted_landmarks)
+    ax.legend()
+    ax.grid(True, alpha=0.3, axis='x')
+    
+    # Plot 3: Improvement analysis
+    ax = axes[1, 0]
+    improvements = [(h - m) / h * 100 if h > 0 else 0 
+                   for h, m in zip(landmark_errors_hrnet, landmark_errors_mlp)]
+    
+    sorted_improvements = [(landmark_names[i], improvements[i]) for i in range(len(improvements))]
+    sorted_improvements.sort(key=lambda x: x[1], reverse=True)
+    
+    improvement_names = [x[0] for x in sorted_improvements]
+    improvement_values = [x[1] for x in sorted_improvements]
+    
+    colors = ['green' if x > 0 else 'red' for x in improvement_values]
+    bars = ax.bar(range(len(improvement_names)), improvement_values, color=colors, alpha=0.7)
+    
+    ax.set_xlabel('Landmark')
+    ax.set_ylabel('Improvement (%)')
+    ax.set_title('MLP Improvement over HRNetV2 by Landmark')
+    ax.set_xticks(range(len(improvement_names)))
+    ax.set_xticklabels(improvement_names, rotation=45, ha='right')
+    ax.axhline(y=0, color='black', linestyle='-', linewidth=0.5)
+    ax.grid(True, alpha=0.3, axis='y')
+    
+    # Plot 4: Best vs Worst patients comparison
+    ax = axes[1, 1]
+    
+    best_errors = [err for _, err in patient_errors[:10]]
+    worst_errors = [err for _, err in patient_errors[-10:]]
+    
+    positions = [1, 2]
+    bp = ax.boxplot([best_errors, worst_errors], positions=positions, widths=0.6,
+                    patch_artist=True, labels=['Best 10', 'Worst 10'])
+    
+    for patch, color in zip(bp['boxes'], ['lightgreen', 'lightcoral']):
+        patch.set_facecolor(color)
+    
+    ax.set_ylabel('Average Error (pixels)')
+    ax.set_title('Best vs Worst Patients Comparison')
+    ax.grid(True, alpha=0.3, axis='y')
+    
+    plt.suptitle('Ensemble Model Performance Summary', fontsize=16, fontweight='bold')
+    plt.tight_layout()
+    
+    output_path = os.path.join(output_dir, 'performance_summary.png')
+    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    
+    print(f"   ✓ Saved summary visualization: {os.path.basename(output_path)}")
+
 def print_results_table(results: Dict[str, Dict], landmark_names: List[str]):
     """Print formatted results table."""
     print(f"\n{'='*100}")
@@ -795,12 +1281,44 @@ def main():
         val_landmark_df = pd.DataFrame(val_landmark_data)
         val_landmark_df.to_csv(os.path.join(output_dir, "key_landmarks_comparison_validation.csv"), index=False)
     
+    # Save individual model predictions (using already computed predictions)
+    print(f"\n💾 Saving individual model predictions...")
+    for i in range(len(all_hrnet_preds)):
+        save_individual_model_predictions(i+1, all_hrnet_preds[i], all_mlp_preds[i], 
+                                        all_gt, all_patient_ids, landmark_names, output_dir)
+    
+    # Save all models combined
+    save_all_models_combined(all_hrnet_preds, all_mlp_preds, ensemble_hrnet, ensemble_mlp, all_gt, all_patient_ids, landmark_names, output_dir)
+    
+    # Create patient visualizations
+    create_patient_visualizations(ensemble_hrnet, ensemble_mlp, all_hrnet_preds, all_mlp_preds, all_gt, all_patient_ids, test_df, landmark_names, output_dir)
+
     print(f"\n💾 Results saved to: {output_dir}")
+    print(f"\n📊 Summary Files:")
     print(f"   - Test set comparison: ensemble_comparison_test.csv")
     print(f"   - Test set landmarks: key_landmarks_comparison_test.csv")
     if validation_results:
         print(f"   - Validation comparison: ensemble_comparison_validation.csv")
         print(f"   - Validation landmarks: key_landmarks_comparison_validation.csv")
+    
+    print(f"\n📋 Detailed Prediction Files:")
+    print(f"   - Ensemble MLP predictions: ensemble_mlp_predictions_detailed.csv")
+    print(f"   - Ensemble HRNetV2 predictions: ensemble_hrnetv2_predictions_detailed.csv")
+    
+    print(f"\n📁 Individual Model Files:")
+    for i in range(len(all_hrnet_preds)):
+        print(f"   - Model {i+1} MLP: model{i+1}_mlp_predictions_detailed.csv")
+        print(f"   - Model {i+1} HRNetV2: model{i+1}_hrnetv2_predictions_detailed.csv")
+    
+    print(f"\n📊 Combined Analysis Files:")
+    print(f"   - All models MLP combined: all_models_mlp_predictions_combined.csv")
+    print(f"   - All models HRNetV2 combined: all_models_hrnetv2_predictions_combined.csv")
+    
+    print(f"\n🎨 Patient Visualizations:")
+    print(f"   - Best 5 patients: best_1_patient_*.png ... best_5_patient_*.png")
+    print(f"   - Worst 3 patients: worst_1_patient_*.png ... worst_3_patient_*.png")
+    print(f"   - Performance summary: performance_summary.png")
+    print(f"   Location: {os.path.join('ensemble_evaluation', 'patient_visualizations')}")
     
     # Quick summary
     ensemble_mre = ensemble_mlp_overall['mre']
