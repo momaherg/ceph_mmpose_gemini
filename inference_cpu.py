@@ -26,7 +26,7 @@ except ImportError:
 class CephalometricInference:
     """CPU inference engine for cephalometric landmark detection."""
     
-    def __init__(self, onnx_dir: str, use_quantized: bool = False):
+    def __init__(self, onnx_dir: str, use_quantized: bool = False, skip_mlp: bool = False):
         """
         Initialize inference engine.
         
@@ -36,6 +36,7 @@ class CephalometricInference:
         """
         self.onnx_dir = onnx_dir
         self.use_quantized = use_quantized
+        self.skip_mlp = skip_mlp
         
         # Load configuration
         config_path = os.path.join(onnx_dir, 'onnx_config.json')
@@ -83,9 +84,9 @@ class CephalometricInference:
         self.hrnet_session = ort.InferenceSession(hrnet_path, sess_options, providers=providers)
         print(f"✅ Loaded HRNet model: {hrnet_model_name}")
         
-        # Load MLP model if available
+        # Load MLP model if available and not skipped
         self.mlp_session = None
-        if self.config['has_mlp_refinement']:
+        if self.config['has_mlp_refinement'] and not self.skip_mlp:
             mlp_model_name = 'mlp_model.onnx'
             if self.use_quantized and os.path.exists(os.path.join(self.onnx_dir, 'mlp_model_quantized.onnx')):
                 mlp_model_name = 'mlp_model_quantized.onnx'
@@ -97,6 +98,8 @@ class CephalometricInference:
                 print(f"✅ Loaded MLP refinement model: {mlp_model_name}")
             else:
                 print(f"⚠️  MLP model not found, using HRNet predictions only")
+        elif self.skip_mlp:
+            print(f"ℹ️  MLP refinement skipped by user request (--no_mlp flag)")
     
     def preprocess_image(self, image: np.ndarray) -> np.ndarray:
         """
@@ -184,15 +187,16 @@ class CephalometricInference:
         
         return keypoints
     
-    def refine_with_mlp(self, keypoints: np.ndarray) -> np.ndarray:
+    def refine_with_mlp(self, keypoints: np.ndarray, original_shape: Tuple[int, int]) -> np.ndarray:
         """
         Refine keypoints using MLP model.
         
         Args:
-            keypoints: Initial keypoints (B, K, 2)
+            keypoints: Initial keypoints (B, K, 2) in original image coordinates
+            original_shape: Original image shape (H, W)
             
         Returns:
-            Refined keypoints (B, K, 2)
+            Refined keypoints (B, K, 2) in original image coordinates
         """
         if self.mlp_session is None:
             return keypoints
@@ -200,9 +204,26 @@ class CephalometricInference:
         batch_size = keypoints.shape[0]
         refined_keypoints = np.zeros_like(keypoints)
         
+        # MLP was trained on specific scale - need to determine this
+        # Based on your training, it's likely 224x224 or 384x384
+        # Check the training scale from config
+        mlp_training_scale = 224  # Default, will be overridden if found in config
+        if hasattr(self, 'config') and 'mlp_training_scale' in self.config:
+            mlp_training_scale = self.config['mlp_training_scale']
+        
+        # Scale keypoints to MLP training scale before processing
+        original_h, original_w = original_shape
+        scale_to_mlp_x = mlp_training_scale / original_w
+        scale_to_mlp_y = mlp_training_scale / original_h
+        
         for b in range(batch_size):
+            # Scale keypoints to MLP training scale
+            kpts_mlp_scale = keypoints[b].copy()
+            kpts_mlp_scale[:, 0] *= scale_to_mlp_x  # Scale X coordinates
+            kpts_mlp_scale[:, 1] *= scale_to_mlp_y  # Scale Y coordinates
+            
             # Flatten keypoints to 38-D vector
-            kpts_flat = keypoints[b].flatten().astype(np.float32)
+            kpts_flat = kpts_mlp_scale.flatten().astype(np.float32)
             
             # Apply normalization if scalers available
             if self.scalers and 'input' in self.scalers:
@@ -221,7 +242,12 @@ class CephalometricInference:
                 refined_flat = self.scalers['target'].inverse_transform(refined_flat.reshape(1, -1))[0]
             
             # Reshape back to keypoints
-            refined_keypoints[b] = refined_flat.reshape(-1, 2)
+            refined_mlp_scale = refined_flat.reshape(-1, 2)
+            
+            # Scale back to original image coordinates
+            refined_keypoints[b] = refined_mlp_scale.copy()
+            refined_keypoints[b][:, 0] /= scale_to_mlp_x  # Scale X back
+            refined_keypoints[b][:, 1] /= scale_to_mlp_y  # Scale Y back
         
         return refined_keypoints
     
@@ -260,7 +286,7 @@ class CephalometricInference:
         mlp_time = 0
         if self.mlp_session is not None:
             mlp_start = time.time()
-            keypoints_refined = self.refine_with_mlp(keypoints)
+            keypoints_refined = self.refine_with_mlp(keypoints, original_shape)
             mlp_time = time.time() - mlp_start
         else:
             keypoints_refined = keypoints
@@ -395,6 +421,8 @@ def main():
                         help='Output directory for results (default: inference_results)')
     parser.add_argument('--save_json', action='store_true',
                         help='Save predictions to JSON file')
+    parser.add_argument('--no_mlp', action='store_true',
+                        help='Skip MLP refinement and use only HRNet predictions')
     
     args = parser.parse_args()
     
@@ -412,7 +440,7 @@ def main():
     print(f"🚀 INITIALIZING CPU INFERENCE ENGINE")
     print(f"{'='*70}")
     
-    engine = CephalometricInference(args.onnx_dir, use_quantized=args.use_quantized)
+    engine = CephalometricInference(args.onnx_dir, use_quantized=args.use_quantized, skip_mlp=args.no_mlp)
     
     # Prepare image list
     if args.image:

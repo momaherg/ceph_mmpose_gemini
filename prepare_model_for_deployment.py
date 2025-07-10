@@ -175,6 +175,26 @@ def prepare_deployment_package(args):
             },
             'scalers': mlp_checkpoint.get('scalers', {})  # Include normalization scalers if available
         }
+        
+        # Also try to load external scaler files if checkpoint doesn't contain them
+        if 'scalers' not in mlp_checkpoint or not mlp_checkpoint['scalers']:
+            print("🔍 Looking for external scaler files...")
+            scaler_input_path = os.path.join(mlp_dir, "scaler_joint_input.pkl")
+            scaler_target_path = os.path.join(mlp_dir, "scaler_joint_target.pkl")
+            
+            if os.path.exists(scaler_input_path) and os.path.exists(scaler_target_path):
+                try:
+                    import joblib
+                    scaler_input = joblib.load(scaler_input_path)
+                    scaler_target = joblib.load(scaler_target_path)
+                    mlp_deployment['scalers'] = {
+                        'input': scaler_input,
+                        'target': scaler_target
+                    }
+                    print("✅ External scalers loaded and included")
+                except Exception as e:
+                    print(f"⚠️  Failed to load external scalers: {e}")
+        
         torch.save(mlp_deployment, mlp_output_path)
         print(f"\n✅ MLP model saved to: {mlp_output_path}")
     

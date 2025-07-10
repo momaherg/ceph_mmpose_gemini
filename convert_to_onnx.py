@@ -194,8 +194,18 @@ def convert_mlp_to_onnx(mlp_path, output_path, verify=True):
     if 'scalers' in checkpoint and checkpoint['scalers']:
         import joblib
         scalers_path = output_path.replace('.onnx', '_scalers.pkl')
-        joblib.dump(checkpoint['scalers'], scalers_path)
-        print(f"✅ Normalization scalers saved to: {scalers_path}")
+        
+        # Save the scalers
+        scalers_to_save = checkpoint['scalers']
+        
+        # Ensure scalers are properly formatted
+        if isinstance(scalers_to_save, dict) and 'input' in scalers_to_save and 'target' in scalers_to_save:
+            joblib.dump(scalers_to_save, scalers_path)
+            print(f"✅ Normalization scalers saved to: {scalers_path}")
+        else:
+            print(f"⚠️  Scalers found but not in expected format")
+    else:
+        print(f"⚠️  No scalers found in MLP checkpoint - MLP refinement may not work correctly!")
     
     return True
 
