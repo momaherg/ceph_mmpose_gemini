@@ -130,18 +130,25 @@ class CephalometricInference:
         
         return image_batch
     
-    def decode_heatmaps(self, heatmaps: np.ndarray) -> np.ndarray:
+    def decode_heatmaps(self, heatmaps: np.ndarray, original_shape: Tuple[int, int]) -> np.ndarray:
         """
-        Decode heatmaps to keypoint coordinates.
+        Decode heatmaps to keypoint coordinates in original image space.
         
         Args:
             heatmaps: Model output heatmaps (B, K, H, W)
+            original_shape: Original image shape (H, W)
             
         Returns:
-            Keypoint coordinates (B, K, 2)
+            Keypoint coordinates (B, K, 2) in original image coordinates
         """
         batch_size, num_keypoints, h, w = heatmaps.shape
         keypoints = np.zeros((batch_size, num_keypoints, 2))
+        
+        # Model input size (what the image was resized to)
+        model_input_h, model_input_w = self.config['input_size']
+        
+        # Original image size
+        original_h, original_w = original_shape
         
         for b in range(batch_size):
             for k in range(num_keypoints):
@@ -164,12 +171,16 @@ class CephalometricInference:
                     x_refined = x
                     y_refined = y
                 
-                # Scale to original image size
-                scale_x = self.config['input_size'][0] / w
-                scale_y = self.config['input_size'][1] / h
+                # First scale from heatmap size to model input size
+                x_model = x_refined * (model_input_w / w)
+                y_model = y_refined * (model_input_h / h)
                 
-                keypoints[b, k, 0] = x_refined * scale_x
-                keypoints[b, k, 1] = y_refined * scale_y
+                # Then scale from model input size to original image size
+                x_original = x_model * (original_w / model_input_w)
+                y_original = y_model * (original_h / model_input_h)
+                
+                keypoints[b, k, 0] = x_original
+                keypoints[b, k, 1] = y_original
         
         return keypoints
     
@@ -242,7 +253,7 @@ class CephalometricInference:
         
         # Decode heatmaps to keypoints
         decode_start = time.time()
-        keypoints = self.decode_heatmaps(heatmaps)
+        keypoints = self.decode_heatmaps(heatmaps, original_shape)
         decode_time = time.time() - decode_start
         
         # Refine with MLP if available
@@ -280,7 +291,7 @@ class CephalometricInference:
             return
         
         # Create figure
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 6))
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 8))
         
         # Convert BGR to RGB for display
         image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
@@ -289,8 +300,13 @@ class CephalometricInference:
         ax1.imshow(image_rgb)
         keypoints_initial = results['keypoints_initial']
         ax1.scatter(keypoints_initial[:, 0], keypoints_initial[:, 1], 
-                   c='red', s=50, marker='o', label='HRNet')
-        ax1.set_title('Initial Predictions (HRNet)')
+                   c='red', s=80, marker='o', label='HRNet', edgecolors='white', linewidth=1)
+        
+        # Add landmark numbers for easier identification
+        for i, (x, y) in enumerate(keypoints_initial):
+            ax1.text(x+5, y+5, str(i), fontsize=8, color='red', weight='bold')
+        
+        ax1.set_title(f'Initial Predictions (HRNet) - Image: {image.shape[1]}x{image.shape[0]}')
         ax1.legend()
         ax1.axis('off')
         
@@ -298,21 +314,31 @@ class CephalometricInference:
         ax2.imshow(image_rgb)
         keypoints_refined = results['keypoints']
         ax2.scatter(keypoints_refined[:, 0], keypoints_refined[:, 1], 
-                   c='green', s=50, marker='o', label='HRNet + MLP')
+                   c='green', s=80, marker='o', label='HRNet + MLP', edgecolors='white', linewidth=1)
+        
+        # Add landmark numbers
+        for i, (x, y) in enumerate(keypoints_refined):
+            ax2.text(x+5, y+5, str(i), fontsize=8, color='green', weight='bold')
         
         # Show refinement arrows if MLP was used
         if 'mlp' in results['timing'] and results['timing']['mlp'] > 0:
             for i in range(len(keypoints_initial)):
                 dx = keypoints_refined[i, 0] - keypoints_initial[i, 0]
                 dy = keypoints_refined[i, 1] - keypoints_initial[i, 1]
-                if abs(dx) > 0.1 or abs(dy) > 0.1:  # Only show significant refinements
+                distance = np.sqrt(dx**2 + dy**2)
+                if distance > 1.0:  # Show refinements larger than 1 pixel
                     ax2.arrow(keypoints_initial[i, 0], keypoints_initial[i, 1],
-                             dx, dy, head_width=3, head_length=2, 
-                             fc='blue', ec='blue', alpha=0.5)
+                             dx, dy, head_width=5, head_length=3, 
+                             fc='blue', ec='blue', alpha=0.5, linewidth=1)
         
-        ax2.set_title('Refined Predictions (HRNet + MLP)')
+        ax2.set_title(f'Refined Predictions (HRNet + MLP) - Model Input: {self.config["input_size"]}')
         ax2.legend()
         ax2.axis('off')
+        
+        # Add coordinate info
+        fig.text(0.5, 0.02, 
+                f'Scaling: {image.shape[1]}x{image.shape[0]} → {self.config["input_size"][0]}x{self.config["input_size"][1]} → {image.shape[1]}x{image.shape[0]}',
+                ha='center', fontsize=10)
         
         plt.tight_layout()
         
@@ -418,6 +444,17 @@ def main():
     
     # Create output directory
     os.makedirs(args.output_dir, exist_ok=True)
+    
+    # Debug: Print coordinate ranges
+    if results:
+        print(f"\n📊 Coordinate Ranges:")
+        for i, result in enumerate(results[:1]):  # Just first result
+            kpts = result['keypoints']
+            orig_shape = result['original_shape']
+            print(f"   Image {i+1} shape: {orig_shape}")
+            print(f"   Model input: {result['input_shape']}")
+            print(f"   X range: {kpts[:, 0].min():.1f} - {kpts[:, 0].max():.1f}")
+            print(f"   Y range: {kpts[:, 1].min():.1f} - {kpts[:, 1].max():.1f}")
     
     # Save results
     if args.save_json:
