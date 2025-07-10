@@ -2412,6 +2412,22 @@ def save_overall_results_report(results: Dict[str, Dict], validation_results: Di
     
     print(f"\n📄 Overall results report saved to: {os.path.basename(report_path)}")
     
+    # Helper function to convert NumPy arrays to lists for JSON serialization
+    def convert_numpy_to_list(obj):
+        """Recursively convert NumPy arrays to Python lists for JSON serialization."""
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        elif isinstance(obj, dict):
+            return {key: convert_numpy_to_list(value) for key, value in obj.items()}
+        elif isinstance(obj, list):
+            return [convert_numpy_to_list(item) for item in obj]
+        elif isinstance(obj, tuple):
+            return tuple(convert_numpy_to_list(item) for item in obj)
+        elif isinstance(obj, (np.integer, np.floating)):
+            return obj.item()
+        else:
+            return obj
+    
     # Also save as JSON for programmatic access
     json_report_path = os.path.join(output_dir, "overall_results.json")
     json_report = {
@@ -2434,22 +2450,22 @@ def save_overall_results_report(results: Dict[str, Dict], validation_results: Di
         },
         'test_results': {},
         'validation_results': {},
-        'classification_results': classification_results
+        'classification_results': convert_numpy_to_list(classification_results)
     }
     
     # Add test results
     for model_name, metrics in results.items():
-        json_report['test_results'][model_name] = {
+        json_report['test_results'][model_name] = convert_numpy_to_list({
             'overall': metrics['overall'],
             'key_landmarks': {lm: metrics['per_landmark'].get(lm, {}) 
                             for lm in available_landmarks if lm in metrics['per_landmark']}
-        }
+        })
     
     # Add validation results
     for model_name, metrics in validation_results.items():
-        json_report['validation_results'][model_name] = {
+        json_report['validation_results'][model_name] = convert_numpy_to_list({
             'overall': metrics['overall']
-        }
+        })
     
     with open(json_report_path, 'w') as f:
         json.dump(json_report, f, indent=2)
