@@ -178,13 +178,70 @@ def prepare_deployment_package(args):
         torch.save(mlp_deployment, mlp_output_path)
         print(f"\n✅ MLP model saved to: {mlp_output_path}")
     
-    # 3. Copy configuration file
+    # 3. Create self-contained configuration file
     config_path = "Pretrained_model/hrnetv2_w18_cephalometric_256x256_finetune.py"
     if os.path.exists(config_path):
-        import shutil
-        config_output_path = os.path.join(output_dir, "config.py")
-        shutil.copy2(config_path, config_output_path)
-        print(f"✅ Configuration copied to: {config_output_path}")
+        try:
+            # Load the config to resolve all inheritance
+            cfg = Config.fromfile(config_path)
+            
+            # Create a self-contained config file
+            config_output_path = os.path.join(output_dir, "config.py")
+            
+            # Write the flattened config
+            with open(config_output_path, 'w') as f:
+                f.write('''#!/usr/bin/env python3
+"""
+Self-contained deployment configuration for cephalometric landmark detection.
+This config has been flattened from the original training config to remove dependencies.
+"""
+
+# Core configuration converted from training config
+''')
+                # Convert the config to a dict and write it as Python code
+                config_dict = cfg.to_dict()
+                
+                # Write the config as a Python dict
+                f.write(f"# Flattened configuration\n")
+                f.write(f"_config_dict = {repr(config_dict)}\n\n")
+                
+                # Add utility functions to rebuild the config
+                f.write('''
+# Rebuild config from dict
+from mmengine.config import Config
+
+# Create config object from the flattened dict
+_cfg = Config(_config_dict)
+
+# Make all config attributes available at module level
+for key, value in _config_dict.items():
+    globals()[key] = value
+
+# Ensure the config object is available
+config = _cfg
+''')
+            
+            print(f"✅ Self-contained configuration created at: {config_output_path}")
+            
+        except Exception as e:
+            print(f"⚠️  Failed to create self-contained config: {e}")
+            print(f"📋 Copying original config file and base dependencies...")
+            
+            # Fallback: copy both the main config and base config
+            import shutil
+            config_output_path = os.path.join(output_dir, "config.py")
+            shutil.copy2(config_path, config_output_path)
+            
+            # Also copy the base config
+            base_config_path = "Pretrained_model/td-hm_hrnetv2-w18_8xb64-60e_aflw-256x256.py"
+            if os.path.exists(base_config_path):
+                base_output_path = os.path.join(output_dir, "td-hm_hrnetv2-w18_8xb64-60e_aflw-256x256.py")
+                shutil.copy2(base_config_path, base_output_path)
+                print(f"✅ Base configuration copied to: {base_output_path}")
+            
+            print(f"✅ Configuration files copied to: {config_output_path}")
+    else:
+        print(f"⚠️  Configuration file not found: {config_path}")
     
     # 4. Create deployment info
     deployment_info = {

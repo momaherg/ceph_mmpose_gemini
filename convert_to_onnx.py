@@ -228,6 +228,29 @@ def convert_to_onnx(args):
             print(f"Please run prepare_model_for_deployment.py first")
             return
     
+    # Check if the config file has dependencies and copy them if needed
+    config_path = os.path.join(deployment_dir, 'config.py')
+    try:
+        # Try to load the config to see if it has missing dependencies
+        with open(config_path, 'r') as f:
+            config_content = f.read()
+        
+        # If the config has _base_ inheritance, check if base files exist
+        if '_base_' in config_content and 'td-hm_hrnetv2-w18_8xb64-60e_aflw-256x256.py' in config_content:
+            base_config_in_deployment = os.path.join(deployment_dir, 'td-hm_hrnetv2-w18_8xb64-60e_aflw-256x256.py')
+            if not os.path.exists(base_config_in_deployment):
+                # Copy the base config from the original location
+                original_base_config = 'Pretrained_model/td-hm_hrnetv2-w18_8xb64-60e_aflw-256x256.py'
+                if os.path.exists(original_base_config):
+                    import shutil
+                    shutil.copy2(original_base_config, base_config_in_deployment)
+                    print(f"✅ Copied missing base config to: {base_config_in_deployment}")
+                else:
+                    print(f"⚠️  Warning: Base config file not found: {original_base_config}")
+                    print(f"This may cause issues during model loading")
+    except Exception as e:
+        print(f"⚠️  Warning: Could not check config dependencies: {e}")
+    
     # Load deployment info
     with open(os.path.join(deployment_dir, 'deployment_info.json'), 'r') as f:
         deployment_info = json.load(f)
