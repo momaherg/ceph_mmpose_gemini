@@ -82,9 +82,9 @@ def test_models(hrnet_path: str, mlp_path: str, scalers_json_path: str = None):
         
         print("\n🧪 Testing models...")
         
-        # Test HRNet
+        # Test HRNet with 384x384 input
         hrnet_session = ort.InferenceSession(hrnet_path)
-        dummy_input = np.random.randn(1, 3, 224, 224).astype(np.float32)
+        dummy_input = np.random.randn(1, 3, 384, 384).astype(np.float32)
         
         hrnet_output = hrnet_session.run(None, {'input': dummy_input})
         heatmaps = hrnet_output[0]
@@ -198,7 +198,8 @@ def main():
         if args.scalers_pkl.endswith('.pth'):
             try:
                 import torch
-                checkpoint = torch.load(args.scalers_pkl, map_location='cpu')
+                # Use weights_only=False to allow loading sklearn objects
+                checkpoint = torch.load(args.scalers_pkl, map_location='cpu', weights_only=False)
                 
                 if 'scalers' in checkpoint and checkpoint['scalers']:
                     # Save scalers temporarily
