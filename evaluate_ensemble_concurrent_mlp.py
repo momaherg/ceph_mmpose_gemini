@@ -8,13 +8,13 @@ The script generates comprehensive evaluation results including:
 - Detailed prediction CSVs with pixel and mm measurements
 - Angle measurements and patient classification analysis
 - Visualizations for best/worst performing patients
-- Accuracy metrics based on clinical thresholds (2mm for landmarks, 2° for angles)
+- Accuracy metrics based on clinical thresholds (2mm/4mm for landmarks, 2°/4° for angles)
 - Performance analysis for ALL landmarks and angles (not just key ones)
 
 Key Features:
 - Coordinate scaling from 224x224 to 600x600 original image space
 - Millimeter calibration using patient-specific ruler measurements
-- Clinical accuracy assessment with 2mm and 2° thresholds
+- Clinical accuracy assessment with 2mm/4mm and 2°/4° thresholds
 - Comprehensive landmark performance (all 19 landmarks)
 - Complete angle analysis (SNA, SNB, ANB, u1, l1, sn_ans_pns, sn_mn_go, nasolabial)
 - Patient classification based on ANB angle
@@ -795,6 +795,11 @@ def compute_metrics_with_mm(pred_coords, gt_coords, landmark_names, patient_ids,
         all_mm_errors = []
         calibrated_patients = 0
         
+        # Initialize accuracy counters for overall metrics
+        overall_2mm_accurate = 0
+        overall_4mm_accurate = 0
+        overall_total_predictions = 0
+        
         for i, patient_id in enumerate(patient_ids):
             mm_per_pixel_600 = calculate_pixel_to_mm_ratio(ruler_data, patient_id)
             if mm_per_pixel_600:
@@ -807,6 +812,11 @@ def compute_metrics_with_mm(pred_coords, gt_coords, landmark_names, patient_ids,
                     pixel_errors = np.sqrt(np.sum((pred_coords[i, valid_mask] - gt_coords[i, valid_mask])**2, axis=1))
                     mm_errors = pixel_errors * mm_per_pixel_224
                     all_mm_errors.extend(mm_errors)
+                    
+                    # Count overall accuracy
+                    overall_2mm_accurate += np.sum(mm_errors <= 2.0)
+                    overall_4mm_accurate += np.sum(mm_errors <= 4.0)
+                    overall_total_predictions += len(mm_errors)
         
         # Add mm statistics to overall metrics
         if all_mm_errors:
@@ -818,9 +828,20 @@ def compute_metrics_with_mm(pred_coords, gt_coords, landmark_names, patient_ids,
             overall_metrics['max_mm'] = np.max(all_mm_errors)
             overall_metrics['calibrated_patients'] = calibrated_patients
             
-            # Add per-landmark mm metrics
+            # Add overall accuracy metrics
+            overall_metrics['accuracy_2mm'] = overall_2mm_accurate / overall_total_predictions if overall_total_predictions > 0 else 0.0
+            overall_metrics['accuracy_4mm'] = overall_4mm_accurate / overall_total_predictions if overall_total_predictions > 0 else 0.0
+            overall_metrics['accuracy_2mm_count'] = overall_2mm_accurate
+            overall_metrics['accuracy_4mm_count'] = overall_4mm_accurate
+            overall_metrics['accuracy_total_count'] = overall_total_predictions
+            
+            # Add per-landmark mm metrics and accuracy
             for j, name in enumerate(landmark_names):
                 landmark_mm_errors = []
+                landmark_2mm_accurate = 0
+                landmark_4mm_accurate = 0
+                landmark_total = 0
+                
                 for i, patient_id in enumerate(patient_ids):
                     mm_per_pixel_600 = calculate_pixel_to_mm_ratio(ruler_data, patient_id)
                     if mm_per_pixel_600:
@@ -829,11 +850,25 @@ def compute_metrics_with_mm(pred_coords, gt_coords, landmark_names, patient_ids,
                             pixel_error = np.sqrt(np.sum((pred_coords[i, j] - gt_coords[i, j])**2))
                             mm_error = pixel_error * mm_per_pixel_224
                             landmark_mm_errors.append(mm_error)
+                            
+                            # Count accuracy for this landmark
+                            if mm_error <= 2.0:
+                                landmark_2mm_accurate += 1
+                            if mm_error <= 4.0:
+                                landmark_4mm_accurate += 1
+                            landmark_total += 1
                 
                 if landmark_mm_errors:
                     per_landmark_metrics[name]['mre_mm'] = np.mean(landmark_mm_errors)
                     per_landmark_metrics[name]['std_mm'] = np.std(landmark_mm_errors)
                     per_landmark_metrics[name]['median_mm'] = np.median(landmark_mm_errors)
+                    
+                    # Add per-landmark accuracy metrics
+                    per_landmark_metrics[name]['accuracy_2mm'] = float(landmark_2mm_accurate / landmark_total) if landmark_total > 0 else 0.0
+                    per_landmark_metrics[name]['accuracy_4mm'] = float(landmark_4mm_accurate / landmark_total) if landmark_total > 0 else 0.0
+                    per_landmark_metrics[name]['accuracy_2mm_count'] = int(landmark_2mm_accurate)
+                    per_landmark_metrics[name]['accuracy_4mm_count'] = int(landmark_4mm_accurate)
+                    per_landmark_metrics[name]['accuracy_total_count'] = int(landmark_total)
     
     return overall_metrics, per_landmark_metrics
 
@@ -2345,17 +2380,20 @@ def save_overall_results_report(results: Dict[str, Dict], validation_results: Di
                                  for metrics in results.values())
             
             if has_landmark_mm:
-                f.write(f"{'Model':<25} {'MRE (px)':<12} {'MRE (mm)':<12} {'Std (px)':<12} {'Std (mm)':<12}\n")
+                f.write(f"{'Model':<25} {'MRE (px)':<12} {'MRE (mm)':<12} {'2mm Acc':<10} {'4mm Acc':<10} {'Count':<8}\n")
             else:
                 f.write(f"{'Model':<25} {'MRE':<12} {'Std':<12} {'Median':<12}\n")
-            f.write("-" * 60 + "\n")
+            f.write("-" * 75 + "\n")
             
             for model_name in ['Ensemble HRNet (Test)', 'Ensemble MLP (Test)']:
                 if model_name in results and landmark in results[model_name]['per_landmark']:
                     lm_metrics = results[model_name]['per_landmark'][landmark]
                     if has_landmark_mm and 'mre_mm' in lm_metrics:
+                        acc_2mm = lm_metrics.get('accuracy_2mm', 0) * 100
+                        acc_4mm = lm_metrics.get('accuracy_4mm', 0) * 100
+                        count = lm_metrics.get('accuracy_total_count', lm_metrics.get('count', 0))
                         f.write(f"{model_name:<25} {lm_metrics['mre']:<12.3f} {lm_metrics.get('mre_mm', 'N/A'):<12.3f} "
-                               f"{lm_metrics['std']:<12.3f} {lm_metrics.get('std_mm', 'N/A'):<12.3f}\n")
+                               f"{acc_2mm:<10.1f}% {acc_4mm:<10.1f}% {count:<8}\n")
                     else:
                         f.write(f"{model_name:<25} {lm_metrics['mre']:<12.3f} {lm_metrics['std']:<12.3f} "
                                f"{lm_metrics['median']:<12.3f}\n")
@@ -2364,41 +2402,26 @@ def save_overall_results_report(results: Dict[str, Dict], validation_results: Di
         f.write("\n\nALL LANDMARKS PERFORMANCE (TEST SET):\n")
         f.write("-" * 30 + "\n")
         
-        # Calculate accuracy for 2mm threshold
+        # Overall accuracy summary
         if has_mm_metrics:
-            f.write("Accuracy metrics based on 2mm acceptable error threshold:\n\n")
+            f.write("Overall accuracy metrics based on clinical error thresholds:\n\n")
             
             for model_name in ['Ensemble HRNet (Test)', 'Ensemble MLP (Test)']:
                 if model_name in results:
-                    f.write(f"{model_name}:\n")
-                    
-                    # Calculate overall 2mm accuracy if we have the data
-                    total_predictions = 0
-                    accurate_predictions = 0
-                    
-                    for landmark in landmark_names:
-                        if landmark in results[model_name]['per_landmark']:
-                            lm_metrics = results[model_name]['per_landmark'][landmark]
-                            if 'mre_mm' in lm_metrics and lm_metrics['count'] > 0:
-                                # Estimate accuracy - this is approximate since we only have mean error
-                                # In practice, you'd need individual errors to calculate exact accuracy
-                                mre_mm = lm_metrics['mre_mm']
-                                count = lm_metrics['count']
-                                
-                                # Rough estimation: if mean error < 2mm, assume good accuracy
-                                # This is a simplification - ideally we'd have individual error data
-                                if mre_mm <= 2.0:
-                                    accurate_predictions += count
-                                total_predictions += count
-                    
-                    if total_predictions > 0:
-                        overall_accuracy = accurate_predictions / total_predictions
-                        f.write(f"  Overall 2mm Accuracy (estimated): {overall_accuracy:.1%} ({accurate_predictions}/{total_predictions})\n")
-                    f.write("\n")
+                    overall = results[model_name]['overall']
+                    if 'accuracy_2mm' in overall and 'accuracy_4mm' in overall:
+                        acc_2mm = overall['accuracy_2mm'] * 100
+                        acc_4mm = overall['accuracy_4mm'] * 100
+                        total_count = overall.get('accuracy_total_count', 0)
+                        f.write(f"{model_name}:\n")
+                        f.write(f"  2mm Accuracy: {acc_2mm:.1f}% ({overall.get('accuracy_2mm_count', 0)}/{total_count})\n")
+                        f.write(f"  4mm Accuracy: {acc_4mm:.1f}% ({overall.get('accuracy_4mm_count', 0)}/{total_count})\n")
+                        f.write(f"  Calibrated Patients: {overall.get('calibrated_patients', 0)}\n")
+                        f.write("\n")
         
         # Detailed landmark performance table
         if has_mm_metrics:
-            f.write(f"{'Landmark':<20} {'Model':<25} {'MRE (px)':<10} {'MRE (mm)':<10} {'Std (mm)':<10} {'Count':<8}\n")
+            f.write(f"{'Landmark':<20} {'Model':<25} {'MRE (mm)':<10} {'2mm Acc':<10} {'4mm Acc':<10} {'Count':<8}\n")
         else:
             f.write(f"{'Landmark':<20} {'Model':<25} {'MRE (px)':<10} {'Std (px)':<10} {'Median':<10} {'Count':<8}\n")
         f.write("-" * 95 + "\n")
@@ -2412,9 +2435,11 @@ def save_overall_results_report(results: Dict[str, Dict], validation_results: Di
                     landmark_written = True
                     
                     if has_mm_metrics and 'mre_mm' in lm_metrics:
-                        f.write(f"{landmark_display:<20} {model_name:<25} {lm_metrics['mre']:<10.3f} "
-                               f"{lm_metrics.get('mre_mm', 'N/A'):<10.3f} {lm_metrics.get('std_mm', 'N/A'):<10.3f} "
-                               f"{lm_metrics['count']:<8}\n")
+                        acc_2mm = lm_metrics.get('accuracy_2mm', 0) * 100
+                        acc_4mm = lm_metrics.get('accuracy_4mm', 0) * 100
+                        count = lm_metrics.get('accuracy_total_count', lm_metrics.get('count', 0))
+                        f.write(f"{landmark_display:<20} {model_name:<25} {lm_metrics.get('mre_mm', 'N/A'):<10.3f} "
+                               f"{acc_2mm:<10.1f}% {acc_4mm:<10.1f}% {count:<8}\n")
                     else:
                         f.write(f"{landmark_display:<20} {model_name:<25} {lm_metrics['mre']:<10.3f} "
                                f"{lm_metrics['std']:<10.3f} {lm_metrics['median']:<10.3f} "
@@ -2433,33 +2458,38 @@ def save_overall_results_report(results: Dict[str, Dict], validation_results: Di
                 angle_df = pd.read_csv(angle_csv_path)
                 angle_names = ['SNA', 'SNB', 'ANB', 'u1', 'l1', 'sn_ans_pns', 'sn_mn_go', 'nasolabial_angle']
                 
-                f.write("Accuracy metrics based on 2° acceptable error threshold:\n\n")
+                f.write("Accuracy metrics based on 2° and 4° acceptable error thresholds:\n\n")
                 
                 for model_name in ['ensemble_hrnetv2', 'ensemble_mlp']:
                     model_display = 'Ensemble HRNetV2' if model_name == 'ensemble_hrnetv2' else 'Ensemble MLP'
                     f.write(f"{model_display}:\n")
                     
                     total_angle_predictions = 0
-                    accurate_angle_predictions = 0
+                    accurate_2deg_predictions = 0
+                    accurate_4deg_predictions = 0
                     
                     for angle_name in angle_names:
                         error_col = f'{model_name}_{angle_name}_error'
                         if error_col in angle_df.columns:
                             errors = angle_df[error_col].dropna()
                             if len(errors) > 0:
-                                accurate_count = (errors <= 2.0).sum()
+                                accurate_2deg_count = (errors <= 2.0).sum()
+                                accurate_4deg_count = (errors <= 4.0).sum()
                                 total_count = len(errors)
                                 total_angle_predictions += total_count
-                                accurate_angle_predictions += accurate_count
+                                accurate_2deg_predictions += accurate_2deg_count
+                                accurate_4deg_predictions += accurate_4deg_count
                     
                     if total_angle_predictions > 0:
-                        overall_angle_accuracy = accurate_angle_predictions / total_angle_predictions
-                        f.write(f"  Overall 2° Accuracy: {overall_angle_accuracy:.1%} ({accurate_angle_predictions}/{total_angle_predictions})\n")
+                        angle_accuracy_2deg = accurate_2deg_predictions / total_angle_predictions
+                        angle_accuracy_4deg = accurate_4deg_predictions / total_angle_predictions
+                        f.write(f"  Overall 2° Accuracy: {angle_accuracy_2deg:.1%} ({accurate_2deg_predictions}/{total_angle_predictions})\n")
+                        f.write(f"  Overall 4° Accuracy: {angle_accuracy_4deg:.1%} ({accurate_4deg_predictions}/{total_angle_predictions})\n")
                     f.write("\n")
                 
                 # Detailed angle performance table
-                f.write(f"{'Angle':<20} {'Model':<25} {'Mean Error (°)':<15} {'Std Error (°)':<15} {'2° Accuracy':<12} {'Count':<8}\n")
-                f.write("-" * 100 + "\n")
+                f.write(f"{'Angle':<20} {'Model':<25} {'Mean Error (°)':<15} {'2° Accuracy':<12} {'4° Accuracy':<12} {'Count':<8}\n")
+                f.write("-" * 110 + "\n")
                 
                 for angle_name in angle_names:
                     angle_written = False
@@ -2474,13 +2504,14 @@ def save_overall_results_report(results: Dict[str, Dict], validation_results: Di
                                 angle_written = True
                                 
                                 mean_error = errors.mean()
-                                std_error = errors.std()
-                                accurate_count = (errors <= 2.0).sum()
+                                accurate_2deg_count = (errors <= 2.0).sum()
+                                accurate_4deg_count = (errors <= 4.0).sum()
                                 total_count = len(errors)
-                                accuracy = accurate_count / total_count if total_count > 0 else 0
+                                accuracy_2deg = accurate_2deg_count / total_count if total_count > 0 else 0
+                                accuracy_4deg = accurate_4deg_count / total_count if total_count > 0 else 0
                                 
                                 f.write(f"{angle_display:<20} {model_display:<25} {mean_error:<15.2f} "
-                                       f"{std_error:<15.2f} {accuracy:<12.1%} {total_count:<8}\n")
+                                       f"{accuracy_2deg:<12.1%} {accuracy_4deg:<12.1%} {total_count:<8}\n")
                     if angle_written:
                         f.write("\n")
                         
@@ -2539,24 +2570,13 @@ def save_overall_results_report(results: Dict[str, Dict], validation_results: Di
         if has_mm_metrics:
             for model_name in ['Ensemble HRNet (Test)', 'Ensemble MLP (Test)']:
                 if model_name in results:
-                    total_predictions = 0
-                    accurate_predictions = 0
-                    
-                    for landmark in landmark_names:
-                        if landmark in results[model_name]['per_landmark']:
-                            lm_metrics = results[model_name]['per_landmark'][landmark]
-                            if 'mre_mm' in lm_metrics and lm_metrics['count'] > 0:
-                                mre_mm = lm_metrics['mre_mm']
-                                count = lm_metrics['count']
-                                
-                                if mre_mm <= 2.0:
-                                    accurate_predictions += count
-                                total_predictions += count
-                    
-                    if total_predictions > 0:
-                        overall_accuracy = accurate_predictions / total_predictions
+                    overall = results[model_name]['overall']
+                    if 'accuracy_2mm' in overall and 'accuracy_4mm' in overall:
                         model_short = 'HRNetV2' if 'HRNet' in model_name else 'MLP'
-                        f.write(f"  - {model_short} Landmark 2mm Accuracy: {overall_accuracy:.1%}\n")
+                        acc_2mm = overall['accuracy_2mm'] * 100
+                        acc_4mm = overall['accuracy_4mm'] * 100
+                        f.write(f"  - {model_short} Landmark 2mm Accuracy: {acc_2mm:.1f}%\n")
+                        f.write(f"  - {model_short} Landmark 4mm Accuracy: {acc_4mm:.1f}%\n")
         
         # Angle accuracy summary
         angle_csv_path = os.path.join(output_dir, "ensemble_angle_predictions.csv")
@@ -2567,22 +2587,27 @@ def save_overall_results_report(results: Dict[str, Dict], validation_results: Di
                 
                 for model_name in ['ensemble_hrnetv2', 'ensemble_mlp']:
                     total_angle_predictions = 0
-                    accurate_angle_predictions = 0
+                    accurate_2deg_predictions = 0
+                    accurate_4deg_predictions = 0
                     
                     for angle_name in angle_names:
                         error_col = f'{model_name}_{angle_name}_error'
                         if error_col in angle_df.columns:
                             errors = angle_df[error_col].dropna()
                             if len(errors) > 0:
-                                accurate_count = (errors <= 2.0).sum()
+                                accurate_2deg_count = (errors <= 2.0).sum()
+                                accurate_4deg_count = (errors <= 4.0).sum()
                                 total_count = len(errors)
                                 total_angle_predictions += total_count
-                                accurate_angle_predictions += accurate_count
+                                accurate_2deg_predictions += accurate_2deg_count
+                                accurate_4deg_predictions += accurate_4deg_count
                     
                     if total_angle_predictions > 0:
-                        overall_angle_accuracy = accurate_angle_predictions / total_angle_predictions
+                        angle_accuracy_2deg = accurate_2deg_predictions / total_angle_predictions
+                        angle_accuracy_4deg = accurate_4deg_predictions / total_angle_predictions
                         model_short = 'HRNetV2' if model_name == 'ensemble_hrnetv2' else 'MLP'
-                        f.write(f"  - {model_short} Angle 2° Accuracy: {overall_angle_accuracy:.1%}\n")
+                        f.write(f"  - {model_short} Angle 2° Accuracy: {angle_accuracy_2deg:.1%}\n")
+                        f.write(f"  - {model_short} Angle 4° Accuracy: {angle_accuracy_4deg:.1%}\n")
             except:
                 pass
         
@@ -2669,31 +2694,19 @@ def save_overall_results_report(results: Dict[str, Dict], validation_results: Di
     # Add accuracy metrics and angle data to JSON report
     json_report['accuracy_metrics'] = {}
     
-    # Calculate 2mm accuracy for landmarks
+    # Add accuracy metrics for landmarks (2mm and 4mm)
     if results and ruler_data:
-        json_report['accuracy_metrics']['landmark_2mm_accuracy'] = {}
+        json_report['accuracy_metrics']['landmark_accuracy'] = {}
         for model_name in ['Ensemble HRNet (Test)', 'Ensemble MLP (Test)']:
             if model_name in results:
-                total_predictions = 0
-                accurate_predictions = 0
-                
-                for landmark in landmark_names:
-                    if landmark in results[model_name]['per_landmark']:
-                        lm_metrics = results[model_name]['per_landmark'][landmark]
-                        if 'mre_mm' in lm_metrics and lm_metrics['count'] > 0:
-                            mre_mm = lm_metrics['mre_mm']
-                            count = lm_metrics['count']
-                            
-                            if mre_mm <= 2.0:
-                                accurate_predictions += count
-                            total_predictions += count
-                
-                if total_predictions > 0:
-                    overall_accuracy = accurate_predictions / total_predictions
-                    json_report['accuracy_metrics']['landmark_2mm_accuracy'][model_name] = {
-                        'accuracy': float(overall_accuracy),
-                        'accurate_predictions': int(accurate_predictions),
-                        'total_predictions': int(total_predictions)
+                overall = results[model_name]['overall']
+                if 'accuracy_2mm' in overall and 'accuracy_4mm' in overall:
+                    json_report['accuracy_metrics']['landmark_accuracy'][model_name] = {
+                        'accuracy_2mm': float(overall['accuracy_2mm']),
+                        'accuracy_4mm': float(overall['accuracy_4mm']),
+                        'accurate_2mm_count': int(overall.get('accuracy_2mm_count', 0)),
+                        'accurate_4mm_count': int(overall.get('accuracy_4mm_count', 0)),
+                        'total_predictions': int(overall.get('accuracy_total_count', 0))
                     }
     
     # Add angle data and 2-degree accuracy
@@ -2704,14 +2717,15 @@ def save_overall_results_report(results: Dict[str, Dict], validation_results: Di
             angle_names = ['SNA', 'SNB', 'ANB', 'u1', 'l1', 'sn_ans_pns', 'sn_mn_go', 'nasolabial_angle']
             
             json_report['angle_results'] = {}
-            json_report['accuracy_metrics']['angle_2deg_accuracy'] = {}
+            json_report['accuracy_metrics']['angle_accuracy'] = {}
             
             for model_name in ['ensemble_hrnetv2', 'ensemble_mlp']:
                 model_display = 'Ensemble HRNetV2' if model_name == 'ensemble_hrnetv2' else 'Ensemble MLP'
                 json_report['angle_results'][model_display] = {}
                 
                 total_angle_predictions = 0
-                accurate_angle_predictions = 0
+                accurate_2deg_predictions = 0
+                accurate_4deg_predictions = 0
                 
                 for angle_name in angle_names:
                     error_col = f'{model_name}_{angle_name}_error'
@@ -2720,26 +2734,34 @@ def save_overall_results_report(results: Dict[str, Dict], validation_results: Di
                         if len(errors) > 0:
                             mean_error = errors.mean()
                             std_error = errors.std()
-                            accurate_count = (errors <= 2.0).sum()
+                            accurate_2deg_count = (errors <= 2.0).sum()
+                            accurate_4deg_count = (errors <= 4.0).sum()
                             total_count = len(errors)
-                            accuracy = accurate_count / total_count if total_count > 0 else 0
+                            accuracy_2deg = accurate_2deg_count / total_count if total_count > 0 else 0
+                            accuracy_4deg = accurate_4deg_count / total_count if total_count > 0 else 0
                             
                             json_report['angle_results'][model_display][angle_name] = {
                                 'mean_error': float(mean_error),
                                 'std_error': float(std_error),
-                                'accuracy_2deg': float(accuracy),
-                                'accurate_count': int(accurate_count),
+                                'accuracy_2deg': float(accuracy_2deg),
+                                'accuracy_4deg': float(accuracy_4deg),
+                                'accurate_2deg_count': int(accurate_2deg_count),
+                                'accurate_4deg_count': int(accurate_4deg_count),
                                 'total_count': int(total_count)
                             }
                             
                             total_angle_predictions += total_count
-                            accurate_angle_predictions += accurate_count
+                            accurate_2deg_predictions += accurate_2deg_count
+                            accurate_4deg_predictions += accurate_4deg_count
                 
                 if total_angle_predictions > 0:
-                    overall_angle_accuracy = accurate_angle_predictions / total_angle_predictions
-                    json_report['accuracy_metrics']['angle_2deg_accuracy'][model_display] = {
-                        'accuracy': float(overall_angle_accuracy),
-                        'accurate_predictions': int(accurate_angle_predictions),
+                    overall_angle_accuracy_2deg = accurate_2deg_predictions / total_angle_predictions
+                    overall_angle_accuracy_4deg = accurate_4deg_predictions / total_angle_predictions
+                    json_report['accuracy_metrics']['angle_accuracy'][model_display] = {
+                        'accuracy_2deg': float(overall_angle_accuracy_2deg),
+                        'accuracy_4deg': float(overall_angle_accuracy_4deg),
+                        'accurate_2deg_count': int(accurate_2deg_predictions),
+                        'accurate_4deg_count': int(accurate_4deg_predictions),
                         'total_predictions': int(total_angle_predictions)
                     }
                     
@@ -3267,7 +3289,7 @@ def main():
     print(f"   - Machine-readable JSON: overall_results.json")
     print(f"   - ALL landmarks performance (19 landmarks)")
     print(f"   - ALL angles analysis (8 measurements)")
-    print(f"   - Accuracy metrics: 2mm threshold for landmarks, 2° threshold for angles")
+    print(f"   - Accuracy metrics: 2mm/4mm threshold for landmarks, 2°/4° threshold for angles")
     print(f"   - Clinical acceptability assessment")
     print(f"   - Complete evaluation configuration and metadata")
     
@@ -3300,24 +3322,13 @@ def main():
     if 'mre_mm' in ensemble_mlp_overall:
         for model_name in ['Ensemble HRNet (Test)', 'Ensemble MLP (Test)']:
             if model_name in results:
-                total_predictions = 0
-                accurate_predictions = 0
-                
-                for landmark in landmark_names:
-                    if landmark in results[model_name]['per_landmark']:
-                        lm_metrics = results[model_name]['per_landmark'][landmark]
-                        if 'mre_mm' in lm_metrics and lm_metrics['count'] > 0:
-                            mre_mm = lm_metrics['mre_mm']
-                            count = lm_metrics['count']
-                            
-                            if mre_mm <= 2.0:
-                                accurate_predictions += count
-                            total_predictions += count
-                
-                if total_predictions > 0:
-                    overall_accuracy = accurate_predictions / total_predictions
+                overall = results[model_name]['overall']
+                if 'accuracy_2mm' in overall and 'accuracy_4mm' in overall:
                     model_short = 'HRNetV2' if 'HRNet' in model_name else 'MLP'
-                    print(f"   📍 {model_short} Landmark 2mm Accuracy: {overall_accuracy:.1%}")
+                    acc_2mm = overall['accuracy_2mm'] * 100
+                    acc_4mm = overall['accuracy_4mm'] * 100
+                    print(f"   📍 {model_short} Landmark 2mm Accuracy: {acc_2mm:.1f}%")
+                    print(f"   📍 {model_short} Landmark 4mm Accuracy: {acc_4mm:.1f}%")
     
     # Calculate and show angle accuracy
     angle_csv_path = os.path.join(output_dir, "ensemble_angle_predictions.csv")
@@ -3328,22 +3339,27 @@ def main():
             
             for model_name in ['ensemble_hrnetv2', 'ensemble_mlp']:
                 total_angle_predictions = 0
-                accurate_angle_predictions = 0
+                accurate_2deg_predictions = 0
+                accurate_4deg_predictions = 0
                 
                 for angle_name in angle_names:
                     error_col = f'{model_name}_{angle_name}_error'
                     if error_col in angle_df.columns:
                         errors = angle_df[error_col].dropna()
                         if len(errors) > 0:
-                            accurate_count = (errors <= 2.0).sum()
+                            accurate_2deg_count = (errors <= 2.0).sum()
+                            accurate_4deg_count = (errors <= 4.0).sum()
                             total_count = len(errors)
                             total_angle_predictions += total_count
-                            accurate_angle_predictions += accurate_count
+                            accurate_2deg_predictions += accurate_2deg_count
+                            accurate_4deg_predictions += accurate_4deg_count
                 
                 if total_angle_predictions > 0:
-                    overall_angle_accuracy = accurate_angle_predictions / total_angle_predictions
+                    angle_accuracy_2deg = accurate_2deg_predictions / total_angle_predictions
+                    angle_accuracy_4deg = accurate_4deg_predictions / total_angle_predictions
                     model_short = 'HRNetV2' if model_name == 'ensemble_hrnetv2' else 'MLP'
-                    print(f"   📐 {model_short} Angle 2° Accuracy: {overall_angle_accuracy:.1%}")
+                    print(f"   📐 {model_short} Angle 2° Accuracy: {angle_accuracy_2deg:.1%}")
+                    print(f"   📐 {model_short} Angle 4° Accuracy: {angle_accuracy_4deg:.1%}")
         except:
             pass
     
