@@ -1999,13 +1999,121 @@ def visualize_patient_predictions(patient_idx: int, patient_id: int,
     
     print(f"   ✓ Saved visualization: {os.path.basename(output_path)}")
 
+def save_patient_json_data(patient_idx: int, patient_id: int, 
+                          ensemble_mlp: np.ndarray, gt_coords: np.ndarray,
+                          landmark_names: List[str], output_path: str,
+                          ruler_data: Optional[Dict[str, Dict]] = None):
+    """Save patient data in JSON format with the specified structure."""
+    
+    # Get patient data
+    pred_coords = ensemble_mlp[patient_idx]  # Shape: [19, 2]
+    gt_patient_coords = gt_coords[patient_idx]  # Shape: [19, 2]
+    
+    # Calculate angles and soft tissue measurements
+    pred_angles = calculate_cephalometric_angles(pred_coords, landmark_names)
+    pred_soft_tissue = calculate_soft_tissue_measurements(pred_coords, landmark_names)
+    
+    # Get patient classification
+    anb_angle = pred_angles.get('ANB', np.nan)
+    classification = classify_patient(anb_angle)
+    
+    # Calculate pixel to mm ratio for this patient
+    mm_per_pixel_600 = None
+    if ruler_data:
+        mm_per_pixel_600 = calculate_pixel_to_mm_ratio(ruler_data, patient_id)
+    
+    # Create landmarks dictionary (scaled to 600x600)
+    landmarks = {}
+    groundtruth_landmarks = {}
+    
+    for i, landmark_name in enumerate(landmark_names):
+        # Predicted landmarks (scale to 600x600)
+        pred_x = pred_coords[i, 0] * SCALE_FACTOR
+        pred_y = pred_coords[i, 1] * SCALE_FACTOR
+        
+        # Ground truth landmarks (scale to 600x600)
+        gt_x = gt_patient_coords[i, 0] * SCALE_FACTOR if gt_patient_coords[i, 0] > 0 else 0
+        gt_y = gt_patient_coords[i, 1] * SCALE_FACTOR if gt_patient_coords[i, 1] > 0 else 0
+        
+        # Handle missing landmarks
+        if gt_patient_coords[i, 0] > 0 and gt_patient_coords[i, 1] > 0:
+            landmarks[landmark_name] = {"x": float(pred_x), "y": float(pred_y)}
+            groundtruth_landmarks[landmark_name] = {"x": float(gt_x), "y": float(gt_y)}
+        else:
+            landmarks[landmark_name] = None
+            groundtruth_landmarks[landmark_name] = None
+    
+    # Create angles dictionary (filter out NaN values)
+    angles = {}
+    for angle_name, angle_value in pred_angles.items():
+        if not np.isnan(angle_value):
+            angles[angle_name] = float(angle_value)
+    
+    # Create soft tissue dictionary
+    soft_tissue = {}
+    nasolabial = pred_soft_tissue.get('nasolabial_angle', np.nan)
+    if not np.isnan(nasolabial):
+        soft_tissue['nasolabial_angle'] = float(nasolabial)
+    
+    # Create distances dictionary
+    distances = {}
+    
+    # Upper lip to E-line
+    upper_lip_dist_224 = pred_soft_tissue.get('upper_lip_to_eline', np.nan)
+    if not np.isnan(upper_lip_dist_224):
+        upper_lip_dist_600 = upper_lip_dist_224 * SCALE_FACTOR
+        upper_lip_entry = {
+            "pixels_224": float(upper_lip_dist_224),
+            "pixels_600": float(upper_lip_dist_600)
+        }
+        
+        # Add mm if calibration is available
+        if mm_per_pixel_600:
+            upper_lip_dist_mm = upper_lip_dist_600 * mm_per_pixel_600
+            upper_lip_entry["mm"] = float(upper_lip_dist_mm)
+        
+        distances["upper_lip_to_eline"] = upper_lip_entry
+    
+    # Lower lip to E-line
+    lower_lip_dist_224 = pred_soft_tissue.get('lower_lip_to_eline', np.nan)
+    if not np.isnan(lower_lip_dist_224):
+        lower_lip_dist_600 = lower_lip_dist_224 * SCALE_FACTOR
+        lower_lip_entry = {
+            "pixels_224": float(lower_lip_dist_224),
+            "pixels_600": float(lower_lip_dist_600)
+        }
+        
+        # Add mm if calibration is available
+        if mm_per_pixel_600:
+            lower_lip_dist_mm = lower_lip_dist_600 * mm_per_pixel_600
+            lower_lip_entry["mm"] = float(lower_lip_dist_mm)
+        
+        distances["lower_lip_to_eline"] = lower_lip_entry
+    
+    # Create the complete patient data structure
+    patient_data = {
+        "id": int(patient_id),
+        "classification": classification,
+        "landmarks": landmarks,
+        "groundtruth_landmarks": groundtruth_landmarks,
+        "angles": angles,
+        "soft_tissue": soft_tissue,
+        "distances": distances
+    }
+    
+    # Save to JSON file
+    with open(output_path, 'w') as f:
+        json.dump(patient_data, f, indent=2)
+    
+    return patient_data
+
 def create_patient_visualizations(ensemble_hrnet: np.ndarray, ensemble_mlp: np.ndarray,
                                 all_hrnet_preds: List[np.ndarray], all_mlp_preds: List[np.ndarray],
                                 gt_coords: np.ndarray, patient_ids: List[int],
                                 test_df: pd.DataFrame, landmark_names: List[str], 
-                                output_dir: str):
-    """Create visualizations for best and worst performing patients."""
-    print(f"\n🎨 Creating patient visualizations...")
+                                output_dir: str, ruler_data: Optional[Dict[str, Dict]] = None):
+    """Create visualizations and JSON data for best and worst performing patients."""
+    print(f"\n🎨 Creating patient visualizations and JSON data...")
     
     # Create visualization directory
     viz_dir = os.path.join(output_dir, "patient_visualizations")
@@ -2026,8 +2134,9 @@ def create_patient_visualizations(ensemble_hrnet: np.ndarray, ensemble_mlp: np.n
     for i, (pid, error) in enumerate(worst_patients, 1):
         print(f"   {i}. Patient {pid}: {error:.2f} pixels")
     
-    # Create visualizations for best patients
-    print(f"\n🎨 Creating visualizations for best patients...")
+    # Create visualizations and JSON data for best patients
+    print(f"\n🎨 Creating visualizations and JSON data for best patients...")
+    best_patients_data = []
     for rank, (patient_id, error) in enumerate(best_patients, 1):
         # Find patient index
         patient_idx = patient_ids.index(patient_id)
@@ -2042,15 +2151,30 @@ def create_patient_visualizations(ensemble_hrnet: np.ndarray, ensemble_mlp: np.n
         except:
             pass
         
-        output_path = os.path.join(viz_dir, f"best_{rank}_patient_{patient_id}.png")
+        # Create visualization
+        viz_output_path = os.path.join(viz_dir, f"best_{rank}_patient_{patient_id}.png")
         visualize_patient_predictions(
             patient_idx, patient_id, gt_coords, ensemble_hrnet, ensemble_mlp,
             all_hrnet_preds, all_mlp_preds, landmark_names, image_data,
-            output_path, f"(Best #{rank}, Avg Error: {error:.2f} pixels)"
+            viz_output_path, f"(Best #{rank}, Avg Error: {error:.2f} pixels)"
         )
+        
+        # Create JSON data
+        json_output_path = os.path.join(viz_dir, f"best_{rank}_patient_{patient_id}.json")
+        patient_data = save_patient_json_data(
+            patient_idx, patient_id, ensemble_mlp, gt_coords, 
+            landmark_names, json_output_path, ruler_data
+        )
+        patient_data['rank'] = rank
+        patient_data['category'] = 'best'
+        patient_data['average_error_pixels'] = float(error)
+        best_patients_data.append(patient_data)
+        
+        print(f"   ✓ Best #{rank} - Patient {patient_id}: visualization and JSON saved")
     
-    # Create visualizations for worst patients
-    print(f"\n🎨 Creating visualizations for worst patients...")
+    # Create visualizations and JSON data for worst patients
+    print(f"\n🎨 Creating visualizations and JSON data for worst patients...")
+    worst_patients_data = []
     for rank, (patient_id, error) in enumerate(worst_patients, 1):
         # Find patient index
         patient_idx = patient_ids.index(patient_id)
@@ -2064,12 +2188,43 @@ def create_patient_visualizations(ensemble_hrnet: np.ndarray, ensemble_mlp: np.n
         except:
             pass
         
-        output_path = os.path.join(viz_dir, f"worst_{rank}_patient_{patient_id}.png")
+        # Create visualization
+        viz_output_path = os.path.join(viz_dir, f"worst_{rank}_patient_{patient_id}.png")
         visualize_patient_predictions(
             patient_idx, patient_id, gt_coords, ensemble_hrnet, ensemble_mlp,
             all_hrnet_preds, all_mlp_preds, landmark_names, image_data,
-            output_path, f"(Worst #{rank}, Avg Error: {error:.2f} pixels)"
+            viz_output_path, f"(Worst #{rank}, Avg Error: {error:.2f} pixels)"
         )
+        
+        # Create JSON data
+        json_output_path = os.path.join(viz_dir, f"worst_{rank}_patient_{patient_id}.json")
+        patient_data = save_patient_json_data(
+            patient_idx, patient_id, ensemble_mlp, gt_coords, 
+            landmark_names, json_output_path, ruler_data
+        )
+        patient_data['rank'] = rank
+        patient_data['category'] = 'worst'
+        patient_data['average_error_pixels'] = float(error)
+        worst_patients_data.append(patient_data)
+        
+        print(f"   ✓ Worst #{rank} - Patient {patient_id}: visualization and JSON saved")
+    
+    # Save combined JSON file with all best and worst patients
+    combined_data = {
+        "evaluation_summary": {
+            "total_patients_evaluated": len(patient_ids),
+            "best_patients_count": len(best_patients),
+            "worst_patients_count": len(worst_patients),
+            "best_patients": best_patients_data,
+            "worst_patients": worst_patients_data
+        }
+    }
+    
+    combined_json_path = os.path.join(viz_dir, "best_worst_patients_summary.json")
+    with open(combined_json_path, 'w') as f:
+        json.dump(combined_data, f, indent=2)
+    
+    print(f"\n💾 Combined summary saved to: {os.path.basename(combined_json_path)}")
     
     # Create summary visualization
     create_summary_visualization(patient_errors, ensemble_hrnet, ensemble_mlp, 
@@ -3229,7 +3384,7 @@ def main():
     classification_results = save_angle_predictions_to_csv(ensemble_hrnet, ensemble_mlp, all_hrnet_preds, all_mlp_preds, all_gt, all_patient_ids, landmark_names, output_dir, ruler_data)
     
     # Create patient visualizations
-    create_patient_visualizations(ensemble_hrnet, ensemble_mlp, all_hrnet_preds, all_mlp_preds, all_gt, all_patient_ids, test_df, landmark_names, output_dir)
+    create_patient_visualizations(ensemble_hrnet, ensemble_mlp, all_hrnet_preds, all_mlp_preds, all_gt, all_patient_ids, test_df, landmark_names, output_dir, ruler_data)
     
     # Save overall results report
     save_overall_results_report(
@@ -3271,6 +3426,15 @@ def main():
     print(f"   - Best 5 patients: best_1_patient_*.png ... best_5_patient_*.png")
     print(f"   - Worst 3 patients: worst_1_patient_*.png ... worst_3_patient_*.png")
     print(f"   - Performance summary: performance_summary.png")
+    print(f"   Location: {os.path.join('ensemble_evaluation', 'patient_visualizations')}")
+    
+    print(f"\n📄 Patient JSON Data:")
+    print(f"   - Individual best patients: best_1_patient_*.json ... best_5_patient_*.json")
+    print(f"   - Individual worst patients: worst_1_patient_*.json ... worst_3_patient_*.json")
+    print(f"   - Combined summary: best_worst_patients_summary.json")
+    print(f"   - Structure: ID, classification, landmarks (600x600), ground truth, angles, soft tissue, distances")
+    print(f"   - Coordinates: Scaled to original 600x600 image space")
+    print(f"   - Distances: Provided in pixels (224x224, 600x600) and mm (when calibration available)")
     print(f"   Location: {os.path.join('ensemble_evaluation', 'patient_visualizations')}")
     
     print(f"\n📐 Cephalometric Angle Files:")
