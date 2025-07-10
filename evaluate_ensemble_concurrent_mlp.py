@@ -3,6 +3,12 @@
 Ensemble Concurrent Joint MLP Performance Evaluation Script
 This script evaluates individual models and ensemble performance during training.
 
+The script generates comprehensive evaluation results including:
+- Overall results report (overall_results_report.txt and overall_results.json)
+- Detailed prediction CSVs with pixel and mm measurements
+- Angle measurements and patient classification analysis
+- Visualizations for best/worst performing patients
+
 Usage examples:
   # Evaluate using best/latest checkpoints (default)
   python evaluate_ensemble_concurrent_mlp.py
@@ -1651,6 +1657,9 @@ def save_angle_predictions_to_csv(ensemble_hrnet: np.ndarray, ensemble_mlp: np.n
     # Create comprehensive visualization
     create_angle_error_visualization(ensemble_angle_df, angle_names, soft_tissue_names, output_dir)
     create_classification_visualization(classification_results, output_dir)
+    
+    # Return classification results for the overall report
+    return classification_results
 
 def create_angle_error_visualization(angle_df: pd.DataFrame, angle_names: List[str], 
                                    soft_tissue_names: List[str], output_dir: str):
@@ -2203,6 +2212,250 @@ def print_results_table(results: Dict[str, Dict], landmark_names: List[str]):
                 print(f"   Ensemble MLP (Test): {ensemble_mre:.3f} pixels")
                 print(f"   Improvement: {improvement:+.1f}%")
 
+def save_overall_results_report(results: Dict[str, Dict], validation_results: Dict[str, Dict],
+                               classification_results: Dict[str, Dict], 
+                               landmark_names: List[str], args: argparse.Namespace,
+                               output_dir: str, n_test_samples: int, n_models_evaluated: int,
+                               ruler_data: Optional[Dict[str, Dict]] = None):
+    """Save a comprehensive overall results report to a text file."""
+    report_path = os.path.join(output_dir, "overall_results_report.txt")
+    
+    with open(report_path, 'w') as f:
+        # Header
+        f.write("="*80 + "\n")
+        f.write("ENSEMBLE CONCURRENT JOINT MLP EVALUATION - OVERALL RESULTS REPORT\n")
+        f.write("="*80 + "\n\n")
+        
+        # Evaluation Configuration
+        f.write("EVALUATION CONFIGURATION:\n")
+        f.write("-" * 30 + "\n")
+        f.write(f"Timestamp: {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        f.write(f"Base Work Directory: {args.base_work_dir}\n")
+        f.write(f"Number of Models in Ensemble: {args.n_models}\n")
+        f.write(f"Models Successfully Evaluated: {n_models_evaluated}\n")
+        f.write(f"Evaluation Mode: {'Epoch ' + str(args.epoch) if args.epoch else 'Best/Latest Checkpoints'}\n")
+        f.write(f"Test Samples: {n_test_samples}\n")
+        f.write(f"Evaluate Individual Models: {args.evaluate_individual}\n")
+        f.write(f"Evaluate on Validation: {args.evaluate_on_validation}\n")
+        f.write(f"Image Scaling: {MODEL_INPUT_SIZE}x{MODEL_INPUT_SIZE} → {ORIGINAL_IMAGE_SIZE}x{ORIGINAL_IMAGE_SIZE} (factor: {SCALE_FACTOR:.4f})\n")
+        if ruler_data:
+            f.write(f"Millimeter Calibration: Available ({RULER_LENGTH_MM}mm ruler)\n")
+        f.write("\n")
+        
+        # Overall Test Set Performance
+        f.write("OVERALL TEST SET PERFORMANCE:\n")
+        f.write("-" * 30 + "\n")
+        
+        # Check if mm metrics are available
+        has_mm_metrics = any('mre_mm' in metrics['overall'] for metrics in results.values())
+        
+        # Header for metrics table
+        if has_mm_metrics:
+            header = f"{'Model':<25} {'MRE (px)':<12} {'MRE (mm)':<12} {'Std (px)':<12} {'Std (mm)':<12} {'Median (px)':<12} {'P95 (px)':<12}\n"
+        else:
+            header = f"{'Model':<25} {'MRE':<12} {'Std':<12} {'Median':<12} {'P90':<12} {'P95':<12} {'Max':<12}\n"
+        
+        f.write(header)
+        f.write("-" * len(header) + "\n")
+        
+        # Write test set results
+        for model_name in ['Ensemble HRNet (Test)', 'Ensemble MLP (Test)']:
+            if model_name in results:
+                overall = results[model_name]['overall']
+                if has_mm_metrics and 'mre_mm' in overall:
+                    f.write(f"{model_name:<25} {overall['mre']:<12.3f} {overall.get('mre_mm', 'N/A'):<12.3f} "
+                           f"{overall['std']:<12.3f} {overall.get('std_mm', 'N/A'):<12.3f} "
+                           f"{overall['median']:<12.3f} {overall['p95']:<12.3f}\n")
+                else:
+                    f.write(f"{model_name:<25} {overall['mre']:<12.3f} {overall['std']:<12.3f} "
+                           f"{overall['median']:<12.3f} {overall['p90']:<12.3f} "
+                           f"{overall['p95']:<12.3f} {overall['max']:<12.3f}\n")
+        
+        # Improvement analysis
+        if 'Ensemble HRNet (Test)' in results and 'Ensemble MLP (Test)' in results:
+            hrnet_mre = results['Ensemble HRNet (Test)']['overall']['mre']
+            mlp_mre = results['Ensemble MLP (Test)']['overall']['mre']
+            improvement = (hrnet_mre - mlp_mre) / hrnet_mre * 100
+            f.write(f"\nMLP Improvement over HRNetV2: {improvement:+.2f}%\n")
+            
+            if has_mm_metrics and 'mre_mm' in results['Ensemble MLP (Test)']['overall']:
+                hrnet_mre_mm = results['Ensemble HRNet (Test)']['overall'].get('mre_mm', 0)
+                mlp_mre_mm = results['Ensemble MLP (Test)']['overall'].get('mre_mm', 0)
+                if hrnet_mre_mm > 0:
+                    improvement_mm = (hrnet_mre_mm - mlp_mre_mm) / hrnet_mre_mm * 100
+                    f.write(f"MLP Improvement in mm: {improvement_mm:+.2f}%\n")
+        
+        # Individual model results if available
+        if args.evaluate_individual:
+            f.write("\n\nINDIVIDUAL MODEL PERFORMANCE (TEST SET):\n")
+            f.write("-" * 30 + "\n")
+            
+            individual_models = sorted([k for k in results.keys() if k.startswith('Model') and '(Test)' in k])
+            if individual_models:
+                f.write(header)
+                f.write("-" * len(header) + "\n")
+                
+                for model_name in individual_models:
+                    overall = results[model_name]['overall']
+                    if has_mm_metrics and 'mre_mm' in overall:
+                        f.write(f"{model_name:<25} {overall['mre']:<12.3f} {overall.get('mre_mm', 'N/A'):<12.3f} "
+                               f"{overall['std']:<12.3f} {overall.get('std_mm', 'N/A'):<12.3f} "
+                               f"{overall['median']:<12.3f} {overall['p95']:<12.3f}\n")
+                    else:
+                        f.write(f"{model_name:<25} {overall['mre']:<12.3f} {overall['std']:<12.3f} "
+                               f"{overall['median']:<12.3f} {overall['p90']:<12.3f} "
+                               f"{overall['p95']:<12.3f} {overall['max']:<12.3f}\n")
+        
+        # Validation results if available
+        if validation_results:
+            f.write("\n\nVALIDATION SET PERFORMANCE:\n")
+            f.write("-" * 30 + "\n")
+            f.write(f"{'Model':<25} {'MRE':<12} {'Std':<12} {'Median':<12} {'P90':<12} {'P95':<12}\n")
+            f.write("-" * 80 + "\n")
+            
+            for model_name, metrics in validation_results.items():
+                overall = metrics['overall']
+                f.write(f"{model_name:<25} {overall['mre']:<12.3f} {overall['std']:<12.3f} "
+                       f"{overall['median']:<12.3f} {overall['p90']:<12.3f} {overall['p95']:<12.3f}\n")
+        
+        # Define key landmarks and available landmarks (needed for both text and JSON report)
+        key_landmarks = ['sella', 'Gonion', 'PNS', 'A_point', 'B_point', 'ANS', 'nasion']
+        available_landmarks = [lm for lm in key_landmarks if lm in landmark_names]
+        
+        # Key landmark performance
+        f.write("\n\nKEY LANDMARK PERFORMANCE (TEST SET):\n")
+        f.write("-" * 30 + "\n")
+        
+        for landmark in available_landmarks:
+            f.write(f"\n{landmark.upper()}:\n")
+            
+            # Check if mm metrics are available for this landmark
+            has_landmark_mm = any(landmark in metrics['per_landmark'] and 'mre_mm' in metrics['per_landmark'][landmark] 
+                                 for metrics in results.values())
+            
+            if has_landmark_mm:
+                f.write(f"{'Model':<25} {'MRE (px)':<12} {'MRE (mm)':<12} {'Std (px)':<12} {'Std (mm)':<12}\n")
+            else:
+                f.write(f"{'Model':<25} {'MRE':<12} {'Std':<12} {'Median':<12}\n")
+            f.write("-" * 60 + "\n")
+            
+            for model_name in ['Ensemble HRNet (Test)', 'Ensemble MLP (Test)']:
+                if model_name in results and landmark in results[model_name]['per_landmark']:
+                    lm_metrics = results[model_name]['per_landmark'][landmark]
+                    if has_landmark_mm and 'mre_mm' in lm_metrics:
+                        f.write(f"{model_name:<25} {lm_metrics['mre']:<12.3f} {lm_metrics.get('mre_mm', 'N/A'):<12.3f} "
+                               f"{lm_metrics['std']:<12.3f} {lm_metrics.get('std_mm', 'N/A'):<12.3f}\n")
+                    else:
+                        f.write(f"{model_name:<25} {lm_metrics['mre']:<12.3f} {lm_metrics['std']:<12.3f} "
+                               f"{lm_metrics['median']:<12.3f}\n")
+        
+        # Classification results if available
+        if classification_results:
+            f.write("\n\nPATIENT CLASSIFICATION RESULTS (ANB-based):\n")
+            f.write("-" * 30 + "\n")
+            
+            for model_type in ['ensemble_hrnetv2', 'ensemble_mlp']:
+                if model_type in classification_results:
+                    metrics = classification_results[model_type]
+                    model_name = 'Ensemble HRNetV2' if model_type == 'ensemble_hrnetv2' else 'Ensemble MLP'
+                    
+                    f.write(f"\n{model_name}:\n")
+                    f.write(f"  Accuracy: {metrics['accuracy']:.3f}\n")
+                    f.write(f"  Precision (macro): {metrics['precision']:.3f}\n")
+                    f.write(f"  Recall (macro): {metrics['recall']:.3f}\n")
+                    f.write(f"  F1-Score (macro): {metrics['f1_score']:.3f}\n")
+                    f.write(f"  Valid samples: {metrics['n_samples']}\n")
+                    
+                    # Per-class metrics
+                    if 'per_class' in metrics and metrics['per_class']:
+                        f.write("\n  Per-Class Performance:\n")
+                        for class_name, class_metrics in metrics['per_class'].items():
+                            f.write(f"    {class_name}: "
+                                   f"Precision={class_metrics['precision']:.3f}, "
+                                   f"Recall={class_metrics['recall']:.3f}, "
+                                   f"F1={class_metrics['f1']:.3f}, "
+                                   f"Support={class_metrics['support']}\n")
+        
+        # Summary statistics
+        f.write("\n\nSUMMARY:\n")
+        f.write("-" * 30 + "\n")
+        
+        if 'Ensemble MLP (Test)' in results:
+            ensemble_mre = results['Ensemble MLP (Test)']['overall']['mre']
+            ensemble_mre_600 = ensemble_mre * SCALE_FACTOR
+            f.write(f"Ensemble MLP Mean Radial Error:\n")
+            f.write(f"  - {ensemble_mre:.3f} pixels (224x224 space)\n")
+            f.write(f"  - {ensemble_mre_600:.3f} pixels (600x600 space)\n")
+            
+            if 'mre_mm' in results['Ensemble MLP (Test)']['overall']:
+                ensemble_mre_mm = results['Ensemble MLP (Test)']['overall']['mre_mm']
+                calibrated_patients = results['Ensemble MLP (Test)']['overall'].get('calibrated_patients', 0)
+                f.write(f"  - {ensemble_mre_mm:.3f} mm (from {calibrated_patients} patients with calibration)\n")
+        
+        # File locations
+        f.write("\n\nOUTPUT FILES:\n")
+        f.write("-" * 30 + "\n")
+        f.write(f"Results saved to: {output_dir}\n")
+        f.write("\nKey files:\n")
+        f.write("  - overall_results_report.txt (this file)\n")
+        f.write("  - ensemble_mlp_predictions_detailed.csv\n")
+        f.write("  - ensemble_hrnetv2_predictions_detailed.csv\n")
+        f.write("  - ensemble_angle_predictions.csv\n")
+        f.write("  - all_models_angle_predictions.csv\n")
+        f.write("  - angle_error_analysis.png\n")
+        f.write("  - classification_analysis.png\n")
+        f.write("  - patient_visualizations/\n")
+        
+        f.write("\n" + "="*80 + "\n")
+        f.write("END OF REPORT\n")
+        f.write("="*80 + "\n")
+    
+    print(f"\n📄 Overall results report saved to: {os.path.basename(report_path)}")
+    
+    # Also save as JSON for programmatic access
+    json_report_path = os.path.join(output_dir, "overall_results.json")
+    json_report = {
+        'configuration': {
+            'timestamp': pd.Timestamp.now().isoformat(),
+            'base_work_dir': args.base_work_dir,
+            'n_models': args.n_models,
+            'n_models_evaluated': n_models_evaluated,
+            'evaluation_mode': f'epoch_{args.epoch}' if args.epoch else 'best_latest',
+            'epoch': args.epoch,
+            'test_samples': n_test_samples,
+            'evaluate_individual': args.evaluate_individual,
+            'evaluate_on_validation': args.evaluate_on_validation,
+            'image_scaling': {
+                'input_size': MODEL_INPUT_SIZE,
+                'output_size': ORIGINAL_IMAGE_SIZE,
+                'scale_factor': SCALE_FACTOR
+            },
+            'calibration_available': ruler_data is not None
+        },
+        'test_results': {},
+        'validation_results': {},
+        'classification_results': classification_results
+    }
+    
+    # Add test results
+    for model_name, metrics in results.items():
+        json_report['test_results'][model_name] = {
+            'overall': metrics['overall'],
+            'key_landmarks': {lm: metrics['per_landmark'].get(lm, {}) 
+                            for lm in available_landmarks if lm in metrics['per_landmark']}
+        }
+    
+    # Add validation results
+    for model_name, metrics in validation_results.items():
+        json_report['validation_results'][model_name] = {
+            'overall': metrics['overall']
+        }
+    
+    with open(json_report_path, 'w') as f:
+        json.dump(json_report, f, indent=2)
+    
+    print(f"📄 JSON results saved to: {os.path.basename(json_report_path)}")
+
 def create_classification_visualization(classification_results: Dict[str, Dict], output_dir: str):
     """Create visualization of patient classification results."""
     fig, axes = plt.subplots(2, 2, figsize=(15, 12))
@@ -2655,14 +2908,29 @@ def main():
     # Save all models combined
     save_all_models_combined(all_hrnet_preds, all_mlp_preds, ensemble_hrnet, ensemble_mlp, all_gt, all_patient_ids, landmark_names, output_dir, ruler_data)
     
-    # Save angle predictions
-    save_angle_predictions_to_csv(ensemble_hrnet, ensemble_mlp, all_hrnet_preds, all_mlp_preds, all_gt, all_patient_ids, landmark_names, output_dir, ruler_data)
+        # Save angle predictions and get classification results
+    classification_results = save_angle_predictions_to_csv(ensemble_hrnet, ensemble_mlp, all_hrnet_preds, all_mlp_preds, all_gt, all_patient_ids, landmark_names, output_dir, ruler_data)
     
     # Create patient visualizations
     create_patient_visualizations(ensemble_hrnet, ensemble_mlp, all_hrnet_preds, all_mlp_preds, all_gt, all_patient_ids, test_df, landmark_names, output_dir)
-
+    
+    # Save overall results report
+    save_overall_results_report(
+        results=results,
+        validation_results=validation_results,
+        classification_results=classification_results,
+        landmark_names=landmark_names,
+        args=args,
+        output_dir=output_dir,
+        n_test_samples=len(test_df),
+        n_models_evaluated=len(all_hrnet_preds),
+        ruler_data=ruler_data
+    )
+    
     print(f"\n💾 Results saved to: {output_dir}")
     print(f"\n📊 Summary Files:")
+    print(f"   - Overall results report: overall_results_report.txt")
+    print(f"   - Overall results JSON: overall_results.json")
     print(f"   - Test set comparison: ensemble_comparison_test.csv")
     print(f"   - Test set landmarks: key_landmarks_comparison_test.csv")
     if validation_results:
