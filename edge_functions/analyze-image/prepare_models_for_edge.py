@@ -102,9 +102,9 @@ def test_models(hrnet_path: str, mlp_path: str, scalers_json_path: str = None):
                 scalers = json.load(f)
             
             if 'input' in scalers:
-                mean = np.array(scalers['input']['mean'])
-                std = np.array(scalers['input']['std'])
-                keypoints = (keypoints - mean) / std
+                mean = np.array(scalers['input']['mean'], dtype=np.float32)
+                std = np.array(scalers['input']['std'], dtype=np.float32)
+                keypoints = ((keypoints - mean) / std).astype(np.float32)
         
         mlp_output = mlp_session.run(None, {'coordinates': keypoints})
         refined = mlp_output[0]
