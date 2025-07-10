@@ -2617,8 +2617,12 @@ def save_overall_results_report(results: Dict[str, Dict], validation_results: Di
             return [convert_numpy_to_list(item) for item in obj]
         elif isinstance(obj, tuple):
             return tuple(convert_numpy_to_list(item) for item in obj)
-        elif isinstance(obj, (np.integer, np.floating)):
-            return obj.item()
+        elif isinstance(obj, (np.integer, np.int64, np.int32, np.int16, np.int8)):
+            return int(obj)
+        elif isinstance(obj, (np.floating, np.float64, np.float32, np.float16)):
+            return float(obj)
+        elif isinstance(obj, np.bool_):
+            return bool(obj)
         else:
             return obj
     
@@ -2687,9 +2691,9 @@ def save_overall_results_report(results: Dict[str, Dict], validation_results: Di
                 if total_predictions > 0:
                     overall_accuracy = accurate_predictions / total_predictions
                     json_report['accuracy_metrics']['landmark_2mm_accuracy'][model_name] = {
-                        'accuracy': overall_accuracy,
-                        'accurate_predictions': accurate_predictions,
-                        'total_predictions': total_predictions
+                        'accuracy': float(overall_accuracy),
+                        'accurate_predictions': int(accurate_predictions),
+                        'total_predictions': int(total_predictions)
                     }
     
     # Add angle data and 2-degree accuracy
@@ -2721,9 +2725,9 @@ def save_overall_results_report(results: Dict[str, Dict], validation_results: Di
                             accuracy = accurate_count / total_count if total_count > 0 else 0
                             
                             json_report['angle_results'][model_display][angle_name] = {
-                                'mean_error': mean_error,
-                                'std_error': std_error,
-                                'accuracy_2deg': accuracy,
+                                'mean_error': float(mean_error),
+                                'std_error': float(std_error),
+                                'accuracy_2deg': float(accuracy),
                                 'accurate_count': int(accurate_count),
                                 'total_count': int(total_count)
                             }
@@ -2734,9 +2738,9 @@ def save_overall_results_report(results: Dict[str, Dict], validation_results: Di
                 if total_angle_predictions > 0:
                     overall_angle_accuracy = accurate_angle_predictions / total_angle_predictions
                     json_report['accuracy_metrics']['angle_2deg_accuracy'][model_display] = {
-                        'accuracy': overall_angle_accuracy,
-                        'accurate_predictions': accurate_angle_predictions,
-                        'total_predictions': total_angle_predictions
+                        'accuracy': float(overall_angle_accuracy),
+                        'accurate_predictions': int(accurate_angle_predictions),
+                        'total_predictions': int(total_angle_predictions)
                     }
                     
         except Exception as e:
