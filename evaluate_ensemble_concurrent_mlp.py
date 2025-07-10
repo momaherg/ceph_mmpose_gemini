@@ -2,6 +2,16 @@
 """
 Ensemble Concurrent Joint MLP Performance Evaluation Script
 This script evaluates individual models and ensemble performance during training.
+
+Usage examples:
+  # Evaluate using best/latest checkpoints (default)
+  python evaluate_ensemble_concurrent_mlp.py
+  
+  # Evaluate all models at epoch 20
+  python evaluate_ensemble_concurrent_mlp.py --epoch 20
+  
+  # Evaluate 5 models at epoch 30 with individual model analysis
+  python evaluate_ensemble_concurrent_mlp.py --n_models 5 --epoch 30 --evaluate_individual
 """
 
 import os
@@ -478,25 +488,51 @@ def apply_joint_mlp_refinement(predictions, mlp_joint, scaler_input, scaler_targ
         print(f"Joint MLP refinement failed: {e}")
         return predictions
 
-def load_model_components(model_dir: str, device: torch.device, config_path: str) -> Optional[Tuple]:
+def load_model_components(model_dir: str, device: torch.device, config_path: str, epoch: Optional[int] = None) -> Optional[Tuple]:
     """Load HRNet model, MLP model, and scalers for a single ensemble model."""
     print(f"\n🔄 Loading model from: {os.path.basename(model_dir)}")
     
     # Find HRNet checkpoint
-    hrnet_checkpoint_pattern = os.path.join(model_dir, "best_NME_epoch_*.pth")
-    hrnet_checkpoints = glob.glob(hrnet_checkpoint_pattern)
-    
-    if not hrnet_checkpoints:
-        hrnet_checkpoint_pattern = os.path.join(model_dir, "epoch_*.pth")
+    if epoch is not None:
+        # Look for specific epoch checkpoint
+        hrnet_checkpoint = os.path.join(model_dir, f"epoch_{epoch}.pth")
+        if not os.path.exists(hrnet_checkpoint):
+            # Show available epochs for better debugging
+            available_epochs = []
+            epoch_pattern = os.path.join(model_dir, "epoch_*.pth")
+            epoch_files = glob.glob(epoch_pattern)
+            for ep_file in epoch_files:
+                try:
+                    ep_num = int(os.path.basename(ep_file).split("epoch_")[1].split(".")[0])
+                    available_epochs.append(ep_num)
+                except:
+                    pass
+            available_epochs.sort()
+            
+            print(f"   ❌ Epoch {epoch} checkpoint not found: {hrnet_checkpoint}")
+            if available_epochs:
+                print(f"      Available epochs: {available_epochs}")
+            else:
+                print(f"      No epoch checkpoints found in {model_dir}")
+            return None
+        hrnet_checkpoint_name = os.path.basename(hrnet_checkpoint)
+        print(f"   ✓ HRNet checkpoint (epoch {epoch}): {hrnet_checkpoint_name}")
+    else:
+        # Use existing logic for best/latest checkpoint
+        hrnet_checkpoint_pattern = os.path.join(model_dir, "best_NME_epoch_*.pth")
         hrnet_checkpoints = glob.glob(hrnet_checkpoint_pattern)
-    
-    if not hrnet_checkpoints:
-        print(f"   ❌ No HRNet checkpoints found in {model_dir}")
-        return None
-    
-    hrnet_checkpoint = max(hrnet_checkpoints, key=os.path.getctime)
-    hrnet_checkpoint_name = os.path.basename(hrnet_checkpoint)
-    print(f"   ✓ HRNet checkpoint: {hrnet_checkpoint_name}")
+        
+        if not hrnet_checkpoints:
+            hrnet_checkpoint_pattern = os.path.join(model_dir, "epoch_*.pth")
+            hrnet_checkpoints = glob.glob(hrnet_checkpoint_pattern)
+        
+        if not hrnet_checkpoints:
+            print(f"   ❌ No HRNet checkpoints found in {model_dir}")
+            return None
+        
+        hrnet_checkpoint = max(hrnet_checkpoints, key=os.path.getctime)
+        hrnet_checkpoint_name = os.path.basename(hrnet_checkpoint)
+        print(f"   ✓ HRNet checkpoint: {hrnet_checkpoint_name}")
     
     # Load HRNet model
     try:
@@ -516,63 +552,91 @@ def load_model_components(model_dir: str, device: torch.device, config_path: str
     synchronized_mlp_path = None
     model_type = "unknown"
     
-    if os.path.exists(mapping_file):
-        try:
-            import json
-            with open(mapping_file, 'r') as f:
-                checkpoint_mapping = json.load(f)
+    if epoch is not None:
+        # Look for specific epoch MLP checkpoint
+        epoch_mlp_path = os.path.join(mlp_dir, f"mlp_joint_epoch_{epoch}.pth")
+        if os.path.exists(epoch_mlp_path):
+            synchronized_mlp_path = epoch_mlp_path
+            model_type = f"epoch_{epoch}"
+            print(f"   ✓ MLP checkpoint (epoch {epoch}): {os.path.basename(epoch_mlp_path)}")
+        else:
+            # Show available MLP epochs for better debugging
+            available_mlp_epochs = []
+            mlp_epoch_pattern = os.path.join(mlp_dir, "mlp_joint_epoch_*.pth")
+            mlp_epoch_files = glob.glob(mlp_epoch_pattern)
+            for mlp_file in mlp_epoch_files:
+                try:
+                    ep_num = int(os.path.basename(mlp_file).split("_epoch_")[1].split(".")[0])
+                    available_mlp_epochs.append(ep_num)
+                except:
+                    pass
+            available_mlp_epochs.sort()
             
-            if hrnet_checkpoint_name in checkpoint_mapping:
-                synchronized_mlp_path = checkpoint_mapping[hrnet_checkpoint_name]
-                if os.path.exists(synchronized_mlp_path):
-                    print(f"   ✓ Synchronized MLP: {os.path.basename(synchronized_mlp_path)}")
-                    model_type = f"synchronized"
-                else:
-                    synchronized_mlp_path = None
-        except Exception as e:
-            print(f"   ⚠️  Failed to load checkpoint mapping: {e}")
-    
-    # Fallback to epoch-based matching
-    if synchronized_mlp_path is None:
-        hrnet_epoch = None
-        if "epoch_" in hrnet_checkpoint_name:
+            print(f"   ❌ Epoch {epoch} MLP checkpoint not found: {epoch_mlp_path}")
+            if available_mlp_epochs:
+                print(f"      Available MLP epochs: {available_mlp_epochs}")
+            else:
+                print(f"      No MLP epoch checkpoints found in {mlp_dir}")
+            return None
+    else:
+        # Use existing logic for synchronized/fallback checkpoints
+        if os.path.exists(mapping_file):
             try:
-                hrnet_epoch = int(hrnet_checkpoint_name.split("epoch_")[1].split(".")[0])
-            except:
-                pass
+                import json
+                with open(mapping_file, 'r') as f:
+                    checkpoint_mapping = json.load(f)
+                
+                if hrnet_checkpoint_name in checkpoint_mapping:
+                    synchronized_mlp_path = checkpoint_mapping[hrnet_checkpoint_name]
+                    if os.path.exists(synchronized_mlp_path):
+                        print(f"   ✓ Synchronized MLP: {os.path.basename(synchronized_mlp_path)}")
+                        model_type = f"synchronized"
+                    else:
+                        synchronized_mlp_path = None
+            except Exception as e:
+                print(f"   ⚠️  Failed to load checkpoint mapping: {e}")
         
-        if hrnet_epoch is not None:
-            epoch_mlp_path = os.path.join(mlp_dir, f"mlp_joint_epoch_{hrnet_epoch}.pth")
-            if os.path.exists(epoch_mlp_path):
-                synchronized_mlp_path = epoch_mlp_path
-                model_type = f"epoch_{hrnet_epoch}"
-                print(f"   ✓ Epoch-matched MLP: {os.path.basename(epoch_mlp_path)}")
-        
-        # Final fallbacks
+        # Fallback to epoch-based matching
         if synchronized_mlp_path is None:
-            fallback_paths = [
-                os.path.join(mlp_dir, "mlp_joint_final.pth"),
-                os.path.join(mlp_dir, "mlp_joint_latest.pth")
-            ]
+            hrnet_epoch = None
+            if "epoch_" in hrnet_checkpoint_name:
+                try:
+                    hrnet_epoch = int(hrnet_checkpoint_name.split("epoch_")[1].split(".")[0])
+                except:
+                    pass
             
-            for path in fallback_paths:
-                if os.path.exists(path):
-                    synchronized_mlp_path = path
-                    model_type = f"fallback_{os.path.basename(path)}"
-                    print(f"   ✓ Fallback MLP: {os.path.basename(path)}")
-                    break
+            if hrnet_epoch is not None:
+                epoch_mlp_path = os.path.join(mlp_dir, f"mlp_joint_epoch_{hrnet_epoch}.pth")
+                if os.path.exists(epoch_mlp_path):
+                    synchronized_mlp_path = epoch_mlp_path
+                    model_type = f"epoch_{hrnet_epoch}"
+                    print(f"   ✓ Epoch-matched MLP: {os.path.basename(epoch_mlp_path)}")
             
+            # Final fallbacks
             if synchronized_mlp_path is None:
-                # Try any epoch model
-                epoch_models = glob.glob(os.path.join(mlp_dir, "mlp_joint_epoch_*.pth"))
-                if epoch_models:
-                    synchronized_mlp_path = max(epoch_models, key=lambda x: int(x.split('_epoch_')[1].split('.')[0]))
-                    epoch_num = synchronized_mlp_path.split('_epoch_')[1].split('.')[0]
-                    model_type = f"latest_epoch_{epoch_num}"
-                    print(f"   ✓ Latest epoch MLP: {os.path.basename(synchronized_mlp_path)}")
-                else:
-                    print(f"   ❌ No MLP models found")
-                    return None
+                fallback_paths = [
+                    os.path.join(mlp_dir, "mlp_joint_final.pth"),
+                    os.path.join(mlp_dir, "mlp_joint_latest.pth")
+                ]
+                
+                for path in fallback_paths:
+                    if os.path.exists(path):
+                        synchronized_mlp_path = path
+                        model_type = f"fallback_{os.path.basename(path)}"
+                        print(f"   ✓ Fallback MLP: {os.path.basename(path)}")
+                        break
+                
+                if synchronized_mlp_path is None:
+                    # Try any epoch model
+                    epoch_models = glob.glob(os.path.join(mlp_dir, "mlp_joint_epoch_*.pth"))
+                    if epoch_models:
+                        synchronized_mlp_path = max(epoch_models, key=lambda x: int(x.split('_epoch_')[1].split('.')[0]))
+                        epoch_num = synchronized_mlp_path.split('_epoch_')[1].split('.')[0]
+                        model_type = f"latest_epoch_{epoch_num}"
+                        print(f"   ✓ Latest epoch MLP: {os.path.basename(synchronized_mlp_path)}")
+                    else:
+                        print(f"   ❌ No MLP models found")
+                        return None
     
     # Load MLP model
     try:
@@ -2301,12 +2365,23 @@ def main():
         action='store_true',
         help='Also evaluate each model on its own validation set'
     )
+    parser.add_argument(
+        '--epoch',
+        type=int,
+        default=None,
+        help='Specific epoch number to evaluate (e.g., --epoch 20 will use epoch_20.pth checkpoints from all models)'
+    )
     args = parser.parse_args()
     
     print("="*80)
     print("ENSEMBLE CONCURRENT JOINT MLP EVALUATION")
     print("="*80)
     print(f"📏 Image scaling: {MODEL_INPUT_SIZE}x{MODEL_INPUT_SIZE} → {ORIGINAL_IMAGE_SIZE}x{ORIGINAL_IMAGE_SIZE} (scale factor: {SCALE_FACTOR:.4f})")
+    
+    if args.epoch is not None:
+        print(f"🎯 Evaluating at specific epoch: {args.epoch}")
+    else:
+        print(f"🎯 Using best/latest checkpoints from each model")
     
     # Initialize MMPose scope
     init_default_scope('mmpose')
@@ -2383,7 +2458,7 @@ def main():
     validation_results = {}
     
     for i, model_dir in enumerate(model_dirs, 1):
-        components = load_model_components(model_dir, device, config_path)
+        components = load_model_components(model_dir, device, config_path, args.epoch)
         
         if components is None:
             print(f"   ❌ Skipping model {i} due to loading errors")
@@ -2628,7 +2703,10 @@ def main():
     ensemble_mre = ensemble_mlp_overall['mre']
     ensemble_mre_600 = ensemble_mre * SCALE_FACTOR
     print(f"\n🎉 Ensemble Evaluation Summary:")
-    print(f"📊 {len(all_hrnet_preds)} models successfully evaluated")
+    if args.epoch is not None:
+        print(f"📊 {len(all_hrnet_preds)} models successfully evaluated at epoch {args.epoch}")
+    else:
+        print(f"📊 {len(all_hrnet_preds)} models successfully evaluated (using best/latest checkpoints)")
     print(f"🎯 Ensemble MLP MRE: {ensemble_mre:.3f} pixels (224x224) / {ensemble_mre_600:.3f} pixels (600x600)")
     
     # Show mm errors if available in metrics
