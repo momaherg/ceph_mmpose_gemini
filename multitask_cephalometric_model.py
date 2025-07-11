@@ -114,13 +114,19 @@ class MultiTaskCephalometricModel(TopdownPoseEstimator):
         # Extract features
         feats = self.extract_feat(inputs)
         
-        # Landmark detection loss (from parent class)
-        losses = super().loss(inputs, data_samples)
+        # Process features through neck if available
+        if self.neck is not None:
+            neck_feats = self.neck(feats)
+        else:
+            neck_feats = feats
+        
+        # Landmark detection loss (from heatmap head)
+        losses = self.head.loss(neck_feats, data_samples)
         
         # Get features for classification
         if self.neck is not None:
             # Use neck output features
-            classification_features = self.neck(feats)
+            classification_features = neck_feats
             if isinstance(classification_features, (list, tuple)):
                 # Concatenate multi-scale features
                 classification_features = torch.cat([F.adaptive_avg_pool2d(f, 1).flatten(1) 
@@ -138,7 +144,7 @@ class MultiTaskCephalometricModel(TopdownPoseEstimator):
         if self.use_landmark_features_for_classification:
             # Get predicted landmarks from heatmaps
             with torch.no_grad():
-                pred_heatmaps = self.head.forward(feats if self.neck is None else self.neck(feats))
+                pred_heatmaps = self.head.forward(neck_feats)
                 # Decode heatmaps to coordinates
                 pred_coords = self._decode_heatmaps_to_coords(pred_heatmaps)
                 # Flatten coordinates: [batch, 19, 2] -> [batch, 38]
