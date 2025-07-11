@@ -77,6 +77,15 @@ class MultiTaskCephalometricModel(TopdownPoseEstimator):
                 dropout_rate=0.2
             )
         
+        # If using landmark features, we'll use the fusion output dimension
+        if self.use_landmark_features_for_classification:
+            classification_head_in_channels = 256  # Output of fusion module
+        else:
+            classification_head_in_channels = classification_head.get('in_channels', 270)
+        
+        # Update classification head with correct input channels
+        classification_head['in_channels'] = classification_head_in_channels
+        
         self.classification_head = MODELS.build(classification_head)
         
         # If using landmark features, create a fusion module
@@ -131,6 +140,9 @@ class MultiTaskCephalometricModel(TopdownPoseEstimator):
                 # Concatenate multi-scale features
                 classification_features = torch.cat([F.adaptive_avg_pool2d(f, 1).flatten(1) 
                                                     for f in classification_features], dim=1)
+            else:
+                # Neck output is a single tensor with spatial dimensions
+                classification_features = F.adaptive_avg_pool2d(classification_features, 1).flatten(1)
         else:
             # Use backbone output directly
             if isinstance(feats, (list, tuple)):
@@ -204,14 +216,27 @@ class MultiTaskCephalometricModel(TopdownPoseEstimator):
         # Extract features
         feats = self.extract_feat(inputs)
         
+        # Process features through neck if available
+        if self.neck is not None:
+            neck_feats = self.neck(feats)
+        else:
+            neck_feats = feats
+        
         # Get features for classification
         if self.neck is not None:
-            classification_features = self.neck(feats)
+            # Use neck output features
+            classification_features = neck_feats
             if isinstance(classification_features, (list, tuple)):
+                # Concatenate multi-scale features
                 classification_features = torch.cat([F.adaptive_avg_pool2d(f, 1).flatten(1) 
                                                     for f in classification_features], dim=1)
+            else:
+                # Neck output is a single tensor with spatial dimensions
+                classification_features = F.adaptive_avg_pool2d(classification_features, 1).flatten(1)
         else:
+            # Use backbone output directly
             if isinstance(feats, (list, tuple)):
+                # Concatenate multi-scale features
                 classification_features = torch.cat([F.adaptive_avg_pool2d(f, 1).flatten(1) 
                                                     for f in feats], dim=1)
             else:

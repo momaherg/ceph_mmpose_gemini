@@ -45,6 +45,11 @@ model = dict(
     type='MultiTaskCephalometricModel',  # Our custom multi-task model
     classification_loss_weight=1.0,  # Weight for classification loss
     use_landmark_features_for_classification=True,  # Use both backbone features and landmarks
+    # Add neck to process multi-scale features
+    neck=dict(
+        type='FeatureMapProcessor',
+        concat=True,  # Concatenate multi-scale features to get 270 channels
+    ),
     # Override head configuration for multi-task
     head=dict(
         out_channels=19, # Ensure this matches your dataset's keypoint count
