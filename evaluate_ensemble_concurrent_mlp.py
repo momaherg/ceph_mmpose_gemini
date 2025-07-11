@@ -420,15 +420,30 @@ def calculate_classification_metrics(true_labels: List[str], pred_labels: List[s
             'recall': np.nan,
             'f1_score': np.nan,
             'confusion_matrix': None,
+            'class_names': [],
             'n_samples': 0
         }
     
-    # Calculate metrics
-    classes = ['Class I', 'Class II', 'Class III']
+    # Get unique classes present in the data
+    unique_classes = sorted(list(set(true_valid + pred_valid)))
     
-    # Ensure all classes are represented
-    true_valid_encoded = [classes.index(c) if c in classes else -1 for c in true_valid]
-    pred_valid_encoded = [classes.index(c) if c in classes else -1 for c in pred_valid]
+    if not unique_classes:
+        return {
+            'accuracy': np.nan,
+            'precision': np.nan,
+            'recall': np.nan,
+            'f1_score': np.nan,
+            'confusion_matrix': None,
+            'class_names': [],
+            'n_samples': 0
+        }
+    
+    # Create class to index mapping
+    class_to_idx = {cls: idx for idx, cls in enumerate(unique_classes)}
+    
+    # Encode labels using only the classes present in the data
+    true_valid_encoded = [class_to_idx[c] for c in true_valid]
+    pred_valid_encoded = [class_to_idx[c] for c in pred_valid]
     
     accuracy = accuracy_score(true_valid_encoded, pred_valid_encoded)
     
@@ -437,12 +452,13 @@ def calculate_classification_metrics(true_labels: List[str], pred_labels: List[s
     recall = recall_score(true_valid_encoded, pred_valid_encoded, average='macro', zero_division=0)
     f1 = f1_score(true_valid_encoded, pred_valid_encoded, average='macro', zero_division=0)
     
-    # Confusion matrix
-    cm = confusion_matrix(true_valid_encoded, pred_valid_encoded, labels=[0, 1, 2])
+    # Confusion matrix - only use labels that are actually present
+    present_labels = list(range(len(unique_classes)))
+    cm = confusion_matrix(true_valid_encoded, pred_valid_encoded, labels=present_labels)
     
-    # Also calculate per-class metrics
+    # Calculate per-class metrics
     per_class_metrics = {}
-    for i, class_name in enumerate(classes):
+    for i, class_name in enumerate(unique_classes):
         class_true = [1 if t == i else 0 for t in true_valid_encoded]
         class_pred = [1 if p == i else 0 for p in pred_valid_encoded]
         
@@ -460,7 +476,7 @@ def calculate_classification_metrics(true_labels: List[str], pred_labels: List[s
         'recall': recall,
         'f1_score': f1,
         'confusion_matrix': cm,
-        'class_names': classes,
+        'class_names': unique_classes,
         'per_class': per_class_metrics,
         'n_samples': len(true_valid)
     }
