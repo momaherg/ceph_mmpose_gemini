@@ -397,9 +397,12 @@ class ConcurrentMLPTrainingHook(Hook):
         anb = sna - snb
         
         # Classify based on ANB angle
-        if anb > 4:
+        # Skeletal Class I:  0<x<4 
+        # Skeletal Class II: x≥4 
+        # Skeletal Class III: x≤0
+        if anb >= 4:
             return 1  # Class II
-        elif anb < 2:
+        elif anb <= 0:
             return 2  # Class III
         else:
             return 0  # Class I

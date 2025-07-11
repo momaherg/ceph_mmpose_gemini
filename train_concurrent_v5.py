@@ -228,10 +228,12 @@ def main():
         import mlp_concurrent_training_hook
         if args.use_multitask:
             import multitask_cephalometric_model
+            import classification_metric
         print("✓ Custom modules imported successfully")
         print("✓ Concurrent MLP training hook imported")
         if args.use_multitask:
             print("✓ Multi-task model imported")
+            print("✓ Classification metric imported")
     except ImportError as e:
         print(f"✗ Failed to import custom modules: {e}")
         return
