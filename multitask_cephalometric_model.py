@@ -77,11 +77,18 @@ class MultiTaskCephalometricModel(TopdownPoseEstimator):
                 dropout_rate=0.2
             )
         
+        # Make a copy to avoid modifying the original config
+        import copy
+        classification_head = copy.deepcopy(classification_head)
+        
+        # HRNet-W18 with FeatureMapProcessor always produces 270 channels (18+36+72+144)
+        backbone_feature_dim = 270
+        
         # If using landmark features, we'll use the fusion output dimension
         if self.use_landmark_features_for_classification:
             classification_head_in_channels = 256  # Output of fusion module
         else:
-            classification_head_in_channels = classification_head.get('in_channels', 270)
+            classification_head_in_channels = backbone_feature_dim
         
         # Update classification head with correct input channels
         classification_head['in_channels'] = classification_head_in_channels
@@ -98,9 +105,9 @@ class MultiTaskCephalometricModel(TopdownPoseEstimator):
                 nn.Linear(128, 64)
             )
             
-            # Update classification head input dimension
+            # Classification fusion: backbone features (270) + landmark features (64) -> 256
             self.classification_fusion = nn.Sequential(
-                nn.Linear(classification_head.get('in_channels', 270) + 64, 256),
+                nn.Linear(backbone_feature_dim + 64, 256),  # 270 + 64 = 334 -> 256
                 nn.ReLU(inplace=True),
                 nn.Dropout(0.2)
             )
@@ -167,6 +174,7 @@ class MultiTaskCephalometricModel(TopdownPoseEstimator):
             
             # Fuse backbone features with landmark features
             fused_features = torch.cat([classification_features, landmark_features], dim=1)
+            
             classification_features = self.classification_fusion(fused_features)
         
         # Get ground truth classes
