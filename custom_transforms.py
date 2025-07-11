@@ -142,7 +142,7 @@ class CustomPackPoseInputs(PackPoseInputs):
                     
                     # Add as labels field for the model
                     import torch
-                    gt_instances.labels = torch.tensor([class_label], dtype=torch.long)
+                    gt_instances.labels = torch.tensor(class_label, dtype=torch.long)
                     
                     # Also store the computed class in results for debugging
                     results['computed_class'] = class_label

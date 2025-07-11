@@ -183,13 +183,17 @@ class MultiTaskCephalometricModel(TopdownPoseEstimator):
             # Extract class from data sample
             if hasattr(data_sample, 'gt_instances') and hasattr(data_sample.gt_instances, 'labels'):
                 gt_class = data_sample.gt_instances.labels
+                # Ensure it's a scalar
+                if gt_class.dim() > 0:
+                    gt_class = gt_class[0]
+                gt_classes.append(gt_class)
             else:
                 # Try to get from metainfo
                 gt_class = data_sample.metainfo.get('class', 1)  # Default to Class I
                 # Convert to 0-indexed (Class I=0, II=1, III=2)
                 gt_class = int(gt_class) - 1
                 gt_class = torch.tensor(gt_class, device=inputs.device)
-            gt_classes.append(gt_class)
+                gt_classes.append(gt_class)
         
         gt_classes = torch.stack(gt_classes)
         
