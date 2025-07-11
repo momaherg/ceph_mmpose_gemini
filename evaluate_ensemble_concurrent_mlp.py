@@ -332,6 +332,78 @@ def classify_patient(anb_angle: float) -> str:
     else:  # anb_angle <= 0
         return 'Class III'
 
+def classify_u1(u1_angle: float) -> str:
+    """Classify upper incisor angle."""
+    if np.isnan(u1_angle):
+        return 'Unknown'
+    
+    if 107 <= u1_angle <= 117:
+        return 'Normal'
+    elif u1_angle > 117:
+        return 'Proclined'
+    else:  # u1_angle < 107
+        return 'Retroclined'
+
+def classify_l1(l1_angle: float) -> str:
+    """Classify lower incisor angle."""
+    if np.isnan(l1_angle):
+        return 'Unknown'
+    
+    if 92 <= l1_angle <= 104:
+        return 'Normal'
+    elif l1_angle > 104:
+        return 'Proclined'
+    else:  # l1_angle < 92
+        return 'Retroclined'
+
+def classify_sn_ans_pns(angle: float) -> str:
+    """Classify SN/ANS,PNS angle."""
+    if np.isnan(angle):
+        return 'Unknown'
+    
+    if 6.8 <= angle <= 12.8:
+        return 'Normal'
+    elif angle > 12.8:
+        return 'Increased'
+    else:  # angle < 6.8
+        return 'Decreased'
+
+def classify_sn_mn_go(angle: float) -> str:
+    """Classify SN/Me,Go angle."""
+    if np.isnan(angle):
+        return 'Unknown'
+    
+    if 27 <= angle <= 37:
+        return 'Normal'
+    elif angle > 37:
+        return 'Increased'
+    else:  # angle < 27
+        return 'Decreased'
+
+def classify_sna(sna_angle: float) -> str:
+    """Classify maxilla position based on SNA angle."""
+    if np.isnan(sna_angle):
+        return 'Unknown'
+    
+    if 80 <= sna_angle <= 86:
+        return 'Normal Maxilla'
+    elif sna_angle > 86:
+        return 'Prognathic Maxilla'
+    else:  # sna_angle < 80
+        return 'Retrognathic Maxilla'
+
+def classify_snb(snb_angle: float) -> str:
+    """Classify mandible position based on SNB angle."""
+    if np.isnan(snb_angle):
+        return 'Unknown'
+    
+    if 77 <= snb_angle <= 83:
+        return 'Normal Mandible'
+    elif snb_angle > 83:
+        return 'Prognathic Mandible'
+    else:  # snb_angle < 77
+        return 'Retrognathic Mandible'
+
 def calculate_classification_metrics(true_labels: List[str], pred_labels: List[str]) -> Dict[str, any]:
     """Calculate classification metrics including accuracy, precision, recall, F1, and confusion matrix."""
     from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, confusion_matrix
@@ -1294,6 +1366,17 @@ def save_angle_predictions_to_csv(ensemble_hrnet: np.ndarray, ensemble_mlp: np.n
     ensemble_mlp_classifications = []
     individual_model_classifications = [[] for _ in range(len(all_hrnet_preds))]
     
+    # Additional classification lists for all angles
+    classifications_data = {
+        'ANB': {'gt': [], 'ensemble_hrnet': [], 'ensemble_mlp': []},
+        'U1': {'gt': [], 'ensemble_hrnet': [], 'ensemble_mlp': []},
+        'L1': {'gt': [], 'ensemble_hrnet': [], 'ensemble_mlp': []},
+        'SN_ANS_PNS': {'gt': [], 'ensemble_hrnet': [], 'ensemble_mlp': []},
+        'SN_MN_GO': {'gt': [], 'ensemble_hrnet': [], 'ensemble_mlp': []},
+        'SNA': {'gt': [], 'ensemble_hrnet': [], 'ensemble_mlp': []},
+        'SNB': {'gt': [], 'ensemble_hrnet': [], 'ensemble_mlp': []}
+    }
+    
     # Process each patient
     for i, patient_id in enumerate(patient_ids):
         # Calculate pixel to mm ratio for this patient
@@ -1326,6 +1409,60 @@ def save_angle_predictions_to_csv(ensemble_hrnet: np.ndarray, ensemble_mlp: np.n
         ensemble_mlp_anb = ensemble_mlp_angles.get('ANB', np.nan)
         ensemble_mlp_class = classify_patient(ensemble_mlp_anb)
         ensemble_mlp_classifications.append(ensemble_mlp_class)
+        
+        # Calculate all angle classifications
+        # ANB
+        classifications_data['ANB']['gt'].append(gt_class)
+        classifications_data['ANB']['ensemble_hrnet'].append(ensemble_hrnet_class)
+        classifications_data['ANB']['ensemble_mlp'].append(ensemble_mlp_class)
+        
+        # U1
+        gt_u1 = gt_angles.get('u1', np.nan)
+        ensemble_hrnet_u1 = ensemble_hrnet_angles.get('u1', np.nan)
+        ensemble_mlp_u1 = ensemble_mlp_angles.get('u1', np.nan)
+        classifications_data['U1']['gt'].append(classify_u1(gt_u1))
+        classifications_data['U1']['ensemble_hrnet'].append(classify_u1(ensemble_hrnet_u1))
+        classifications_data['U1']['ensemble_mlp'].append(classify_u1(ensemble_mlp_u1))
+        
+        # L1
+        gt_l1 = gt_angles.get('l1', np.nan)
+        ensemble_hrnet_l1 = ensemble_hrnet_angles.get('l1', np.nan)
+        ensemble_mlp_l1 = ensemble_mlp_angles.get('l1', np.nan)
+        classifications_data['L1']['gt'].append(classify_l1(gt_l1))
+        classifications_data['L1']['ensemble_hrnet'].append(classify_l1(ensemble_hrnet_l1))
+        classifications_data['L1']['ensemble_mlp'].append(classify_l1(ensemble_mlp_l1))
+        
+        # SN/ANS,PNS
+        gt_sn_ans_pns = gt_angles.get('sn_ans_pns', np.nan)
+        ensemble_hrnet_sn_ans_pns = ensemble_hrnet_angles.get('sn_ans_pns', np.nan)
+        ensemble_mlp_sn_ans_pns = ensemble_mlp_angles.get('sn_ans_pns', np.nan)
+        classifications_data['SN_ANS_PNS']['gt'].append(classify_sn_ans_pns(gt_sn_ans_pns))
+        classifications_data['SN_ANS_PNS']['ensemble_hrnet'].append(classify_sn_ans_pns(ensemble_hrnet_sn_ans_pns))
+        classifications_data['SN_ANS_PNS']['ensemble_mlp'].append(classify_sn_ans_pns(ensemble_mlp_sn_ans_pns))
+        
+        # SN/Mn,Go
+        gt_sn_mn_go = gt_angles.get('sn_mn_go', np.nan)
+        ensemble_hrnet_sn_mn_go = ensemble_hrnet_angles.get('sn_mn_go', np.nan)
+        ensemble_mlp_sn_mn_go = ensemble_mlp_angles.get('sn_mn_go', np.nan)
+        classifications_data['SN_MN_GO']['gt'].append(classify_sn_mn_go(gt_sn_mn_go))
+        classifications_data['SN_MN_GO']['ensemble_hrnet'].append(classify_sn_mn_go(ensemble_hrnet_sn_mn_go))
+        classifications_data['SN_MN_GO']['ensemble_mlp'].append(classify_sn_mn_go(ensemble_mlp_sn_mn_go))
+        
+        # SNA
+        gt_sna = gt_angles.get('SNA', np.nan)
+        ensemble_hrnet_sna = ensemble_hrnet_angles.get('SNA', np.nan)
+        ensemble_mlp_sna = ensemble_mlp_angles.get('SNA', np.nan)
+        classifications_data['SNA']['gt'].append(classify_sna(gt_sna))
+        classifications_data['SNA']['ensemble_hrnet'].append(classify_sna(ensemble_hrnet_sna))
+        classifications_data['SNA']['ensemble_mlp'].append(classify_sna(ensemble_mlp_sna))
+        
+        # SNB
+        gt_snb = gt_angles.get('SNB', np.nan)
+        ensemble_hrnet_snb = ensemble_hrnet_angles.get('SNB', np.nan)
+        ensemble_mlp_snb = ensemble_mlp_angles.get('SNB', np.nan)
+        classifications_data['SNB']['gt'].append(classify_snb(gt_snb))
+        classifications_data['SNB']['ensemble_hrnet'].append(classify_snb(ensemble_hrnet_snb))
+        classifications_data['SNB']['ensemble_mlp'].append(classify_snb(ensemble_mlp_snb))
         
         # Prepare ensemble angle row
         ensemble_row = {'patient_id': patient_id}
@@ -1414,10 +1551,35 @@ def save_angle_predictions_to_csv(ensemble_hrnet: np.ndarray, ensemble_mlp: np.n
                 ensemble_row[f'ensemble_mlp_{st_name}'] = mlp_st
                 ensemble_row[f'ensemble_mlp_{st_name}_error'] = mlp_st_error
         
-        # Add patient classification
+        # Add patient classification (ANB)
         ensemble_row['gt_classification'] = gt_class
         ensemble_row['ensemble_hrnetv2_classification'] = ensemble_hrnet_class
         ensemble_row['ensemble_mlp_classification'] = ensemble_mlp_class
+        
+        # Add all angle classifications
+        ensemble_row['gt_u1_classification'] = classifications_data['U1']['gt'][-1]
+        ensemble_row['ensemble_hrnetv2_u1_classification'] = classifications_data['U1']['ensemble_hrnet'][-1]
+        ensemble_row['ensemble_mlp_u1_classification'] = classifications_data['U1']['ensemble_mlp'][-1]
+        
+        ensemble_row['gt_l1_classification'] = classifications_data['L1']['gt'][-1]
+        ensemble_row['ensemble_hrnetv2_l1_classification'] = classifications_data['L1']['ensemble_hrnet'][-1]
+        ensemble_row['ensemble_mlp_l1_classification'] = classifications_data['L1']['ensemble_mlp'][-1]
+        
+        ensemble_row['gt_sn_ans_pns_classification'] = classifications_data['SN_ANS_PNS']['gt'][-1]
+        ensemble_row['ensemble_hrnetv2_sn_ans_pns_classification'] = classifications_data['SN_ANS_PNS']['ensemble_hrnet'][-1]
+        ensemble_row['ensemble_mlp_sn_ans_pns_classification'] = classifications_data['SN_ANS_PNS']['ensemble_mlp'][-1]
+        
+        ensemble_row['gt_sn_mn_go_classification'] = classifications_data['SN_MN_GO']['gt'][-1]
+        ensemble_row['ensemble_hrnetv2_sn_mn_go_classification'] = classifications_data['SN_MN_GO']['ensemble_hrnet'][-1]
+        ensemble_row['ensemble_mlp_sn_mn_go_classification'] = classifications_data['SN_MN_GO']['ensemble_mlp'][-1]
+        
+        ensemble_row['gt_sna_classification'] = classifications_data['SNA']['gt'][-1]
+        ensemble_row['ensemble_hrnetv2_sna_classification'] = classifications_data['SNA']['ensemble_hrnet'][-1]
+        ensemble_row['ensemble_mlp_sna_classification'] = classifications_data['SNA']['ensemble_mlp'][-1]
+        
+        ensemble_row['gt_snb_classification'] = classifications_data['SNB']['gt'][-1]
+        ensemble_row['ensemble_hrnetv2_snb_classification'] = classifications_data['SNB']['ensemble_hrnet'][-1]
+        ensemble_row['ensemble_mlp_snb_classification'] = classifications_data['SNB']['ensemble_mlp'][-1]
         
         ensemble_angle_data.append(ensemble_row)
         
@@ -1673,21 +1835,21 @@ def save_angle_predictions_to_csv(ensemble_hrnet: np.ndarray, ensemble_mlp: np.n
                         print(f"   (in mm)            {'':<12} {mlp_mae_mm:<20.2f} {hrnet_mae_mm:<20.2f} {improvement_mm:<15.1f}%")
     
     # Calculate and print classification metrics
-    print(f"\n🏷️  Patient Classification Metrics (based on ANB angle):")
+    print(f"\n🏷️  Patient Classification Metrics:")
     print("-" * 70)
     
-    # Ensemble HRNetV2 classification metrics
+    # ANB Classification (original)
+    print(f"\n📐 ANB Angle Classification (Skeletal Pattern):")
     hrnet_metrics = calculate_classification_metrics(gt_classifications, ensemble_hrnet_classifications)
-    print(f"\nEnsemble HRNetV2 Classification:")
+    print(f"\nEnsemble HRNetV2:")
     print(f"  Accuracy: {hrnet_metrics['accuracy']:.3f}")
     print(f"  Precision (macro): {hrnet_metrics['precision']:.3f}")
     print(f"  Recall (macro): {hrnet_metrics['recall']:.3f}")
     print(f"  F1-Score (macro): {hrnet_metrics['f1_score']:.3f}")
     print(f"  Valid samples: {hrnet_metrics['n_samples']}")
     
-    # Ensemble MLP classification metrics
     mlp_metrics = calculate_classification_metrics(gt_classifications, ensemble_mlp_classifications)
-    print(f"\nEnsemble MLP Classification:")
+    print(f"\nEnsemble MLP:")
     print(f"  Accuracy: {mlp_metrics['accuracy']:.3f}")
     print(f"  Precision (macro): {mlp_metrics['precision']:.3f}")
     print(f"  Recall (macro): {mlp_metrics['recall']:.3f}")
@@ -1696,9 +1858,54 @@ def save_angle_predictions_to_csv(ensemble_hrnet: np.ndarray, ensemble_mlp: np.n
     
     # Save classification metrics
     classification_results = {
-        'ensemble_hrnetv2': hrnet_metrics,
-        'ensemble_mlp': mlp_metrics
+        'ANB': {
+            'ensemble_hrnetv2': hrnet_metrics,
+            'ensemble_mlp': mlp_metrics
+        }
     }
+    
+    # Calculate and print metrics for all other angles
+    angle_classification_info = {
+        'U1': 'Upper Incisor Inclination',
+        'L1': 'Lower Incisor Inclination',
+        'SN_ANS_PNS': 'Palatal Plane Angle',
+        'SN_MN_GO': 'Mandibular Plane Angle',
+        'SNA': 'Maxilla Position',
+        'SNB': 'Mandible Position'
+    }
+    
+    for angle_key, angle_description in angle_classification_info.items():
+        print(f"\n📐 {angle_key} Classification ({angle_description}):")
+        
+        # Calculate metrics for HRNetV2
+        hrnet_metrics = calculate_classification_metrics(
+            classifications_data[angle_key]['gt'],
+            classifications_data[angle_key]['ensemble_hrnet']
+        )
+        print(f"\nEnsemble HRNetV2:")
+        print(f"  Accuracy: {hrnet_metrics['accuracy']:.3f}")
+        print(f"  Valid samples: {hrnet_metrics['n_samples']}")
+        if 'per_class' in hrnet_metrics and hrnet_metrics['per_class']:
+            for class_name, class_metrics in hrnet_metrics['per_class'].items():
+                print(f"  {class_name}: Precision={class_metrics['precision']:.3f}, Recall={class_metrics['recall']:.3f}, Support={class_metrics['support']}")
+        
+        # Calculate metrics for MLP
+        mlp_metrics = calculate_classification_metrics(
+            classifications_data[angle_key]['gt'],
+            classifications_data[angle_key]['ensemble_mlp']
+        )
+        print(f"\nEnsemble MLP:")
+        print(f"  Accuracy: {mlp_metrics['accuracy']:.3f}")
+        print(f"  Valid samples: {mlp_metrics['n_samples']}")
+        if 'per_class' in mlp_metrics and mlp_metrics['per_class']:
+            for class_name, class_metrics in mlp_metrics['per_class'].items():
+                print(f"  {class_name}: Precision={class_metrics['precision']:.3f}, Recall={class_metrics['recall']:.3f}, Support={class_metrics['support']}")
+        
+        # Save to results
+        classification_results[angle_key] = {
+            'ensemble_hrnetv2': hrnet_metrics,
+            'ensemble_mlp': mlp_metrics
+        }
     
     # Create comprehensive visualization
     create_angle_error_visualization(ensemble_angle_df, angle_names, soft_tissue_names, output_dir)
@@ -2677,30 +2884,61 @@ def save_overall_results_report(results: Dict[str, Dict], validation_results: Di
         
         # Classification results if available
         if classification_results:
-            f.write("\n\nPATIENT CLASSIFICATION RESULTS (ANB-based):\n")
+            f.write("\n\nPATIENT CLASSIFICATION RESULTS:\n")
             f.write("-" * 30 + "\n")
             
-            for model_type in ['ensemble_hrnetv2', 'ensemble_mlp']:
-                if model_type in classification_results:
-                    metrics = classification_results[model_type]
-                    model_name = 'Ensemble HRNetV2' if model_type == 'ensemble_hrnetv2' else 'Ensemble MLP'
+            angle_names_full = {
+                'ANB': 'ANB Skeletal Pattern',
+                'U1': 'Upper Incisor Inclination',
+                'L1': 'Lower Incisor Inclination',
+                'SN_ANS_PNS': 'Palatal Plane Angle',
+                'SN_MN_GO': 'Mandibular Plane Angle',
+                'SNA': 'Maxilla Position',
+                'SNB': 'Mandible Position'
+            }
+            
+            # Summary table
+            f.write("\nSummary Classification Accuracy:\n")
+            f.write(f"{'Angle':<20} {'Description':<30} {'HRNetV2 Acc':<15} {'MLP Acc':<15} {'Improvement':<15}\n")
+            f.write("-" * 95 + "\n")
+            
+            for angle_key, angle_results in classification_results.items():
+                if isinstance(angle_results, dict) and 'ensemble_hrnetv2' in angle_results:
+                    hrnet_acc = angle_results['ensemble_hrnetv2']['accuracy']
+                    mlp_acc = angle_results['ensemble_mlp']['accuracy']
+                    improvement = (mlp_acc - hrnet_acc) / hrnet_acc * 100 if hrnet_acc > 0 else 0
                     
-                    f.write(f"\n{model_name}:\n")
-                    f.write(f"  Accuracy: {metrics['accuracy']:.3f}\n")
-                    f.write(f"  Precision (macro): {metrics['precision']:.3f}\n")
-                    f.write(f"  Recall (macro): {metrics['recall']:.3f}\n")
-                    f.write(f"  F1-Score (macro): {metrics['f1_score']:.3f}\n")
-                    f.write(f"  Valid samples: {metrics['n_samples']}\n")
+                    f.write(f"{angle_key:<20} {angle_names_full.get(angle_key, angle_key):<30} "
+                           f"{hrnet_acc:<15.3f} {mlp_acc:<15.3f} {improvement:<15.1f}%\n")
+            
+            # Detailed results for each angle
+            f.write("\n\nDetailed Classification Results:\n")
+            
+            for angle_key, angle_results in classification_results.items():
+                if isinstance(angle_results, dict) and 'ensemble_hrnetv2' in angle_results:
+                    f.write(f"\n{angle_key} - {angle_names_full.get(angle_key, angle_key)}:\n")
+                    f.write("-" * 50 + "\n")
                     
-                    # Per-class metrics
-                    if 'per_class' in metrics and metrics['per_class']:
-                        f.write("\n  Per-Class Performance:\n")
-                        for class_name, class_metrics in metrics['per_class'].items():
-                            f.write(f"    {class_name}: "
-                                   f"Precision={class_metrics['precision']:.3f}, "
-                                   f"Recall={class_metrics['recall']:.3f}, "
-                                   f"F1={class_metrics['f1']:.3f}, "
-                                   f"Support={class_metrics['support']}\n")
+                    for model_type in ['ensemble_hrnetv2', 'ensemble_mlp']:
+                        metrics = angle_results[model_type]
+                        model_name = 'Ensemble HRNetV2' if model_type == 'ensemble_hrnetv2' else 'Ensemble MLP'
+                        
+                        f.write(f"\n{model_name}:\n")
+                        f.write(f"  Accuracy: {metrics['accuracy']:.3f}\n")
+                        f.write(f"  Precision (macro): {metrics['precision']:.3f}\n")
+                        f.write(f"  Recall (macro): {metrics['recall']:.3f}\n")
+                        f.write(f"  F1-Score (macro): {metrics['f1_score']:.3f}\n")
+                        f.write(f"  Valid samples: {metrics['n_samples']}\n")
+                        
+                        # Per-class metrics
+                        if 'per_class' in metrics and metrics['per_class']:
+                            f.write("  Per-Class Performance:\n")
+                            for class_name, class_metrics in metrics['per_class'].items():
+                                f.write(f"    {class_name}: "
+                                       f"Precision={class_metrics['precision']:.3f}, "
+                                       f"Recall={class_metrics['recall']:.3f}, "
+                                       f"F1={class_metrics['f1']:.3f}, "
+                                       f"Support={class_metrics['support']}\n")
         
         # Summary statistics
         f.write("\n\nSUMMARY:\n")
@@ -2772,12 +3010,14 @@ def save_overall_results_report(results: Dict[str, Dict], validation_results: Di
         f.write(f"Results saved to: {output_dir}\n")
         f.write("\nKey files:\n")
         f.write("  - overall_results_report.txt (this file)\n")
+        f.write("  - overall_results.json (JSON version)\n")
         f.write("  - ensemble_mlp_predictions_detailed.csv\n")
         f.write("  - ensemble_hrnetv2_predictions_detailed.csv\n")
-        f.write("  - ensemble_angle_predictions.csv\n")
+        f.write("  - ensemble_angle_predictions.csv (with all angle classifications)\n")
         f.write("  - all_models_angle_predictions.csv\n")
         f.write("  - angle_error_analysis.png\n")
-        f.write("  - classification_analysis.png\n")
+        f.write("  - classification_analysis.png (comprehensive classification results)\n")
+        f.write("  - classification_results_summary.csv (detailed classification metrics)\n")
         f.write("  - patient_visualizations/\n")
         
         f.write("\n" + "="*80 + "\n")
@@ -2929,133 +3169,170 @@ def save_overall_results_report(results: Dict[str, Dict], validation_results: Di
     print(f"📄 JSON results saved to: {os.path.basename(json_report_path)}")
 
 def create_classification_visualization(classification_results: Dict[str, Dict], output_dir: str):
-    """Create visualization of patient classification results."""
-    fig, axes = plt.subplots(2, 2, figsize=(15, 12))
+    """Create visualization of patient classification results for all angles."""
+    # Create a larger figure for multiple angle classifications
+    n_angles = len(classification_results)
+    fig = plt.figure(figsize=(24, 16))
     
-    # Extract metrics
-    hrnet_metrics = classification_results['ensemble_hrnetv2']
-    mlp_metrics = classification_results['ensemble_mlp']
+    angle_names_display = {
+        'ANB': 'ANB (Skeletal Pattern)',
+        'U1': 'U1 (Upper Incisor)',
+        'L1': 'L1 (Lower Incisor)',
+        'SN_ANS_PNS': 'SN/ANS,PNS (Palatal Plane)',
+        'SN_MN_GO': 'SN/Mn,Go (Mandibular Plane)',
+        'SNA': 'SNA (Maxilla Position)',
+        'SNB': 'SNB (Mandible Position)'
+    }
     
-    # Plot 1: Confusion Matrices
-    ax = axes[0, 0]
-    if hrnet_metrics['confusion_matrix'] is not None:
-        im = ax.imshow(hrnet_metrics['confusion_matrix'], cmap='Blues', interpolation='nearest')
-        
-        # Add text annotations
-        for i in range(len(hrnet_metrics['class_names'])):
-            for j in range(len(hrnet_metrics['class_names'])):
-                text = ax.text(j, i, str(hrnet_metrics['confusion_matrix'][i, j]),
-                             ha="center", va="center", color="black")
-        
-        ax.set_xticks(range(len(hrnet_metrics['class_names'])))
-        ax.set_yticks(range(len(hrnet_metrics['class_names'])))
-        ax.set_xticklabels(hrnet_metrics['class_names'])
-        ax.set_yticklabels(hrnet_metrics['class_names'])
-        ax.set_xlabel('Predicted')
-        ax.set_ylabel('True')
-        ax.set_title('Ensemble HRNetV2 Confusion Matrix')
-        plt.colorbar(im, ax=ax)
+    # Create subplot grid: 3 rows x 3 columns for individual angles, 1 row for summary
+    gs = fig.add_gridspec(4, 3, height_ratios=[1, 1, 1, 1.5], hspace=0.3, wspace=0.3)
     
-    ax = axes[0, 1]
-    if mlp_metrics['confusion_matrix'] is not None:
-        im = ax.imshow(mlp_metrics['confusion_matrix'], cmap='Reds', interpolation='nearest')
-        
-        # Add text annotations
-        for i in range(len(mlp_metrics['class_names'])):
-            for j in range(len(mlp_metrics['class_names'])):
-                text = ax.text(j, i, str(mlp_metrics['confusion_matrix'][i, j]),
-                             ha="center", va="center", color="black")
-        
-        ax.set_xticks(range(len(mlp_metrics['class_names'])))
-        ax.set_yticks(range(len(mlp_metrics['class_names'])))
-        ax.set_xticklabels(mlp_metrics['class_names'])
-        ax.set_yticklabels(mlp_metrics['class_names'])
-        ax.set_xlabel('Predicted')
-        ax.set_ylabel('True')
-        ax.set_title('Ensemble MLP Confusion Matrix')
-        plt.colorbar(im, ax=ax)
+    # Plot accuracy comparison for each angle
+    angle_idx = 0
+    angle_order = ['ANB', 'SNA', 'SNB', 'U1', 'L1', 'SN_ANS_PNS', 'SN_MN_GO']
     
-    # Plot 2: Overall metrics comparison
-    ax = axes[1, 0]
-    metrics_names = ['Accuracy', 'Precision', 'Recall', 'F1-Score']
-    hrnet_values = [hrnet_metrics['accuracy'], hrnet_metrics['precision'], 
-                    hrnet_metrics['recall'], hrnet_metrics['f1_score']]
-    mlp_values = [mlp_metrics['accuracy'], mlp_metrics['precision'], 
-                  mlp_metrics['recall'], mlp_metrics['f1_score']]
+    # Individual angle plots
+    for row in range(3):
+        for col in range(3):
+            if angle_idx < len(angle_order) and angle_order[angle_idx] in classification_results:
+                angle_key = angle_order[angle_idx]
+                ax = fig.add_subplot(gs[row, col])
+                
+                angle_results = classification_results[angle_key]
+                hrnet_metrics = angle_results['ensemble_hrnetv2']
+                mlp_metrics = angle_results['ensemble_mlp']
+                
+                # Plot accuracy comparison
+                models = ['HRNetV2', 'MLP']
+                accuracies = [hrnet_metrics['accuracy'], mlp_metrics['accuracy']]
+                colors = ['blue', 'red']
+                
+                bars = ax.bar(models, accuracies, color=colors, alpha=0.7)
+                
+                # Add value labels on bars
+                for bar, acc in zip(bars, accuracies):
+                    height = bar.get_height()
+                    ax.text(bar.get_x() + bar.get_width()/2., height,
+                           f'{acc:.3f}', ha='center', va='bottom')
+                
+                ax.set_ylim(0, 1.1)
+                ax.set_ylabel('Accuracy')
+                ax.set_title(angle_names_display.get(angle_key, angle_key))
+                ax.grid(True, alpha=0.3, axis='y')
+                
+                # Add sample size
+                n_samples = hrnet_metrics['n_samples']
+                ax.text(0.5, 0.02, f'n={n_samples}', transform=ax.transAxes,
+                       ha='center', fontsize=8)
+                
+                angle_idx += 1
     
-    x = np.arange(len(metrics_names))
+    # Summary plot across all angles
+    ax_summary = fig.add_subplot(gs[3, :])
+    
+    # Collect accuracies for all angles
+    angle_keys = []
+    hrnet_accuracies = []
+    mlp_accuracies = []
+    
+    for angle_key in angle_order:
+        if angle_key in classification_results:
+            angle_keys.append(angle_names_display.get(angle_key, angle_key))
+            hrnet_accuracies.append(classification_results[angle_key]['ensemble_hrnetv2']['accuracy'])
+            mlp_accuracies.append(classification_results[angle_key]['ensemble_mlp']['accuracy'])
+    
+    x = np.arange(len(angle_keys))
     width = 0.35
     
-    bars1 = ax.bar(x - width/2, hrnet_values, width, label='Ensemble HRNetV2', color='blue', alpha=0.7)
-    bars2 = ax.bar(x + width/2, mlp_values, width, label='Ensemble MLP', color='red', alpha=0.7)
+    bars1 = ax_summary.bar(x - width/2, hrnet_accuracies, width, label='Ensemble HRNetV2', color='blue', alpha=0.7)
+    bars2 = ax_summary.bar(x + width/2, mlp_accuracies, width, label='Ensemble MLP', color='red', alpha=0.7)
     
-    ax.set_ylabel('Score')
-    ax.set_title('Classification Metrics Comparison')
-    ax.set_xticks(x)
-    ax.set_xticklabels(metrics_names)
-    ax.legend()
-    ax.set_ylim(0, 1.1)
-    ax.grid(True, alpha=0.3)
+    ax_summary.set_xlabel('Classification Task')
+    ax_summary.set_ylabel('Accuracy')
+    ax_summary.set_title('Classification Accuracy Comparison Across All Angles')
+    ax_summary.set_xticks(x)
+    ax_summary.set_xticklabels(angle_keys, rotation=45, ha='right')
+    ax_summary.legend()
+    ax_summary.set_ylim(0, 1.1)
+    ax_summary.grid(True, alpha=0.3, axis='y')
     
     # Add value labels on bars
     for bars in [bars1, bars2]:
         for bar in bars:
             height = bar.get_height()
-            ax.annotate(f'{height:.3f}',
-                       xy=(bar.get_x() + bar.get_width() / 2, height),
-                       xytext=(0, 3),  # 3 points vertical offset
-                       textcoords="offset points",
-                       ha='center', va='bottom',
-                       fontsize=8)
+            ax_summary.text(bar.get_x() + bar.get_width()/2., height,
+                           f'{height:.2f}', ha='center', va='bottom', fontsize=8)
     
-    # Plot 3: Per-class performance
-    ax = axes[1, 1]
+    # Calculate and display average improvement
+    improvements = [(mlp - hrnet) / hrnet * 100 if hrnet > 0 else 0 
+                   for hrnet, mlp in zip(hrnet_accuracies, mlp_accuracies)]
+    avg_improvement = np.mean(improvements)
+    ax_summary.text(0.99, 0.95, f'Avg MLP Improvement: {avg_improvement:+.1f}%',
+                   transform=ax_summary.transAxes, ha='right', va='top',
+                   bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
     
-    # Get per-class metrics
-    classes = hrnet_metrics['class_names']
-    per_class_data = []
-    
-    for class_name in classes:
-        hrnet_class = hrnet_metrics['per_class'].get(class_name, {})
-        mlp_class = mlp_metrics['per_class'].get(class_name, {})
-        
-        per_class_data.append({
-            'class': class_name,
-            'hrnet_f1': hrnet_class.get('f1', 0),
-            'mlp_f1': mlp_class.get('f1', 0),
-            'support': hrnet_class.get('support', 0)
-        })
-    
-    if per_class_data:
-        class_names = [d['class'] for d in per_class_data]
-        hrnet_f1s = [d['hrnet_f1'] for d in per_class_data]
-        mlp_f1s = [d['mlp_f1'] for d in per_class_data]
-        supports = [d['support'] for d in per_class_data]
-        
-        x = np.arange(len(class_names))
-        bars1 = ax.bar(x - width/2, hrnet_f1s, width, label='Ensemble HRNetV2', color='blue', alpha=0.7)
-        bars2 = ax.bar(x + width/2, mlp_f1s, width, label='Ensemble MLP', color='red', alpha=0.7)
-        
-        ax.set_ylabel('F1-Score')
-        ax.set_title('Per-Class F1-Score Comparison')
-        ax.set_xticks(x)
-        ax.set_xticklabels(class_names)
-        ax.legend()
-        ax.set_ylim(0, 1.1)
-        ax.grid(True, alpha=0.3)
-        
-        # Add sample counts
-        for i, (x_pos, support) in enumerate(zip(x, supports)):
-            ax.text(x_pos, -0.05, f'n={support}', ha='center', va='top', fontsize=8)
-    
-    plt.suptitle('Patient Classification Analysis (ANB-based)', fontsize=16, fontweight='bold')
-    plt.tight_layout()
+    plt.suptitle('Comprehensive Cephalometric Classification Analysis', fontsize=20, fontweight='bold')
     
     output_path = os.path.join(output_dir, 'classification_analysis.png')
     plt.savefig(output_path, dpi=150, bbox_inches='tight')
     plt.close()
     
     print(f"   ✓ Classification visualization saved to: {os.path.basename(output_path)}")
+    
+    # Save detailed classification results to CSV
+    save_classification_results_to_csv(classification_results, output_dir)
+
+def save_classification_results_to_csv(classification_results: Dict[str, Dict], output_dir: str):
+    """Save detailed classification results to CSV file."""
+    classification_data = []
+    
+    angle_names_full = {
+        'ANB': 'ANB Skeletal Pattern',
+        'U1': 'Upper Incisor Inclination',
+        'L1': 'Lower Incisor Inclination',
+        'SN_ANS_PNS': 'Palatal Plane Angle',
+        'SN_MN_GO': 'Mandibular Plane Angle',
+        'SNA': 'Maxilla Position',
+        'SNB': 'Mandible Position'
+    }
+    
+    angle_ranges = {
+        'ANB': 'Class I (0-4°), Class II (>4°), Class III (≤0°)',
+        'U1': 'Normal (107-117°), Proclined (>117°), Retroclined (<107°)',
+        'L1': 'Normal (92-104°), Proclined (>104°), Retroclined (<92°)',
+        'SN_ANS_PNS': 'Normal (6.8-12.8°), Increased (>12.8°), Decreased (<6.8°)',
+        'SN_MN_GO': 'Normal (27-37°), Increased (>37°), Decreased (<27°)',
+        'SNA': 'Normal (80-86°), Prognathic (>86°), Retrognathic (<80°)',
+        'SNB': 'Normal (77-83°), Prognathic (>83°), Retrognathic (<77°)'
+    }
+    
+    for angle_key, angle_results in classification_results.items():
+        hrnet_metrics = angle_results['ensemble_hrnetv2']
+        mlp_metrics = angle_results['ensemble_mlp']
+        
+        classification_data.append({
+            'Angle': angle_key,
+            'Description': angle_names_full.get(angle_key, angle_key),
+            'Classification_Ranges': angle_ranges.get(angle_key, ''),
+            'HRNetV2_Accuracy': hrnet_metrics['accuracy'],
+            'HRNetV2_Precision': hrnet_metrics['precision'],
+            'HRNetV2_Recall': hrnet_metrics['recall'],
+            'HRNetV2_F1': hrnet_metrics['f1_score'],
+            'HRNetV2_Samples': hrnet_metrics['n_samples'],
+            'MLP_Accuracy': mlp_metrics['accuracy'],
+            'MLP_Precision': mlp_metrics['precision'],
+            'MLP_Recall': mlp_metrics['recall'],
+            'MLP_F1': mlp_metrics['f1_score'],
+            'MLP_Samples': mlp_metrics['n_samples'],
+            'Accuracy_Improvement': (mlp_metrics['accuracy'] - hrnet_metrics['accuracy']) / hrnet_metrics['accuracy'] * 100 if hrnet_metrics['accuracy'] > 0 else 0
+        })
+    
+    # Create DataFrame and save
+    df = pd.DataFrame(classification_data)
+    csv_path = os.path.join(output_dir, 'classification_results_summary.csv')
+    df.to_csv(csv_path, index=False)
+    
+    print(f"   ✓ Classification results summary saved to: {os.path.basename(csv_path)}")
 
 def main():
     """Main ensemble evaluation function."""
@@ -3442,7 +3719,9 @@ def main():
     print(f"   - All models angles & soft tissue: all_models_angle_predictions.csv")
     print(f"   - Angle error analysis: angle_error_analysis.png")
     print(f"   - Classification analysis: classification_analysis.png")
-    print(f"   Note: Files include ANB angle, soft tissue measurements, and patient classifications")
+    print(f"   - Classification results summary: classification_results_summary.csv")
+    print(f"   Note: Files include ALL angle classifications (ANB, SNA, SNB, U1, L1, SN/ANS-PNS, SN/Mn-Go)")
+    print(f"   Note: Classifications based on clinical thresholds for each angle")
     print(f"   Note: Coordinates are scaled to original 600x600 image space")
     print(f"   Note: Errors are provided in pixels (224x224 and 600x600) and mm (when calibration available)")
     if ruler_data:
@@ -3453,8 +3732,10 @@ def main():
     print(f"   - Machine-readable JSON: overall_results.json")
     print(f"   - ALL landmarks performance (19 landmarks)")
     print(f"   - ALL angles analysis (8 measurements)")
+    print(f"   - ALL angle classifications (7 different angle types)")
     print(f"   - Accuracy metrics: 2mm/4mm threshold for landmarks, 2°/4° threshold for angles")
     print(f"   - Clinical acceptability assessment")
+    print(f"   - Classification accuracy for each angle type")
     print(f"   - Complete evaluation configuration and metadata")
     
     # Quick summary
