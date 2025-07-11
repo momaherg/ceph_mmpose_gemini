@@ -2,6 +2,7 @@
 """
 Ensemble Concurrent MLP Training Script for Cephalometric Landmark Detection - V5
 This script trains 3 HRNetV2 models with concurrent MLP refinement using different train/val splits.
+Now with multi-task learning: landmark detection + patient classification.
 """
 
 import os
@@ -45,9 +46,10 @@ def plot_training_progress(work_dir):
             # Extract metrics
             train_loss = [log['loss'] for log in logs if 'loss' in log and log.get('mode') == 'train']
             val_nme = [log['NME'] for log in logs if 'NME' in log and log.get('mode') == 'val']
+            classification_acc = [log.get('acc_classification', 0) for log in logs if 'acc_classification' in log and log.get('mode') == 'train']
             
             if train_loss and val_nme:
-                fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
+                fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(18, 4))
                 
                 ax1.plot(train_loss)
                 ax1.set_title('Training Loss')
@@ -60,6 +62,13 @@ def plot_training_progress(work_dir):
                 ax2.set_xlabel('Epoch')
                 ax2.set_ylabel('NME')
                 ax2.grid(True)
+                
+                if classification_acc:
+                    ax3.plot(classification_acc)
+                    ax3.set_title('Classification Accuracy')
+                    ax3.set_xlabel('Iteration')
+                    ax3.set_ylabel('Accuracy')
+                    ax3.grid(True)
                 
                 plt.tight_layout()
                 plt.savefig(os.path.join(work_dir, 'training_progress.png'), dpi=150)
@@ -143,6 +152,7 @@ def train_single_model(cfg, split_idx, train_df, val_df, test_df, base_work_dir)
         # Build runner and start training
         print(f"🎯 Starting concurrent training for model {split_idx}...")
         print("📊 After each HRNet epoch, MLPs will be trained for 100 epochs")
+        print("🔄 Now with multi-task learning: landmarks + classification")
         
         runner = Runner.from_cfg(cfg)
         runner.train()
@@ -192,11 +202,18 @@ def main():
         default=100,
         help='Validation set size for each split (default: 100)'
     )
+    parser.add_argument(
+        '--use_multitask',
+        action='store_true',
+        help='Use multi-task model with classification (default: False)'
+    )
     args = parser.parse_args()
     
     print("="*80)
     print("ENSEMBLE CONCURRENT MLP TRAINING - V5")
     print("🚀 Training 3 HRNetV2 + MLP models with different train/val splits")
+    if args.use_multitask:
+        print("🎯 Using multi-task learning: landmarks + classification")
     print("="*80)
     
     # Initialize MMPose scope
@@ -209,15 +226,25 @@ def main():
         import cephalometric_dataset_info
         # Import the concurrent training hook
         import mlp_concurrent_training_hook
+        if args.use_multitask:
+            import multitask_cephalometric_model
         print("✓ Custom modules imported successfully")
         print("✓ Concurrent MLP training hook imported")
+        if args.use_multitask:
+            print("✓ Multi-task model imported")
     except ImportError as e:
         print(f"✗ Failed to import custom modules: {e}")
         return
     
     # Configuration
-    config_path = "Pretrained_model/hrnetv2_w18_cephalometric_256x256_finetune.py"
+    if args.use_multitask:
+        config_path = "Pretrained_model/hrnetv2_w18_cephalometric_256x256_multitask.py"
+    else:
+        config_path = "Pretrained_model/hrnetv2_w18_cephalometric_256x256_finetune.py"
+    
     base_work_dir = "work_dirs/hrnetv2_w18_cephalometric_ensemble_concurrent_mlp_v5"
+    if args.use_multitask:
+        base_work_dir += "_multitask"
     
     print(f"Config: {config_path}")
     print(f"Base Work Dir: {base_work_dir}")
@@ -297,12 +324,16 @@ def main():
     print(f"   • Train HRNetV2 for 1 epoch")
     print(f"   • Run inference on training data with current HRNet weights")
     print(f"   • Train joint MLP model for 100 epochs on current predictions")
+    if args.use_multitask:
+        print(f"   • MLP also predicts patient classification (Class I, II, III)")
     print(f"   • Repeat for all {cfg.train_cfg.max_epochs} epochs")
     
     print(f"\n🧠 Joint MLP Architecture:")
     print(f"   • Input: 38 predicted coordinates (19 landmarks × 2)")
     print(f"   • Hidden: 500 neurons (ReLU + Dropout)")
     print(f"   • Output: 38 refined coordinates")
+    if args.use_multitask:
+        print(f"   • Additional output: 3 classification logits")
     print(f"   • Residual connections for stable training")
     
     print(f"\n⚙️  Training Parameters:")
@@ -311,6 +342,8 @@ def main():
     print(f"   • MLP batch size: 16")
     print(f"   • MLP learning rate: 1e-5")
     print(f"   • MLP weight decay: 1e-4")
+    if args.use_multitask:
+        print(f"   • Classification loss weight: 1.0")
     
     # Train each model in the ensemble
     successful_models = 0
@@ -363,12 +396,16 @@ def main():
         print(f"2. 🎯 Robustness: Ensemble predictions reduce overfitting")
         print(f"3. 🧠 Dynamic adaptation: Each MLP adapts to its HRNet evolution")
         print(f"4. 🚀 Two-stage refinement: HRNet predictions → MLP refinement")
+        if args.use_multitask:
+            print(f"5. 🏷️ Multi-task learning: Simultaneous landmarks + classification")
         
         print(f"\n📋 Next steps:")
         print(f"1. 📊 Evaluate each model individually on test set")
         print(f"2. 🔄 Create ensemble predictions (average/voting)")
         print(f"3. 📈 Compare ensemble vs. individual model performance")
         print(f"4. 🎨 Analyze model diversity and complementarity")
+        if args.use_multitask:
+            print(f"5. 🏷️ Compare native classification vs. ANB-based classification")
         
     else:
         print("💥 All models failed to train. Check the error logs above.")

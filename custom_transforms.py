@@ -43,10 +43,10 @@ print("Registering CustomPackPoseInputs in the TRANSFORMS registry...")
 
 @TRANSFORMS.register_module(force=True)
 class CustomPackPoseInputs(PackPoseInputs):
-    """Custom PackPoseInputs that properly handles bbox_scores for cephalometric dataset."""
+    """Custom PackPoseInputs that properly handles bbox_scores and class labels for cephalometric dataset."""
     
     def transform(self, results: dict) -> dict:
-        """Transform function to pack pose inputs, including bbox_scores."""
+        """Transform function to pack pose inputs, including bbox_scores and class labels."""
         
         # Call parent transform first
         packed_results = super().transform(results)
@@ -67,6 +67,20 @@ class CustomPackPoseInputs(PackPoseInputs):
                     gt_instances.bbox_scores = results['bbox_scores']
                 
                 # Debug print removed - bbox_scores successfully added
+            
+            # Add class labels for multi-task learning
+            if hasattr(data_sample, 'gt_instances') and 'class' in results and results['class'] is not None:
+                gt_instances = data_sample.gt_instances
+                
+                # Convert class to 0-indexed tensor (Class I=0, II=1, III=2)
+                class_label = int(results['class']) - 1  # Convert from 1-indexed to 0-indexed
+                
+                # Add as labels field for the model
+                if isinstance(class_label, (int, float)):
+                    import torch
+                    gt_instances.labels = torch.tensor([class_label], dtype=torch.long)
+                else:
+                    gt_instances.labels = class_label
         
         return packed_results
 
