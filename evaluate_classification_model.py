@@ -221,6 +221,12 @@ def main():
         default=None,
         help='Specific epoch to evaluate (default: best or latest)'
     )
+    parser.add_argument(
+        '--data_file',
+        type=str,
+        default='/content/drive/MyDrive/Lala\'s Masters/train_data_pure_old_numpy.json',
+        help='Path to the data JSON file'
+    )
     args = parser.parse_args()
     
     print("="*80)
@@ -291,8 +297,19 @@ def main():
         print("⚠️  Model does not have classification head - will only compute post-hoc classification")
     
     # Load test data
-    data_file_path = "/content/drive/MyDrive/Lala's Masters/train_data_pure_old_numpy.json"
-    main_df = pd.read_json(data_file_path)
+    data_file_path = args.data_file
+    if not os.path.exists(data_file_path):
+        print(f"ERROR: Data file not found: {data_file_path}")
+        print("Please specify the correct path using --data_file argument")
+        return
+    
+    print(f"Loading data from: {data_file_path}")
+    try:
+        main_df = pd.read_json(data_file_path)
+        print(f"✓ Loaded {len(main_df)} total samples")
+    except Exception as e:
+        print(f"ERROR: Failed to load data file: {e}")
+        return
     
     # Split test data
     if args.test_split_file:
@@ -330,9 +347,19 @@ def main():
     print(f"\n🔄 Running evaluation on test set...")
     from tqdm import tqdm
     
+    # Debug counters
+    skipped_invalid_gt = 0
+    skipped_no_gt_class = 0
+    failed_inference = 0
+    
     for idx, row in tqdm(test_df.iterrows(), total=len(test_df), desc="Evaluating"):
         try:
             # Get image
+            if 'Image' not in row:
+                print(f"Warning: No 'Image' column in row {idx}")
+                failed_inference += 1
+                continue
+                
             img_array = np.array(row['Image'], dtype=np.uint8).reshape((224, 224, 3))
             
             # Get ground truth keypoints
@@ -348,6 +375,7 @@ def main():
                     valid_gt = False
             
             if not valid_gt:
+                skipped_invalid_gt += 1
                 continue
                 
             gt_keypoints = np.array(gt_keypoints)
@@ -371,6 +399,7 @@ def main():
                     gt_class = -1
             
             if gt_class == -1:
+                skipped_no_gt_class += 1
                 continue
             
             # Run inference
@@ -464,11 +493,29 @@ def main():
                 all_gt_classes.append(gt_class)
             
         except Exception as e:
-            print(f"Failed to process sample {idx}: {e}")
+            failed_inference += 1
+            if failed_inference <= 5:  # Only print first 5 errors
+                print(f"Failed to process sample {idx}: {e}")
             continue
     
+    # Print debug summary
+    print(f"\n📊 Processing Summary:")
+    print(f"  Total samples: {len(test_df)}")
+    print(f"  Skipped (invalid GT keypoints): {skipped_invalid_gt}")
+    print(f"  Skipped (no GT classification): {skipped_no_gt_class}")
+    print(f"  Failed inference: {failed_inference}")
+    print(f"  Successfully processed: {len(all_pred_keypoints)}")
+    
     if len(all_pred_keypoints) == 0:
-        print("ERROR: No valid predictions generated")
+        print("\nERROR: No valid predictions generated")
+        print("\nPossible causes:")
+        print("1. All samples have invalid ground truth keypoints")
+        print("2. ANB angle calculation failing for all samples")
+        print("3. No 'class' column in data and ANB calculation issues")
+        print("\nPlease check:")
+        print("- Data file format and landmark columns")
+        print("- Whether 'class' column exists in the data")
+        print("- Landmark coordinates are valid (not all zeros)")
         return
     
     print(f"\n✓ Successfully evaluated {len(all_pred_keypoints)} samples")
