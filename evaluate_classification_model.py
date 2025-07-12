@@ -381,22 +381,39 @@ def main():
             gt_keypoints = np.array(gt_keypoints)
             
             # Get ground truth classification
+            gt_class = -1
+            
+            # First try to get from 'class' column if available
             if 'class' in row and pd.notna(row['class']):
-                # Map class names to indices
-                class_mapping = {'Class I': 0, 'Class II': 1, 'Class III': 2}
-                gt_class = class_mapping.get(row['class'], -1)
+                # Map class names to indices - handle both Roman numerals and word format
+                class_str = str(row['class']).strip()
+                class_mapping = {
+                    'Class I': 0, 'I': 0, '1': 0,
+                    'Class II': 1, 'II': 1, '2': 1,
+                    'Class III': 2, 'III': 2, '3': 2
+                }
+                gt_class = class_mapping.get(class_str, -1)
+                
+                if gt_class == -1:
+                    # If mapping failed, try computing from landmarks
+                    try:
+                        anb_angle = anb_classification_utils.calculate_anb_angle(gt_keypoints)
+                        if anb_angle is not None and not np.isnan(anb_angle):
+                            gt_class = anb_classification_utils.classify_from_anb_angle(anb_angle)
+                            if isinstance(gt_class, np.ndarray):
+                                gt_class = gt_class.item()
+                    except Exception:
+                        pass
             else:
-                # Compute from ground truth landmarks
+                # No class column value, compute from ground truth landmarks
                 try:
                     anb_angle = anb_classification_utils.calculate_anb_angle(gt_keypoints)
                     if anb_angle is not None and not np.isnan(anb_angle):
                         gt_class = anb_classification_utils.classify_from_anb_angle(anb_angle)
                         if isinstance(gt_class, np.ndarray):
                             gt_class = gt_class.item()
-                    else:
-                        gt_class = -1
-                except Exception:
-                    gt_class = -1
+                except Exception as e:
+                    pass
             
             if gt_class == -1:
                 skipped_no_gt_class += 1
