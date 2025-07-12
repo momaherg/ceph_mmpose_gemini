@@ -136,7 +136,6 @@ val_dataloader = dict(
 test_dataloader = val_dataloader # Often, test and val dataloaders are configured similarly
 
 # Evaluators - Add classification metrics
-from mmengine.evaluator import DumpResults
 val_evaluator = [
     dict(type='NME', norm_mode='keypoint_distance', keypoint_indices=[0, 1]),  # Keypoint evaluation
     dict(type='ClassificationMetric', num_classes=3)  # Classification evaluation
