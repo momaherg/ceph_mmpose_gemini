@@ -58,9 +58,10 @@ model = dict(
         classification_hidden_dim=256,
         classification_dropout=0.3,  # Slightly higher dropout
         classification_loss_weight=2.0,  # Increased weight
-        # Class weights for balanced training (adjust based on your dataset)
-        # Example: if Class II is majority, reduce its weight
-        class_weights=[1.2, 0.8, 1.2],  # [Class I, Class II, Class III]
+        # Class weights for balanced training based on actual dataset distribution
+        # From diagnosis: Class I=152, Class II=77, Class III=22 samples
+        # Using inverse frequency weighting normalized to sum to 3.0
+        class_weights=[0.55, 1.08, 3.79],  # [Class I, Class II, Class III]
         use_feature_adapter=True,  # Use feature adaptation
         auxiliary_loss_weight=0.3,  # Auxiliary loss weight
         # Keypoint detection loss

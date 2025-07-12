@@ -126,27 +126,35 @@ class CustomCephalometricDataset(BaseDataset):
                     keypoints[i, 1] = 0
                     keypoints_visible[i] = 0 
             
-            # Compute ground truth classification from ANB angle
+            # Compute ground truth classification
+            # IMPORTANT: Prioritize manual labels over computed ones
             gt_classification = None
-            if keypoints_visible[1] > 0 and keypoints_visible[2] > 0 and keypoints_visible[3] > 0:
-                # We have valid Nasion, A-point, and B-point landmarks
-                anb_angle = calculate_anb_angle(keypoints.reshape(1, num_keypoints, 2))
-                gt_classification = classify_from_anb_angle(anb_angle).item()
-            else:
-                # If key landmarks are missing, try to use the 'class' column if available
-                # Otherwise, we'll leave it as None and handle it during training
-                if 'class' in row and pd.notna(row['class']):
-                    # Map string classes to numeric labels if needed
-                    class_val = row['class']
-                    if isinstance(class_val, str):
-                        class_mapping = {
-                            'Class I': 0,
-                            'Class II': 1,
-                            'Class III': 2
-                        }
-                        gt_classification = class_mapping.get(class_val, None)
-                    else:
-                        gt_classification = int(class_val)
+            
+            # First, check if we have a manual class label
+            if 'class' in row and pd.notna(row['class']):
+                # Map string classes to numeric labels
+                class_val = str(row['class']).strip()
+                if class_val in ['I', '1']:
+                    gt_classification = 0  # Class I
+                elif class_val in ['II', '2']:
+                    gt_classification = 1  # Class II
+                elif class_val in ['III', '3']:
+                    gt_classification = 2  # Class III
+                else:
+                    # Try direct mapping for already numeric values
+                    try:
+                        class_int = int(float(class_val))
+                        if class_int in [0, 1, 2]:
+                            gt_classification = class_int
+                    except:
+                        pass
+            
+            # Only compute from ANB if no manual label exists
+            if gt_classification is None:
+                if keypoints_visible[1] > 0 and keypoints_visible[2] > 0 and keypoints_visible[3] > 0:
+                    # We have valid Nasion, A-point, and B-point landmarks
+                    anb_angle = calculate_anb_angle(keypoints.reshape(1, num_keypoints, 2))
+                    gt_classification = classify_from_anb_angle(anb_angle).item()
             
             # Ensure bbox has the right shape for a single instance: (1, 4) instead of (4,)
             bbox = np.array([[0, 0, 224, 224]], dtype=np.float32)  # Note the extra brackets to make it (1, 4)

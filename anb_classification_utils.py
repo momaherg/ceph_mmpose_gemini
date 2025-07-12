@@ -10,7 +10,9 @@ except ImportError:
 
 def calculate_anb_angle(landmarks):
     """
-    Calculate ANB angle from landmarks.
+    Calculate ANB angle from landmarks using the method from train_improved_v4.py.
+    
+    This matches the implementation used for training data labeling to ensure consistency.
     
     Args:
         landmarks: numpy array or torch tensor of shape (..., 19, 2) containing landmark coordinates
@@ -26,67 +28,86 @@ def calculate_anb_angle(landmarks):
         is_tensor = False
     
     # Get the relevant points
-    # A-point is index 2, Nasion is index 1, B-point is index 3
-    A_point = landmarks_np[..., 2, :]  # Shape: (..., 2)
+    # Sella is index 0, Nasion is index 1, A-point is index 2, B-point is index 3
+    Sella = landmarks_np[..., 0, :]    # Shape: (..., 2)
     Nasion = landmarks_np[..., 1, :]   # Shape: (..., 2)
+    A_point = landmarks_np[..., 2, :]  # Shape: (..., 2)
     B_point = landmarks_np[..., 3, :]  # Shape: (..., 2)
     
-    # Calculate vectors
-    # Vector from Nasion to A-point
-    NA_vector = A_point - Nasion  # Shape: (..., 2)
-    # Vector from Nasion to B-point
-    NB_vector = B_point - Nasion  # Shape: (..., 2)
+    # Calculate angle at a vertex (matching _angle function from train_improved_v4.py)
+    def angle_at_vertex(p1, vertex, p2):
+        """Return the angle (deg) at vertex formed by p1-vertex-p2."""
+        v1 = p1 - vertex
+        v2 = p2 - vertex
+        
+        # Calculate norms
+        v1_norm = np.linalg.norm(v1, axis=-1, keepdims=True)
+        v2_norm = np.linalg.norm(v2, axis=-1, keepdims=True)
+        
+        # Handle zero vectors
+        valid_mask = (v1_norm.squeeze(-1) > 1e-8) & (v2_norm.squeeze(-1) > 1e-8)
+        
+        # Initialize result
+        angle_degrees = np.zeros(v1.shape[:-1])
+        
+        if np.any(valid_mask):
+            # Normalize vectors
+            v1_normalized = v1[valid_mask] / v1_norm[valid_mask]
+            v2_normalized = v2[valid_mask] / v2_norm[valid_mask]
+            
+            # Calculate dot product
+            dot_product = np.sum(v1_normalized * v2_normalized, axis=-1)
+            
+            # Clip to valid range for arccos
+            dot_product = np.clip(dot_product, -1.0, 1.0)
+            
+            # Calculate angle
+            angle_radians = np.arccos(dot_product)
+            angle_degrees[valid_mask] = np.degrees(angle_radians)
+        
+        return angle_degrees
     
-    # Calculate angle between vectors using dot product
-    # angle = arccos(dot(NA, NB) / (|NA| * |NB|))
-    dot_product = np.sum(NA_vector * NB_vector, axis=-1)  # Shape: (...)
+    # Calculate SNA and SNB angles
+    sna = angle_at_vertex(Sella, Nasion, A_point)
+    snb = angle_at_vertex(Sella, Nasion, B_point)
     
-    NA_norm = np.linalg.norm(NA_vector, axis=-1) + 1e-8  # Add epsilon to avoid division by zero
-    NB_norm = np.linalg.norm(NB_vector, axis=-1) + 1e-8
-    
-    cos_angle = np.clip(dot_product / (NA_norm * NB_norm), -1.0, 1.0)  # Clip to valid range for arccos
-    angle_radians = np.arccos(cos_angle)
-    
-    # Convert to degrees
-    angle_degrees = np.degrees(angle_radians)
-    
-    # Determine sign of angle using cross product
-    # If cross product is negative, B is behind A (positive ANB)
-    # If cross product is positive, B is in front of A (negative ANB)
-    cross_product = NA_vector[..., 0] * NB_vector[..., 1] - NA_vector[..., 1] * NB_vector[..., 0]
-    angle_degrees = np.where(cross_product > 0, -angle_degrees, angle_degrees)
+    # ANB = SNA - SNB (as in train_improved_v4.py)
+    anb_angle = sna - snb
     
     if is_tensor and HAS_TORCH:
-        return torch.from_numpy(angle_degrees).to(landmarks.device)
+        return torch.from_numpy(anb_angle).to(landmarks.device)
     else:
-        return angle_degrees
+        return anb_angle
 
 
 def classify_from_anb_angle(anb_angle):
     """
     Classify skeletal pattern based on ANB angle.
     
+    NOTE: These thresholds match those used in train_improved_v4.py to ensure consistency
+    with the training data labeling.
+    
     Args:
         anb_angle: ANB angle in degrees (numpy array or torch tensor)
     
     Returns:
         Classification labels:
-        - 0: Skeletal Class I (0 < ANB < 4)
-        - 1: Skeletal Class II (ANB >= 4)
-        - 2: Skeletal Class III (ANB <= 0)
+        - 0: Skeletal Class I (2 <= ANB <= 4)
+        - 1: Skeletal Class II (ANB > 4)
+        - 2: Skeletal Class III (ANB < 2)
     """
     if HAS_TORCH and isinstance(anb_angle, torch.Tensor):
         # For torch tensors
         labels = torch.zeros_like(anb_angle, dtype=torch.long)
-        labels[anb_angle >= 4] = 1  # Class II
-        labels[anb_angle <= 0] = 2  # Class III
-        # Class I (0 < ANB < 4) remains as 0
+        labels[anb_angle > 4] = 1   # Class II
+        labels[anb_angle < 2] = 2   # Class III
+        # Class I (2 <= ANB <= 4) remains as 0
     else:
         # For numpy arrays
         labels = np.zeros_like(anb_angle, dtype=np.int64)
-        labels[anb_angle >= 4] = 1  # Class II
-        labels[anb_angle <= 0] = 2  # Class III
-        # Class I (0 < ANB < 4) remains as 0
+        labels[anb_angle > 4] = 1   # Class II
+        labels[anb_angle < 2] = 2   # Class III
+        # Class I (2 <= ANB <= 4) remains as 0
     
     return labels
 

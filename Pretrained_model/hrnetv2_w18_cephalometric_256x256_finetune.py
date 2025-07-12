@@ -52,7 +52,9 @@ model = dict(
         num_classes=3,  # Skeletal Class I, II, III
         classification_hidden_dim=256,
         classification_dropout=0.2,
-        classification_loss_weight=0.5,  # Weight for classification loss vs keypoint loss
+        classification_loss_weight=2.0,  # Increased weight for better classification learning
+        # Class weights based on actual distribution (Class I=152, II=77, III=22)
+        class_weights=[0.55, 1.08, 3.79],  # Balanced weights for imbalanced dataset
         # Keypoint detection loss
         loss=dict(  # main loss
                 type='AdaptiveWingLoss',

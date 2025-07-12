@@ -7,7 +7,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from mmpose.registry import MODELS
 from mmpose.models.heads import HeatmapHead
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List
 
 
 @MODELS.register_module()
@@ -23,6 +23,7 @@ class HRNetV2WithClassificationSimple(HeatmapHead):
                  classification_hidden_dim: int = 256,
                  classification_dropout: float = 0.2,
                  classification_loss_weight: float = 0.5,
+                 class_weights: Optional[list] = None,
                  **kwargs):
         
         # Initialize parent HeatmapHead
@@ -49,8 +50,12 @@ class HRNetV2WithClassificationSimple(HeatmapHead):
             nn.Linear(classification_hidden_dim // 2, num_classes)
         )
         
-        # Classification loss
-        self.classification_loss = nn.CrossEntropyLoss()
+        # Classification loss with optional class weights
+        if class_weights is not None:
+            self.register_buffer('class_weights', torch.tensor(class_weights, dtype=torch.float32))
+            self.classification_loss = nn.CrossEntropyLoss(weight=self.class_weights)
+        else:
+            self.classification_loss = nn.CrossEntropyLoss()
     
     def loss(self,
              feats: Tuple[torch.Tensor],
