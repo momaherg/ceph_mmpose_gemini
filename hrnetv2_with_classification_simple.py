@@ -23,6 +23,7 @@ class HRNetV2WithClassificationSimple(HeatmapHead):
                  classification_hidden_dim: int = 256,
                  classification_dropout: float = 0.2,
                  classification_loss_weight: float = 0.5,
+                 classification_loss: dict = dict(type='CrossEntropyLoss'),
                  **kwargs):
         
         # Initialize parent HeatmapHead
@@ -50,7 +51,13 @@ class HRNetV2WithClassificationSimple(HeatmapHead):
         )
         
         # Classification loss
-        self.classification_loss = nn.CrossEntropyLoss()
+        if 'weight' in classification_loss and classification_loss['weight'] is not None:
+            class_weights = classification_loss['weight']
+            self.classification_loss = nn.CrossEntropyLoss(weight=class_weights)
+            print(f"✅ Initialized CrossEntropyLoss with weights: {class_weights}")
+        else:
+            self.classification_loss = nn.CrossEntropyLoss()
+            print("✅ Initialized CrossEntropyLoss without weights")
     
     def loss(self,
              feats: Tuple[torch.Tensor],

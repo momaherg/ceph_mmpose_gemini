@@ -112,6 +112,41 @@ def train_single_model(cfg, split_idx, train_df, val_df, test_df, base_work_dir)
     print(f"📊 Validation samples: {len(val_df)}")
     
     try:
+        # --- Add class weights to handle data imbalance ---
+        from anb_classification_utils import calculate_anb_angle, classify_from_anb_angle
+        
+        # Calculate ground truth classifications for the training set
+        gt_keypoints_list = []
+        for _, row in train_df.iterrows():
+            keypoints = np.zeros((19, 2), dtype=np.float32)
+            for i, kp_name in enumerate(cephalometric_dataset_info.landmark_names_in_order):
+                x_col = cephalometric_dataset_info.original_landmark_cols[i*2]
+                y_col = cephalometric_dataset_info.original_landmark_cols[i*2+1]
+                if x_col in row and y_col in row and pd.notna(row[x_col]) and pd.notna(row[y_col]):
+                    keypoints[i, 0] = row[x_col]
+                    keypoints[i, 1] = row[y_col]
+            gt_keypoints_list.append(keypoints)
+            
+        gt_keypoints_np = np.stack(gt_keypoints_list)
+        anb_angles = calculate_anb_angle(gt_keypoints_np)
+        gt_classes = classify_from_anb_angle(anb_angles)
+        
+        # Calculate class weights (inverse frequency)
+        class_counts = np.bincount(gt_classes, minlength=3)
+        total_samples = np.sum(class_counts)
+        class_weights = total_samples / (3 * class_counts + 1e-6) # Add epsilon to avoid division by zero
+        class_weights_tensor = torch.tensor(class_weights, dtype=torch.float)
+        
+        print("\n⚖️  Calculated class weights for loss function:")
+        print(f"  - Class I (0): {class_weights[0]:.2f}")
+        print(f"  - Class II (1): {class_weights[1]:.2f}")
+        print(f"  - Class III (2): {class_weights[2]:.2f}")
+        
+        # Update model config with class weights
+        if hasattr(cfg.model, 'head'):
+            cfg.model.head.classification_loss.weight = class_weights_tensor
+            print("✓ Updated classification loss with class weights")
+            
         # Save DataFrames to temporary JSON files for this split
         temp_train_ann_file = os.path.join(cfg.work_dir, f'temp_train_ann_split_{split_idx}.json')
         temp_val_ann_file = os.path.join(cfg.work_dir, f'temp_val_ann_split_{split_idx}.json')
