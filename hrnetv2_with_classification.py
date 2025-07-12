@@ -60,8 +60,24 @@ class HRNetV2WithClassification(HeatmapHead):
         # Build classification loss - use PyTorch's CrossEntropyLoss directly
         self.classification_loss = nn.CrossEntropyLoss()
         
-    def forward(self, feats: Tuple[torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, feats: Tuple[torch.Tensor]) -> torch.Tensor:
         """Forward function.
+        
+        Args:
+            feats (Tuple[Tensor]): Multi-level features from backbone
+            
+        Returns:
+            Tensor: heatmaps with shape (N, K, H, W) for K keypoints
+            
+        Note: This method only returns heatmaps to maintain compatibility with parent class.
+        Use forward_with_classification() to get both heatmaps and classification logits.
+        """
+        # Get heatmaps from parent class
+        heatmaps = super().forward(feats)
+        return heatmaps
+    
+    def forward_with_classification(self, feats: Tuple[torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Forward function that returns both heatmaps and classification logits.
         
         Args:
             feats (Tuple[Tensor]): Multi-level features from backbone
@@ -99,7 +115,7 @@ class HRNetV2WithClassification(HeatmapHead):
             InstanceList: Predictions with both keypoints and classification
         """
         # Get heatmaps and classification logits
-        heatmaps, classification_logits = self.forward(feats)
+        heatmaps, classification_logits = self.forward_with_classification(feats)
         
         # Decode heatmaps to keypoints using parent class method
         preds = super().predict(feats, batch_data_samples, test_cfg)
@@ -130,10 +146,11 @@ class HRNetV2WithClassification(HeatmapHead):
         Returns:
             dict: Dictionary of losses
         """
-        # Get heatmaps and classification logits
-        heatmaps, classification_logits = self.forward(feats)
+        # Get heatmaps and classification logits separately
+        heatmaps, classification_logits = self.forward_with_classification(feats)
         
-        # Calculate heatmap loss using parent class
+        # Calculate heatmap loss using parent class method
+        # We need to call the parent's loss method but pass only heatmaps
         keypoint_losses = super().loss(feats, batch_data_samples, train_cfg)
         
         # Extract ground truth classifications from batch_data_samples
