@@ -43,77 +43,15 @@ print("Registering CustomPackPoseInputs in the TRANSFORMS registry...")
 
 @TRANSFORMS.register_module(force=True)
 class CustomPackPoseInputs(PackPoseInputs):
-    """Custom PackPoseInputs that properly handles bbox_scores and class labels for cephalometric dataset."""
-    
-    def _compute_class_from_anb(self, keypoints: np.ndarray) -> int:
-        """Compute class from ANB angle calculated from ground truth landmarks.
-        
-        Args:
-            keypoints: [num_keypoints, 2] array of landmark coordinates
-            
-        Returns:
-            int: Class label (0=Class I, 1=Class II, 2=Class III)
-        """
-        try:
-            # Import landmark info
-            import cephalometric_dataset_info
-            landmark_names = cephalometric_dataset_info.landmark_names_in_order
-            
-            # Create landmark index map
-            landmark_idx = {name: i for i, name in enumerate(landmark_names)}
-            
-            # Get required landmarks
-            if keypoints.shape[0] == 1:  # Handle (1, num_keypoints, 2) shape
-                keypoints = keypoints[0]
-                
-            sella = keypoints[landmark_idx['sella']]
-            nasion = keypoints[landmark_idx['nasion']]
-            a_point = keypoints[landmark_idx['A_point']]
-            b_point = keypoints[landmark_idx['B_point']]
-            
-            # Check if landmarks are valid (not zero)
-            if np.all(sella == 0) or np.all(nasion == 0) or np.all(a_point == 0) or np.all(b_point == 0):
-                return 0  # Default to Class I if landmarks are invalid
-            
-            # Calculate angles
-            def angle(p1, p2, p3):
-                """Calculate angle at p2 between vectors p2->p1 and p2->p3."""
-                v1 = p1 - p2
-                v2 = p3 - p2
-                cos_angle = np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2) + 1e-8)
-                cos_angle = np.clip(cos_angle, -1.0, 1.0)
-                return np.degrees(np.arccos(cos_angle))
-            
-            # Calculate SNA and SNB angles
-            sna = angle(sella, nasion, a_point)
-            snb = angle(sella, nasion, b_point)
-            
-            # Calculate ANB angle
-            anb = sna - snb
-            
-            # Classify based on ANB angle
-            # Skeletal Class I:  0<x<4 
-            # Skeletal Class II: x≥4 
-            # Skeletal Class III: x≤0
-            if anb >= 4:
-                return 1  # Class II
-            elif anb <= 0:
-                return 2  # Class III
-            else:
-                return 0  # Class I
-                
-        except Exception as e:
-            # If anything goes wrong, default to Class I
-            print(f"Warning: Could not compute ANB angle, defaulting to Class I. Error: {e}")
-            return 0
+    """Custom PackPoseInputs that properly handles bbox_scores and gt_classification for cephalometric dataset."""
     
     def transform(self, results: dict) -> dict:
-        """Transform function to pack pose inputs, including bbox_scores and class labels."""
+        """Transform function to pack pose inputs, including bbox_scores and gt_classification."""
         
         # Call parent transform first
         packed_results = super().transform(results)
         
-        # Ensure bbox_scores are properly added to gt_instances
+        # Ensure bbox_scores and gt_classification are properly added to data_samples
         if 'data_samples' in packed_results:
             data_sample = packed_results['data_samples']
             
@@ -127,25 +65,10 @@ class CustomPackPoseInputs(PackPoseInputs):
                     gt_instances.bbox_scores = torch.from_numpy(results['bbox_scores']).float()
                 else:
                     gt_instances.bbox_scores = results['bbox_scores']
-                
-                # Debug print removed - bbox_scores successfully added
             
-            # Compute class labels from ground truth landmarks
-            if hasattr(data_sample, 'gt_instances') and 'keypoints' in results:
-                gt_instances = data_sample.gt_instances
-                
-                # Get ground truth keypoints
-                gt_keypoints = results['keypoints']
-                if isinstance(gt_keypoints, np.ndarray):
-                    # Compute class from ANB angle
-                    class_label = self._compute_class_from_anb(gt_keypoints)
-                    
-                    # Add as labels field for the model
-                    import torch
-                    gt_instances.labels = torch.tensor(class_label, dtype=torch.long)
-                    
-                    # Also store the computed class in results for debugging
-                    results['computed_class'] = class_label
+            # Add gt_classification to data_sample if available
+            if 'gt_classification' in results and results['gt_classification'] is not None:
+                data_sample.gt_classification = results['gt_classification']
         
         return packed_results
 

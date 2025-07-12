@@ -36,15 +36,25 @@ codec = dict(
     heatmap_size=(96, 96),  # UPGRADED: Was (64, 64) - Larger heatmaps for sub-pixel precision
     sigma=3)
 
-# Model head with Adaptive Wing Loss for robust landmark detection
+# Model with Classification Head
 model = dict(
     head=dict(
-        out_channels=19, # Ensure this matches your dataset's keypoint count
+        type='HRNetV2WithClassification',  # Use our custom head with classification
+        out_channels=19, # Number of keypoints
+        # Classification head parameters
+        num_classes=3,  # Skeletal Class I, II, III
+        classification_hidden_dim=256,
+        classification_dropout=0.2,
+        classification_loss=dict(
+            type='CrossEntropyLoss',
+            loss_weight=1.0
+        ),
+        classification_loss_weight=0.5,  # Weight for classification loss vs keypoint loss
+        # Keypoint detection loss
         loss=dict(  # main loss
                 type='AdaptiveWingLoss',
                 alpha=2.1,  omega=24., epsilon=1., theta=0.5,
                 use_target_weight=False, loss_weight=1.0)
-            
     )
     # The rest of the model (backbone, neck, data_preprocessor, test_cfg)
     # can be inherited or slightly adjusted if needed.
@@ -63,13 +73,13 @@ train_pipeline = [
         scale_factor=(0.7, 1.3)), # Wider scale range
     dict(type='TopdownAffine', input_size=codec['input_size']), # Now uses 384x384
     dict(type='GenerateTarget', encoder=codec),
-    dict(type='CustomPackPoseInputs', meta_keys=('id', 'img_id', 'img_path', 'ori_shape', 'img_shape', 'bbox', 'bbox_scores', 'flip_indices', 'center', 'scale', 'input_center', 'input_scale', 'input_size', 'patient_text_id', 'set', 'class'))
+    dict(type='CustomPackPoseInputs', meta_keys=('id', 'img_id', 'img_path', 'ori_shape', 'img_shape', 'bbox', 'bbox_scores', 'flip_indices', 'center', 'scale', 'input_center', 'input_scale', 'input_size', 'patient_text_id', 'set', 'class', 'gt_classification'))
 ]
 val_pipeline = [
     dict(type='LoadImageNumpy'),
     dict(type='GetBBoxCenterScale'),
     dict(type='TopdownAffine', input_size=codec['input_size']), # Now uses 384x384
-    dict(type='CustomPackPoseInputs', meta_keys=('id', 'img_id', 'img_path', 'ori_shape', 'img_shape', 'bbox', 'bbox_scores', 'flip_indices', 'center', 'scale', 'input_center', 'input_scale', 'input_size', 'patient_text_id', 'set', 'class'))
+    dict(type='CustomPackPoseInputs', meta_keys=('id', 'img_id', 'img_path', 'ori_shape', 'img_shape', 'bbox', 'bbox_scores', 'flip_indices', 'center', 'scale', 'input_center', 'input_scale', 'input_size', 'patient_text_id', 'set', 'class', 'gt_classification'))
 ]
 test_pipeline = val_pipeline # Test pipeline often same as validation
 
@@ -125,8 +135,12 @@ val_dataloader = dict(
     ))
 test_dataloader = val_dataloader # Often, test and val dataloaders are configured similarly
 
-# Evaluators
-val_evaluator = dict(type='NME', norm_mode='keypoint_distance', keypoint_indices=[0, 1]) # Use Sella and Nasion for normalization
+# Evaluators - Add classification metrics
+from mmengine.evaluator import DumpResults
+val_evaluator = [
+    dict(type='NME', norm_mode='keypoint_distance', keypoint_indices=[0, 1]),  # Keypoint evaluation
+    dict(type='ClassificationMetric', num_classes=3)  # Classification evaluation
+]
 test_evaluator = val_evaluator
 
 # Visualization (optional, but good for debugging)

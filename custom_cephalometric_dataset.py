@@ -3,6 +3,8 @@ import pandas as pd
 from mmengine.dataset import BaseDataset
 from mmpose.registry import DATASETS
 from cephalometric_dataset_info import dataset_info, landmark_names_in_order, original_landmark_cols
+# Import ANB classification utilities
+from anb_classification_utils import calculate_anb_angle, classify_from_anb_angle
 
 @DATASETS.register_module()
 class CustomCephalometricDataset(BaseDataset):
@@ -124,6 +126,28 @@ class CustomCephalometricDataset(BaseDataset):
                     keypoints[i, 1] = 0
                     keypoints_visible[i] = 0 
             
+            # Compute ground truth classification from ANB angle
+            gt_classification = None
+            if keypoints_visible[1] > 0 and keypoints_visible[2] > 0 and keypoints_visible[3] > 0:
+                # We have valid Nasion, A-point, and B-point landmarks
+                anb_angle = calculate_anb_angle(keypoints.reshape(1, num_keypoints, 2))
+                gt_classification = classify_from_anb_angle(anb_angle).item()
+            else:
+                # If key landmarks are missing, try to use the 'class' column if available
+                # Otherwise, we'll leave it as None and handle it during training
+                if 'class' in row and pd.notna(row['class']):
+                    # Map string classes to numeric labels if needed
+                    class_val = row['class']
+                    if isinstance(class_val, str):
+                        class_mapping = {
+                            'Class I': 0,
+                            'Class II': 1,
+                            'Class III': 2
+                        }
+                        gt_classification = class_mapping.get(class_val, None)
+                    else:
+                        gt_classification = int(class_val)
+            
             # Ensure bbox has the right shape for a single instance: (1, 4) instead of (4,)
             bbox = np.array([[0, 0, 224, 224]], dtype=np.float32)  # Note the extra brackets to make it (1, 4)
             
@@ -144,7 +168,8 @@ class CustomCephalometricDataset(BaseDataset):
                 'flip_indices': self.METAINFO['flip_indices'],  # Add flip_indices from METAINFO
                 'patient_text_id': row.get('patient', ''),
                 'set': row.get('set', 'train'),
-                'class': row.get('class', None)
+                'class': row.get('class', None),
+                'gt_classification': gt_classification  # Add computed ground truth classification
             }
             data_list.append(data_info)
         

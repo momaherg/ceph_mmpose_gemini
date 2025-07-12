@@ -12,12 +12,10 @@ After every HRNet training epoch, the hook:
 4.  Implements hard-example oversampling for samples with high landmark errors.
 5.  **NEW**: Saves synchronized MLP models whenever HRNet checkpoints are saved.
 6.  **NEW**: Creates weighted samplers for next HRNet epoch to oversample hard examples.
-7.  **NEW**: Also trains for patient classification (Class I, II, III).
 
 Important design decisions:
 •   **Joint 38-D model** – Single MLP that predicts all 38 coordinates (19 x,y pairs)
     allowing the network to learn cross-correlations between X and Y axes.
-•   **Multi-task learning** – MLP also predicts patient classification (3 classes).
 •   **Hard-example oversampling** – Samples with any landmark MRE > threshold get
     duplicated in both MLP training and next HRNet epoch for focused learning.
 •   **Checkpoint synchronization** – MLP models are saved in sync with HRNet checkpoints
@@ -41,9 +39,7 @@ custom_hooks = [
         mlp_weight_decay=1e-4,
         hard_example_threshold=5.0,  # MRE threshold for oversampling
         hrnet_hard_example_weight=2.0,  # Weight for hard examples in HRNet training
-        log_interval=20,
-        classification_loss_weight=1.0,  # Weight for classification loss
-        use_landmark_features_for_classification=True  # Use landmarks for classification
+        log_interval=20
     )
 ]
 ```
@@ -59,7 +55,6 @@ from typing import List
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import torch.optim as optim
 import torch.utils.data as data
 
@@ -78,32 +73,26 @@ import joblib
 from torch.utils.data import WeightedRandomSampler
 
 # -----------------------------------------------------------------------------
-#  Joint MLP architecture for 38-D coordinate prediction + classification
+#  Joint MLP architecture for 38-D coordinate prediction
 # -----------------------------------------------------------------------------
 
 class JointMLPRefinementModel(nn.Module):
-    """Joint MLP model for landmark coordinate refinement with adaptive selection and classification.
+    """Joint MLP model for landmark coordinate refinement with adaptive selection.
     
     Input: 38 predicted coordinates (19 landmarks × 2 coordinates)
     Hidden: 500 neurons with residual connection
-    Output: 
-        - 38 refined coordinates with adaptive gating
-        - 3 classification logits (Class I, II, III)
+    Output: 38 refined coordinates with adaptive gating
     
     This model learns:
     1. MLP refinements for coordinates
     2. Per-coordinate selection weights to choose between HRNet and MLP predictions
-    3. Patient classification based on landmarks
     """
 
-    def __init__(self, input_dim: int = 38, hidden_dim: int = 500, output_dim: int = 38, 
-                 num_classes: int = 3, use_landmark_features_for_classification: bool = True):
+    def __init__(self, input_dim: int = 38, hidden_dim: int = 500, output_dim: int = 38):
         super().__init__()
         self.input_dim = input_dim
         self.hidden_dim = hidden_dim
         self.output_dim = output_dim
-        self.num_classes = num_classes
-        self.use_landmark_features_for_classification = use_landmark_features_for_classification
         
         # Main refinement network
         self.refinement_net = nn.Sequential(
@@ -126,17 +115,6 @@ class JointMLPRefinementModel(nn.Module):
             nn.Sigmoid()  # Output between 0 and 1 for each coordinate
         )
         
-        # Classification network - predicts patient class from landmarks
-        self.classification_net = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim // 2),
-            nn.ReLU(inplace=True),
-            nn.Dropout(0.2),
-            nn.Linear(hidden_dim // 2, 128),
-            nn.ReLU(inplace=True),
-            nn.Dropout(0.2),
-            nn.Linear(128, num_classes)
-        )
-        
         # Residual projection (if dimensions don't match)
         self.residual_proj = None
         if input_dim != output_dim:
@@ -148,9 +126,7 @@ class JointMLPRefinementModel(nn.Module):
             x: HRNet predictions [batch_size, 38]
             
         Returns:
-            Tuple of:
-                - Adaptively selected coordinates [batch_size, 38]
-                - Classification logits [batch_size, 3]
+            Adaptively selected coordinates [batch_size, 38]
         """
         # Get MLP refinement predictions
         mlp_refinement = self.refinement_net(x)
@@ -173,24 +149,17 @@ class JointMLPRefinementModel(nn.Module):
         # Store selection weights for analysis (optional)
         self.last_selection_weights = selection_weights
         
-        # Get classification predictions
-        class_logits = self.classification_net(x)
-        
-        return adaptive_output, class_logits
+        return adaptive_output
 
 
 class _MLPDataset(data.Dataset):
-    """In-memory dataset with hard-example oversampling and classification labels."""
+    """In-memory dataset with hard-example oversampling."""
 
-    def __init__(self, preds: np.ndarray, gts: np.ndarray, gt_classes: np.ndarray, sample_weights: np.ndarray = None):
+    def __init__(self, preds: np.ndarray, gts: np.ndarray, sample_weights: np.ndarray = None):
         # preds/gts shape: [N, 38] (flattened coordinates)
-        # gt_classes shape: [N] (class labels 0, 1, 2)
         assert preds.shape == gts.shape
-        assert len(preds) == len(gt_classes)
-        
         self.preds = torch.from_numpy(preds).float()
         self.gts = torch.from_numpy(gts).float()
-        self.gt_classes = torch.from_numpy(gt_classes).long()
         
         # Create weighted sampling indices for hard examples
         if sample_weights is not None:
@@ -212,7 +181,7 @@ class _MLPDataset(data.Dataset):
 
     def __getitem__(self, idx):
         actual_idx = self.indices[idx]
-        return self.preds[actual_idx], self.gts[actual_idx], self.gt_classes[actual_idx]
+        return self.preds[actual_idx], self.gts[actual_idx]
 
 
 # -----------------------------------------------------------------------------
@@ -221,7 +190,7 @@ class _MLPDataset(data.Dataset):
 
 @HOOKS.register_module()
 class ConcurrentMLPTrainingHook(Hook):
-    """MMEngine hook that performs concurrent joint MLP refinement training with checkpoint synchronization and classification."""
+    """MMEngine hook that performs concurrent joint MLP refinement training with checkpoint synchronization."""
 
     priority = 'VERY_LOW'  # Run after checkpoint hooks to ensure synchronization
 
@@ -234,8 +203,6 @@ class ConcurrentMLPTrainingHook(Hook):
         hard_example_threshold: float = 5.0,  # MRE threshold in pixels
         log_interval: int = 50,
         hrnet_hard_example_weight: float = 2.0,  # Weight multiplier for hard examples in HRNet training
-        classification_loss_weight: float = 1.0,  # Weight for classification loss
-        use_landmark_features_for_classification: bool = True,  # Use landmarks for classification
     ) -> None:
         self.mlp_epochs = mlp_epochs
         self.mlp_batch_size = mlp_batch_size
@@ -244,14 +211,11 @@ class ConcurrentMLPTrainingHook(Hook):
         self.hard_example_threshold = hard_example_threshold
         self.log_interval = log_interval
         self.hrnet_hard_example_weight = hrnet_hard_example_weight
-        self.classification_loss_weight = classification_loss_weight
-        self.use_landmark_features_for_classification = use_landmark_features_for_classification
 
         # These will be initialised in before_run
         self.mlp_joint: JointMLPRefinementModel | None = None
         self.opt_joint: optim.Optimizer | None = None
-        self.criterion_regression = nn.MSELoss()
-        self.criterion_classification = nn.CrossEntropyLoss()
+        self.criterion = nn.MSELoss()
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         
         # Normalization scalers - initialized once and reused
@@ -273,11 +237,9 @@ class ConcurrentMLPTrainingHook(Hook):
 
     def before_run(self, runner: Runner):
         logger: MMLogger = runner.logger
-        logger.info('[ConcurrentMLPTrainingHook] Initialising joint 38-D MLP model with adaptive selection and classification…')
+        logger.info('[ConcurrentMLPTrainingHook] Initialising joint 38-D MLP model with adaptive selection…')
 
-        self.mlp_joint = JointMLPRefinementModel(
-            use_landmark_features_for_classification=self.use_landmark_features_for_classification
-        ).to(self.device)
+        self.mlp_joint = JointMLPRefinementModel().to(self.device)
         self.opt_joint = optim.Adam(self.mlp_joint.parameters(), lr=self.mlp_lr, weight_decay=self.mlp_weight_decay)
         
         # Initialize scalers for 38-D input/output
@@ -288,10 +250,8 @@ class ConcurrentMLPTrainingHook(Hook):
         logger.info(f'[ConcurrentMLPTrainingHook] Architecture includes:')
         logger.info(f'[ConcurrentMLPTrainingHook]   - Refinement network: Predicts MLP-refined coordinates')
         logger.info(f'[ConcurrentMLPTrainingHook]   - Selection network: Learns to choose between HRNet and MLP per coordinate')
-        logger.info(f'[ConcurrentMLPTrainingHook]   - Classification network: Predicts patient class (I, II, III)')
         logger.info(f'[ConcurrentMLPTrainingHook] Hard-example threshold: {self.hard_example_threshold} pixels')
         logger.info(f'[ConcurrentMLPTrainingHook] HRNet hard-example weight: {self.hrnet_hard_example_weight}x')
-        logger.info(f'[ConcurrentMLPTrainingHook] Classification loss weight: {self.classification_loss_weight}')
 
     def _create_weighted_sampler_for_hrnet(self, runner: Runner, sample_weights: np.ndarray):
         """Create a weighted sampler for HRNetV2 training based on hard examples."""
@@ -357,56 +317,6 @@ class ConcurrentMLPTrainingHook(Hook):
         else:
             logger.info('[ConcurrentMLPTrainingHook] No hard examples identified yet - using standard sampling')
 
-    def _compute_class_from_anb(self, landmarks: np.ndarray, landmark_names: List[str]) -> int:
-        """Compute class from ANB angle calculated from landmarks.
-        
-        Args:
-            landmarks: [19, 2] array of landmark coordinates
-            landmark_names: List of landmark names
-            
-        Returns:
-            int: Class label (0=Class I, 1=Class II, 2=Class III)
-        """
-        # Create landmark index map
-        landmark_idx = {name: i for i, name in enumerate(landmark_names)}
-        
-        # Get required landmarks
-        try:
-            sella = landmarks[landmark_idx['sella']]
-            nasion = landmarks[landmark_idx['nasion']]
-            a_point = landmarks[landmark_idx['A_point']]
-            b_point = landmarks[landmark_idx['B_point']]
-        except KeyError:
-            # If landmarks not found, default to Class I
-            return 0
-        
-        # Calculate angles
-        def angle(p1, p2, p3):
-            """Calculate angle at p2 between vectors p2->p1 and p2->p3."""
-            v1 = p1 - p2
-            v2 = p3 - p2
-            cos_angle = np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2) + 1e-8)
-            cos_angle = np.clip(cos_angle, -1.0, 1.0)
-            return np.degrees(np.arccos(cos_angle))
-        
-        # Calculate SNA and SNB angles
-        sna = angle(sella, nasion, a_point)
-        snb = angle(sella, nasion, b_point)
-        
-        # Calculate ANB angle
-        anb = sna - snb
-        
-        # Classify based on ANB angle
-        # Skeletal Class I:  0<x<4 
-        # Skeletal Class II: x≥4 
-        # Skeletal Class III: x≤0
-        if anb >= 4:
-            return 1  # Class II
-        elif anb <= 0:
-            return 2  # Class III
-        else:
-            return 0  # Class I
-
     def after_train_epoch(self, runner: Runner):
         """After each HRNetV2 epoch, train joint MLP on-the-fly using current predictions."""
         logger: MMLogger = runner.logger
@@ -451,7 +361,6 @@ class ConcurrentMLPTrainingHook(Hook):
         all_preds: List[np.ndarray] = []
         all_gts: List[np.ndarray] = []
         all_errors: List[np.ndarray] = []  # For hard-example detection
-        all_gt_classes: List[int] = []  # Ground truth classes
         
         # Batch processing parameters
         BATCH_SIZE = 80  # Process 80 images at once for speed
@@ -468,16 +377,15 @@ class ConcurrentMLPTrainingHook(Hook):
             else:
                 return np.array(data)
 
-        def batch_inference(images_batch, gt_keypoints_batch, gt_classes_batch):
+        def batch_inference(images_batch, gt_keypoints_batch):
             """Run batched inference on a list of images."""
             batch_preds = []
             batch_gts = []
             batch_errors = []
-            batch_gt_classes = []
             
             try:
                 # Process each image individually but in a batch-like manner
-                for i, (img, gt_kpts, gt_class) in enumerate(zip(images_batch, gt_keypoints_batch, gt_classes_batch)):
+                for i, (img, gt_kpts) in enumerate(zip(images_batch, gt_keypoints_batch)):
                     if img is not None and gt_kpts is not None:
                         try:
                             # Run inference on individual image
@@ -490,6 +398,9 @@ class ConcurrentMLPTrainingHook(Hook):
                                 pred_kpts = results[0].pred_instances.keypoints[0]
                                 pred_kpts = tensor_to_numpy(pred_kpts)
                                 
+                                # Note: The model may also output classification predictions in results[0].pred_classification
+                                # but the MLP only refines keypoints, not classification
+                                
                                 if pred_kpts is not None and pred_kpts.shape[0] == 19:
                                     # Flatten coordinates to 38-D vectors
                                     pred_flat = pred_kpts.flatten()
@@ -501,7 +412,6 @@ class ConcurrentMLPTrainingHook(Hook):
                                     batch_preds.append(pred_flat)
                                     batch_gts.append(gt_flat)
                                     batch_errors.append(landmark_errors)
-                                    batch_gt_classes.append(gt_class)
                                     
                         except Exception as e:
                             # Skip failed individual images
@@ -510,25 +420,24 @@ class ConcurrentMLPTrainingHook(Hook):
             except Exception as e:
                 logger.warning(f'[ConcurrentMLPTrainingHook] Batch processing failed: {e}')
                 
-            return batch_preds, batch_gts, batch_errors, batch_gt_classes
+            return batch_preds, batch_gts, batch_errors
 
         # Access training data more robustly with batching
         try:
             from tqdm import tqdm
             
-            # Get landmark names for ANB calculation
-            import cephalometric_dataset_info
-            landmark_names = cephalometric_dataset_info.landmark_names_in_order
-            
             # Method 1: Try to access the raw annotation file
             if hasattr(train_dataset, 'ann_file') and train_dataset.ann_file:
                 logger.info(f'[ConcurrentMLPTrainingHook] Loading data from annotation file: {train_dataset.ann_file}')
+                import pandas as pd
                 
                 try:
                     df = pd.read_json(train_dataset.ann_file)
                     logger.info(f'[ConcurrentMLPTrainingHook] Loaded {len(df)} samples from annotation file')
                     
                     # Import landmark info
+                    import cephalometric_dataset_info
+                    landmark_names = cephalometric_dataset_info.landmark_names_in_order
                     landmark_cols = cephalometric_dataset_info.original_landmark_cols
                     
                     processed_count = 0
@@ -541,7 +450,6 @@ class ConcurrentMLPTrainingHook(Hook):
                         # Prepare batch data
                         images_batch = []
                         gt_keypoints_batch = []
-                        gt_classes_batch = []
                         
                         for idx, row in batch_df.iterrows():
                             try:
@@ -562,38 +470,25 @@ class ConcurrentMLPTrainingHook(Hook):
                                 
                                 if valid_gt:
                                     gt_keypoints = np.array(gt_keypoints)
-                                    
-                                    # Get ground truth class
-                                    if 'class' in row and pd.notna(row['class']):
-                                        gt_class = int(row['class']) - 1  # Convert to 0-indexed
-                                    else:
-                                        # Compute from ANB angle
-                                        gt_class = self._compute_class_from_anb(gt_keypoints, landmark_names)
-                                    
                                     images_batch.append(img_array)
                                     gt_keypoints_batch.append(gt_keypoints)
-                                    gt_classes_batch.append(gt_class)
                                 else:
                                     images_batch.append(None)
                                     gt_keypoints_batch.append(None)
-                                    gt_classes_batch.append(None)
                                     
                             except Exception as e:
                                 logger.warning(f'[ConcurrentMLPTrainingHook] Failed to prepare sample {idx}: {e}')
                                 images_batch.append(None)
                                 gt_keypoints_batch.append(None)
-                                gt_classes_batch.append(None)
                                 continue
                         
                         # Run batch inference
-                        batch_preds, batch_gts, batch_errors, batch_gt_classes = batch_inference(
-                            images_batch, gt_keypoints_batch, gt_classes_batch)
+                        batch_preds, batch_gts, batch_errors = batch_inference(images_batch, gt_keypoints_batch)
                         
                         # Add to results
                         all_preds.extend(batch_preds)
                         all_gts.extend(batch_gts)
                         all_errors.extend(batch_errors)
-                        all_gt_classes.extend(batch_gt_classes)
                         
                         processed_count += len(batch_preds)
                     
@@ -616,7 +511,6 @@ class ConcurrentMLPTrainingHook(Hook):
                     # Prepare batch data
                     images_batch = []
                     gt_keypoints_batch = []
-                    gt_classes_batch = []
                     
                     for idx in range(batch_start, batch_end):
                         try:
@@ -633,7 +527,6 @@ class ConcurrentMLPTrainingHook(Hook):
                             else:
                                 images_batch.append(None)
                                 gt_keypoints_batch.append(None)
-                                gt_classes_batch.append(None)
                                 continue
                             
                             # Extract ground truth keypoints with robust handling
@@ -641,27 +534,14 @@ class ConcurrentMLPTrainingHook(Hook):
                                 gt_instances = data_sample['data_samples'].gt_instances
                                 if hasattr(gt_instances, 'keypoints') and len(gt_instances.keypoints) > 0:
                                     gt_kpts = tensor_to_numpy(gt_instances.keypoints[0])
-                                    
-                                    # Extract ground truth class
-                                    if hasattr(gt_instances, 'labels'):
-                                        gt_class = int(gt_instances.labels[0])
-                                    elif hasattr(data_sample['data_samples'], 'metainfo') and 'class' in data_sample['data_samples'].metainfo:
-                                        gt_class = int(data_sample['data_samples'].metainfo['class']) - 1  # Convert to 0-indexed
-                                    else:
-                                        # Compute from ANB angle
-                                        gt_class = self._compute_class_from_anb(gt_kpts, landmark_names)
-                                    
                                     images_batch.append(img_np)
                                     gt_keypoints_batch.append(gt_kpts)
-                                    gt_classes_batch.append(gt_class)
                                 else:
                                     images_batch.append(None)
                                     gt_keypoints_batch.append(None)
-                                    gt_classes_batch.append(None)
                             else:
                                 images_batch.append(None)
                                 gt_keypoints_batch.append(None)
-                                gt_classes_batch.append(None)
                                 
                         except Exception as e:
                             # Only log every 100th error to avoid spam
@@ -669,18 +549,15 @@ class ConcurrentMLPTrainingHook(Hook):
                                 logger.warning(f'[ConcurrentMLPTrainingHook] Failed to process sample {idx}: {e}')
                             images_batch.append(None)
                             gt_keypoints_batch.append(None)
-                            gt_classes_batch.append(None)
                             continue
                     
                     # Run batch inference
-                    batch_preds, batch_gts, batch_errors, batch_gt_classes = batch_inference(
-                        images_batch, gt_keypoints_batch, gt_classes_batch)
+                    batch_preds, batch_gts, batch_errors = batch_inference(images_batch, gt_keypoints_batch)
                     
                     # Add to results
                     all_preds.extend(batch_preds)
                     all_gts.extend(batch_gts)
                     all_errors.extend(batch_errors)
-                    all_gt_classes.extend(batch_gt_classes)
                     
                     processed_count += len(batch_preds)
                 
@@ -697,13 +574,8 @@ class ConcurrentMLPTrainingHook(Hook):
         all_preds = np.stack(all_preds)  # [N, 38]
         all_gts = np.stack(all_gts)      # [N, 38]
         all_errors = np.stack(all_errors)  # [N, 19]
-        all_gt_classes = np.array(all_gt_classes)  # [N]
         
         logger.info(f'[ConcurrentMLPTrainingHook] Generated predictions for {len(all_preds)} samples using batch inference (batch_size={BATCH_SIZE})')
-        
-        # Log class distribution
-        unique_classes, class_counts = np.unique(all_gt_classes, return_counts=True)
-        logger.info(f'[ConcurrentMLPTrainingHook] Class distribution: {dict(zip(unique_classes, class_counts))}')
 
         # -----------------------------------------------------------------
         # Step 1.5: Compute hard-example weights
@@ -756,16 +628,16 @@ class ConcurrentMLPTrainingHook(Hook):
         # -----------------------------------------------------------------
         # Step 3: Train joint MLP for fixed number of epochs (GPU-optimized)
         # -----------------------------------------------------------------
-        logger.info('[ConcurrentMLPTrainingHook] Training joint 38-D MLP with classification on GPU…')
+        logger.info('[ConcurrentMLPTrainingHook] Training joint 38-D MLP on GPU…')
         
         # Calculate initial loss before refinement for logging
-        initial_regression_loss = self.criterion_regression(
+        initial_loss = self.criterion(
             torch.from_numpy(preds_scaled).float(), 
             torch.from_numpy(gts_scaled).float()
         ).item()
 
         # Build dataset with hard-example oversampling
-        ds_joint = _MLPDataset(preds_scaled, gts_scaled, all_gt_classes, sample_weights)
+        ds_joint = _MLPDataset(preds_scaled, gts_scaled, sample_weights)
         dl_joint = data.DataLoader(ds_joint, batch_size=self.mlp_batch_size, shuffle=True, pin_memory=True)
 
         def _train_joint(model: JointMLPRefinementModel, optimiser: optim.Optimizer, loader: data.DataLoader, initial_loss: float):
@@ -773,41 +645,20 @@ class ConcurrentMLPTrainingHook(Hook):
             total_loss = 0.0
             for ep in range(self.mlp_epochs):
                 epoch_loss = 0.0
-                epoch_regression_loss = 0.0
-                epoch_classification_loss = 0.0
-                correct_predictions = 0
-                total_predictions = 0
                 selection_weights_sum = torch.zeros(38).to(self.device)
                 selection_weights_count = 0
                 
-                for preds_batch, gts_batch, gt_classes_batch in loader:
+                for preds_batch, gts_batch in loader:
                     preds_batch = preds_batch.to(self.device, non_blocking=True)
                     gts_batch = gts_batch.to(self.device, non_blocking=True)
-                    gt_classes_batch = gt_classes_batch.to(self.device, non_blocking=True)
 
                     optimiser.zero_grad()
-                    
-                    # Forward pass
-                    outputs, class_logits = model(preds_batch)
-                    
-                    # Calculate losses
-                    regression_loss = self.criterion_regression(outputs, gts_batch)
-                    classification_loss = self.criterion_classification(class_logits, gt_classes_batch)
-                    
-                    # Combined loss
-                    loss = regression_loss + self.classification_loss_weight * classification_loss
-                    
+                    outputs = model(preds_batch)
+                    loss = self.criterion(outputs, gts_batch)
                     loss.backward()
                     optimiser.step()
 
                     epoch_loss += loss.item()
-                    epoch_regression_loss += regression_loss.item()
-                    epoch_classification_loss += classification_loss.item()
-                    
-                    # Track classification accuracy
-                    pred_classes = class_logits.argmax(dim=1)
-                    correct_predictions += (pred_classes == gt_classes_batch).sum().item()
-                    total_predictions += gt_classes_batch.size(0)
                     
                     # Track selection weights
                     if hasattr(model, 'last_selection_weights'):
@@ -815,9 +666,6 @@ class ConcurrentMLPTrainingHook(Hook):
                         selection_weights_count += model.last_selection_weights.shape[0]
                 
                 total_loss = epoch_loss / len(loader)
-                avg_regression_loss = epoch_regression_loss / len(loader)
-                avg_classification_loss = epoch_classification_loss / len(loader)
-                classification_accuracy = correct_predictions / total_predictions if total_predictions > 0 else 0
                 
                 # Calculate average selection weights
                 if selection_weights_count > 0:
@@ -825,12 +673,9 @@ class ConcurrentMLPTrainingHook(Hook):
                     avg_weight_use_mlp = avg_selection_weights.mean().item()
                     
                 if (ep + 1) % 20 == 0:
-                    improvement = ((initial_loss - avg_regression_loss) / initial_loss * 100) if initial_loss > 0 else 0
+                    improvement = ((initial_loss - total_loss) / initial_loss * 100) if initial_loss > 0 else 0
                     if selection_weights_count > 0:
-                        logger.info(f'[ConcurrentMLPTrainingHook] Joint-MLP epoch {ep+1}/{self.mlp_epochs} | '
-                                  f'Total loss: {total_loss:.6f} | Regression: {avg_regression_loss:.6f} ({improvement:+.1f}%) | '
-                                  f'Classification: {avg_classification_loss:.6f} (Acc: {classification_accuracy:.3f}) | '
-                                  f'Avg MLP usage: {avg_weight_use_mlp:.3f}')
+                        logger.info(f'[ConcurrentMLPTrainingHook] Joint-MLP epoch {ep+1}/{self.mlp_epochs} | MLP loss: {total_loss:.6f}, Initial loss: {initial_loss:.6f} ({improvement:+.1f}%) | Avg MLP usage: {avg_weight_use_mlp:.3f}')
                         
                         # Log per-coordinate selection preference every 40 epochs
                         if (ep + 1) % 40 == 0:
@@ -841,11 +686,9 @@ class ConcurrentMLPTrainingHook(Hook):
                             logger.info(f'[ConcurrentMLPTrainingHook] Top 5 landmarks preferring MLP: {max_mlp_landmarks.tolist()} (weights: {landmark_weights[max_mlp_landmarks].tolist()})')
                             logger.info(f'[ConcurrentMLPTrainingHook] Top 5 landmarks preferring HRNet: {min_mlp_landmarks.tolist()} (weights: {landmark_weights[min_mlp_landmarks].tolist()})')
                     else:
-                        logger.info(f'[ConcurrentMLPTrainingHook] Joint-MLP epoch {ep+1}/{self.mlp_epochs} | '
-                                  f'Total loss: {total_loss:.6f} | Regression: {avg_regression_loss:.6f} ({improvement:+.1f}%) | '
-                                  f'Classification: {avg_classification_loss:.6f} (Acc: {classification_accuracy:.3f})')
+                        logger.info(f'[ConcurrentMLPTrainingHook] Joint-MLP epoch {ep+1}/{self.mlp_epochs} | MLP loss: {total_loss:.6f}, Initial loss: {initial_loss:.6f} ({improvement:+.1f}%)')
 
-        _train_joint(self.mlp_joint, self.opt_joint, dl_joint, initial_regression_loss)
+        _train_joint(self.mlp_joint, self.opt_joint, dl_joint, initial_loss)
 
         logger.info('[ConcurrentMLPTrainingHook] Finished joint MLP update for this HRNet epoch.')
         
