@@ -66,9 +66,10 @@ class CustomPackPoseInputs(PackPoseInputs):
                 else:
                     gt_instances.bbox_scores = results['bbox_scores']
             
-            # Add gt_classification to data_sample if available
+            # Add gt_classification to data_sample metainfo if available
             if 'gt_classification' in results and results['gt_classification'] is not None:
-                data_sample.gt_classification = results['gt_classification']
+                # Set as metainfo to avoid conflicts with MMEngine's field management
+                data_sample.set_metainfo({'gt_classification': results['gt_classification']})
         
         return packed_results
 

@@ -139,9 +139,10 @@ class HRNetV2WithClassification(HeatmapHead):
         # Extract ground truth classifications from batch_data_samples
         gt_classifications = []
         for data_sample in batch_data_samples:
-            # The ground truth classification should be in the data sample
-            # We'll compute it from ground truth landmarks if not provided
-            if hasattr(data_sample, 'gt_classification'):
+            # The ground truth classification should be in the data sample metainfo
+            if hasattr(data_sample, 'metainfo') and 'gt_classification' in data_sample.metainfo:
+                gt_class = data_sample.metainfo['gt_classification']
+            elif hasattr(data_sample, 'gt_classification'):
                 gt_class = data_sample.gt_classification
             else:
                 # Compute from ground truth landmarks

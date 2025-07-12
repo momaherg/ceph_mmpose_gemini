@@ -51,7 +51,9 @@ class ClassificationMetric(BaseMetric):
         """
         for data_sample in data_samples:
             # Get ground truth classification
-            if hasattr(data_sample, 'gt_classification'):
+            if hasattr(data_sample, 'metainfo') and 'gt_classification' in data_sample.metainfo:
+                gt_class = data_sample.metainfo['gt_classification']
+            elif hasattr(data_sample, 'gt_classification'):
                 gt_class = data_sample.gt_classification
             else:
                 # If gt_classification is not set, compute from ground truth keypoints
