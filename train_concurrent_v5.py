@@ -210,7 +210,7 @@ def main():
         # Import the concurrent training hook
         import mlp_concurrent_training_hook
         # Import the new model with classification head
-        import hrnetv2_with_classification
+        import hrnetv2_with_classification_simple
         # Import ANB classification utilities
         import anb_classification_utils
         # Import classification evaluator

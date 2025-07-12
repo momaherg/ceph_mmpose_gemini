@@ -9,6 +9,8 @@ from mmpose.registry import MODELS  # Changed from mmpose.models import MODELS
 from mmpose.models.heads import HeatmapHead
 from mmengine.model import BaseModule
 from typing import Optional, Sequence, Tuple, Union
+# Import for accessing parent class methods
+from mmpose.models.utils import check_and_update_config
 
 
 @MODELS.register_module()
@@ -41,7 +43,32 @@ class HRNetV2WithClassification(HeatmapHead):
         if 'conv_kernel_sizes' not in kwargs:
             kwargs['conv_kernel_sizes'] = (1,)
         
+        # Debug logging
+        import mmengine
+        try:
+            logger = mmengine.logging.MMLogger.get_current_instance()
+            logger.info(f'[HRNetV2WithClassification.__init__] Initializing with kwargs: in_channels={kwargs.get("in_channels")}, '
+                       f'out_channels={kwargs.get("out_channels")}, conv_out_channels={kwargs.get("conv_out_channels")}, '
+                       f'conv_kernel_sizes={kwargs.get("conv_kernel_sizes")}')
+        except:
+            pass
+        
         super().__init__(**kwargs)
+        
+        # Check what layers were created
+        try:
+            if hasattr(self, 'conv_layers'):
+                logger.info(f'[HRNetV2WithClassification.__init__] conv_layers created: {self.conv_layers}')
+            else:
+                logger.warning('[HRNetV2WithClassification.__init__] No conv_layers created!')
+                
+            if hasattr(self, 'deconv_layers'):
+                logger.info(f'[HRNetV2WithClassification.__init__] deconv_layers: {self.deconv_layers}')
+                
+            if hasattr(self, 'final_layer'):
+                logger.info(f'[HRNetV2WithClassification.__init__] final_layer: {self.final_layer}')
+        except:
+            pass
         
         self.num_classes = num_classes
         self.classification_loss_weight = classification_loss_weight
@@ -202,10 +229,36 @@ class HRNetV2WithClassification(HeatmapHead):
             # If we're getting raw multi-scale features, process them first
             processed_feats = self._process_features(feats)
             try:
-                logger.info(f'[HRNetV2WithClassification.forward] Processed features shape: {processed_feats.shape}')
+                logger.info(f'[HRNetV2WithClassification.forward] Processed features shape: {processed_feats.shape}, dim: {processed_feats.dim()}')
+                logger.info(f'[HRNetV2WithClassification.forward] About to call super().forward with shape: {processed_feats.shape}')
             except:
                 pass
-            heatmaps = super().forward(processed_feats)
+            
+            # Create a copy to ensure we don't modify the original
+            features_for_heatmap = processed_feats.clone()
+            
+            try:
+                # Override parent's forward implementation to avoid issues
+                x = features_for_heatmap
+                
+                # Manually apply the layers
+                if hasattr(self, 'conv_layers') and self.conv_layers:
+                    logger.info(f'[HRNetV2WithClassification.forward] Before conv_layers: shape={x.shape}, dim={x.dim()}')
+                    for i, layer in enumerate(self.conv_layers):
+                        x = layer(x)
+                        logger.info(f'[HRNetV2WithClassification.forward] After conv_layer {i}: shape={x.shape}, dim={x.dim()}')
+                
+                if hasattr(self, 'deconv_layers') and self.deconv_layers:
+                    x = self.deconv_layers(x)
+                    
+                if hasattr(self, 'final_layer') and self.final_layer:
+                    x = self.final_layer(x)
+                    
+                heatmaps = x
+            except Exception as e:
+                logger.error(f'[HRNetV2WithClassification.forward] Error in manual forward: {e}')
+                # Fallback to parent's forward
+                heatmaps = super().forward(processed_feats)
         else:
             # Already processed by neck
             heatmaps = super().forward(feats)
@@ -222,10 +275,10 @@ class HRNetV2WithClassification(HeatmapHead):
                 - heatmaps: shape (N, K, H, W) for K keypoints
                 - classification_logits: shape (N, num_classes)
         """
-        # Get heatmaps from parent class - pass raw features
-        heatmaps = super().forward(feats)
+        # Get heatmaps using our forward method which handles feature processing
+        heatmaps = self.forward(feats)
         
-        # Process features for classification separately
+        # Process features for classification
         processed_feats = self._process_features(feats)
         
         # Pass through classification head
@@ -286,12 +339,14 @@ class HRNetV2WithClassification(HeatmapHead):
         Returns:
             dict: Dictionary of losses
         """
-        # Get heatmaps and classification logits separately
-        heatmaps, classification_logits = self.forward_with_classification(feats)
+        # Let parent class handle keypoint loss calculation
+        # It will call self.forward internally, which we've overridden to handle features properly
+        losses = super().loss(feats, batch_data_samples, train_cfg)
         
-        # Calculate heatmap loss using parent class method
-        # We need to call the parent's loss method but pass only heatmaps
-        keypoint_losses = super().loss(feats, batch_data_samples, train_cfg)
+        # Now add classification loss
+        # Process features for classification
+        processed_feats = self._process_features(feats)
+        classification_logits = self.classification_head(processed_feats)
         
         # Extract ground truth classifications from batch_data_samples
         gt_classifications = []
@@ -320,8 +375,7 @@ class HRNetV2WithClassification(HeatmapHead):
         # Calculate classification loss
         classification_loss = self.classification_loss(classification_logits, gt_classifications)
         
-        # Combine losses
-        losses = keypoint_losses.copy()
+        # Add classification loss to the losses dict
         losses['loss_classification'] = classification_loss * self.classification_loss_weight
         
         return losses 

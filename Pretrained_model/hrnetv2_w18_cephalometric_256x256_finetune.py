@@ -41,7 +41,7 @@ model = dict(
     # Ensure we keep the neck from base config
     neck=dict(concat=True, type='FeatureMapProcessor'),
     head=dict(
-        type='HRNetV2WithClassification',  # Use our custom head with classification
+        type='HRNetV2WithClassificationSimple',  # Use our simpler custom head
         in_channels=270,  # Important: HRNet with neck outputs 270 channels (18+36+72+144)
         out_channels=19, # Number of keypoints
         # Conv layer parameters from base config
@@ -52,10 +52,6 @@ model = dict(
         num_classes=3,  # Skeletal Class I, II, III
         classification_hidden_dim=256,
         classification_dropout=0.2,
-        classification_loss=dict(
-            type='CrossEntropyLoss',
-            loss_weight=1.0
-        ),
         classification_loss_weight=0.5,  # Weight for classification loss vs keypoint loss
         # Keypoint detection loss
         loss=dict(  # main loss
