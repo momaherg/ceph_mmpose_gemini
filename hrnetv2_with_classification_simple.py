@@ -193,4 +193,9 @@ class HRNetV2WithClassificationSimple(HeatmapHead):
             pred.pred_classification = classification_preds[i:i+1].detach().cpu().numpy()  # Shape: (1,)
             pred.pred_classification_probs = classification_probs[i:i+1].detach().cpu().numpy()  # Shape: (1, num_classes)
             
+            # Also add to pred_instances for easier access during evaluation
+            if hasattr(pred, 'pred_instances'):
+                pred.pred_instances.pred_classification = classification_preds[i:i+1].detach().cpu().numpy()
+                pred.pred_instances.classification_scores = classification_probs[i:i+1].detach().cpu().numpy()
+            
         return preds 
