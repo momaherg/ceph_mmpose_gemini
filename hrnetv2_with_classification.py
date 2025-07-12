@@ -5,7 +5,7 @@ HRNetV2 model with additional classification head for skeletal pattern predictio
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from mmpose.models import MODELS
+from mmpose.registry import MODELS  # Changed from mmpose.models import MODELS
 from mmpose.models.heads import HeatmapHead
 from mmengine.model import BaseModule
 from typing import Optional, Sequence, Tuple, Union
