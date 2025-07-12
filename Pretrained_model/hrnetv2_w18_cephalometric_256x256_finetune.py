@@ -38,8 +38,11 @@ codec = dict(
 
 # Model with Classification Head
 model = dict(
+    # Ensure we keep the neck from base config
+    neck=dict(concat=True, type='FeatureMapProcessor'),
     head=dict(
         type='HRNetV2WithClassification',  # Use our custom head with classification
+        in_channels=270,  # Important: HRNet with neck outputs 270 channels (18+36+72+144)
         out_channels=19, # Number of keypoints
         # Classification head parameters
         num_classes=3,  # Skeletal Class I, II, III

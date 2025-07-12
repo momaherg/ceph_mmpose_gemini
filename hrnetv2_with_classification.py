@@ -60,6 +60,100 @@ class HRNetV2WithClassification(HeatmapHead):
         # Build classification loss - use PyTorch's CrossEntropyLoss directly
         self.classification_loss = nn.CrossEntropyLoss()
         
+    def _process_features(self, feats):
+        """Process features to ensure they are in the correct format.
+        
+        Args:
+            feats: Either a tensor or a list/tuple of tensors
+            
+        Returns:
+            Processed features suitable for the head
+        """
+        # If feats is already a tensor, return as is
+        if isinstance(feats, torch.Tensor):
+            return feats
+            
+        # If feats is a list/tuple, we need to handle it
+        if isinstance(feats, (list, tuple)):
+            # If it's a single-element list, unwrap it
+            if len(feats) == 1:
+                return feats[0]
+            
+            # For HRNet multi-scale features, concatenate them like the neck would
+            # This handles the case where the neck isn't being called during inference
+            if len(feats) == 4:  # HRNet typically outputs 4 scales
+                # Upsample all features to the same size as the first one
+                target_size = feats[0].shape[2:]  # (H, W)
+                upsampled_feats = []
+                
+                for feat in feats:
+                    if feat.shape[2:] != target_size:
+                        # Upsample to target size
+                        feat_up = F.interpolate(
+                            feat, 
+                            size=target_size, 
+                            mode='bilinear', 
+                            align_corners=False
+                        )
+                        upsampled_feats.append(feat_up)
+                    else:
+                        upsampled_feats.append(feat)
+                
+                # Concatenate along channel dimension
+                concatenated = torch.cat(upsampled_feats, dim=1)
+                
+                # Log that we had to do this
+                import mmengine
+                try:
+                    logger = mmengine.logging.MMLogger.get_current_instance()
+                    logger.warning('[HRNetV2WithClassification] Manually concatenated 4 feature maps. '
+                                  f'Feature shapes: {[f.shape for f in feats]} -> {concatenated.shape}')
+                except:
+                    pass
+                    
+                return concatenated
+            
+            # For other cases, log a warning and use the last feature map
+            import mmengine
+            try:
+                logger = mmengine.logging.MMLogger.get_current_instance()
+                logger.warning(f'[HRNetV2WithClassification] Received {len(feats)} feature maps. '
+                              'Expected concatenated features from neck. Using last feature map.')
+            except:
+                pass
+            return feats[-1]
+        
+        raise TypeError(f"Expected tensor or list/tuple of tensors, got {type(feats)}")
+    
+    def _forward(self, feats):
+        """Override parent's _forward to handle multi-scale features.
+        
+        This method is called by both forward() and predict() in the parent class.
+        """
+        # Process features to ensure correct format
+        processed_feats = self._process_features(feats)
+        
+        # Call parent's _forward with processed features
+        if hasattr(super(), '_forward'):
+            return super()._forward(processed_feats)
+        else:
+            # Fallback: manually implement the forward logic
+            x = processed_feats
+            
+            # Apply conv layers if they exist
+            if hasattr(self, 'conv_layers') and self.conv_layers:
+                x = self.conv_layers(x)
+            
+            # Apply deconv layers if they exist
+            if hasattr(self, 'deconv_layers') and self.deconv_layers:
+                x = self.deconv_layers(x)
+                
+            # Apply final layer if it exists
+            if hasattr(self, 'final_layer') and self.final_layer:
+                x = self.final_layer(x)
+                
+            return x
+    
     def forward(self, feats: Tuple[torch.Tensor]) -> torch.Tensor:
         """Forward function.
         
@@ -72,8 +166,11 @@ class HRNetV2WithClassification(HeatmapHead):
         Note: This method only returns heatmaps to maintain compatibility with parent class.
         Use forward_with_classification() to get both heatmaps and classification logits.
         """
+        # Process features to ensure correct format
+        processed_feats = self._process_features(feats)
+        
         # Get heatmaps from parent class
-        heatmaps = super().forward(feats)
+        heatmaps = super().forward(processed_feats)
         return heatmaps
     
     def forward_with_classification(self, feats: Tuple[torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -87,16 +184,15 @@ class HRNetV2WithClassification(HeatmapHead):
                 - heatmaps: shape (N, K, H, W) for K keypoints
                 - classification_logits: shape (N, num_classes)
         """
+        # Process features to ensure correct format
+        processed_feats = self._process_features(feats)
+        
         # Get heatmaps from parent class
-        heatmaps = super().forward(feats)
+        heatmaps = super().forward(processed_feats)
         
-        # Get classification from the highest resolution feature map
-        # feats is a tuple of feature maps at different scales
-        # We use the last (highest resolution) feature map
-        x = feats[-1] if isinstance(feats, (list, tuple)) else feats
-        
+        # Get classification from the processed features
         # Pass through classification head
-        classification_logits = self.classification_head(x)
+        classification_logits = self.classification_head(processed_feats)
         
         return heatmaps, classification_logits
     
@@ -114,15 +210,22 @@ class HRNetV2WithClassification(HeatmapHead):
         Returns:
             InstanceList: Predictions with both keypoints and classification
         """
+        # Process features to ensure correct format
+        processed_feats = self._process_features(feats)
+        
         # Get heatmaps and classification logits
-        heatmaps, classification_logits = self.forward_with_classification(feats)
+        # We can't use forward_with_classification here because super().predict expects raw feats
+        # So we need to compute classification separately
         
         # Decode heatmaps to keypoints using parent class method
+        # The parent's predict method will call forward internally, so pass raw feats
         preds = super().predict(feats, batch_data_samples, test_cfg)
         
-        # Add classification predictions
-        classification_probs = F.softmax(classification_logits, dim=-1)
-        classification_preds = torch.argmax(classification_probs, dim=-1)
+        # Now compute classification logits separately
+        with torch.no_grad():
+            classification_logits = self.classification_head(processed_feats)
+            classification_probs = F.softmax(classification_logits, dim=-1)
+            classification_preds = torch.argmax(classification_probs, dim=-1)
         
         # Add classification results to each prediction instance
         for i, pred in enumerate(preds):
