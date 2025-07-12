@@ -318,11 +318,6 @@ def main():
     landmark_names = cephalometric_dataset_info.landmark_names_in_order
     landmark_cols = cephalometric_dataset_info.original_landmark_cols
     
-    # Get ANB angle landmark indices
-    a_point_idx = cephalometric_dataset_info.LANDMARK_INDICES['A_point']
-    nasion_idx = cephalometric_dataset_info.LANDMARK_INDICES['Nasion']
-    b_point_idx = cephalometric_dataset_info.LANDMARK_INDICES['B_point']
-    
     # Storage for results
     all_pred_keypoints = []
     all_gt_keypoints = []
@@ -364,12 +359,15 @@ def main():
                 gt_class = class_mapping.get(row['class'], -1)
             else:
                 # Compute from ground truth landmarks
-                anb_angle = anb_classification_utils.calculate_anb_angle(
-                    gt_keypoints, a_point_idx, nasion_idx, b_point_idx
-                )
-                if anb_angle is not None:
-                    gt_class = anb_classification_utils.classify_from_anb_angle(anb_angle)
-                else:
+                try:
+                    anb_angle = anb_classification_utils.calculate_anb_angle(gt_keypoints)
+                    if anb_angle is not None and not np.isnan(anb_angle):
+                        gt_class = anb_classification_utils.classify_from_anb_angle(anb_angle)
+                        if isinstance(gt_class, np.ndarray):
+                            gt_class = gt_class.item()
+                    else:
+                        gt_class = -1
+                except Exception:
                     gt_class = -1
             
             if gt_class == -1:
@@ -447,12 +445,15 @@ def main():
                             print(f"Could not get native classification for sample {idx}: {e}")
                 
                 # Compute post-hoc classification from predicted landmarks
-                anb_angle_pred = anb_classification_utils.calculate_anb_angle(
-                    pred_keypoints, a_point_idx, nasion_idx, b_point_idx
-                )
-                if anb_angle_pred is not None:
-                    posthoc_class = anb_classification_utils.classify_from_anb_angle(anb_angle_pred)
-                else:
+                try:
+                    anb_angle_pred = anb_classification_utils.calculate_anb_angle(pred_keypoints)
+                    if anb_angle_pred is not None and not np.isnan(anb_angle_pred):
+                        posthoc_class = anb_classification_utils.classify_from_anb_angle(anb_angle_pred)
+                        if isinstance(posthoc_class, np.ndarray):
+                            posthoc_class = posthoc_class.item()
+                    else:
+                        posthoc_class = -1
+                except Exception:
                     posthoc_class = -1
                 
                 # Store results
