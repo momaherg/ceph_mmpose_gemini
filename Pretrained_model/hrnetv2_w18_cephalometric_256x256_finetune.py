@@ -44,6 +44,10 @@ model = dict(
         type='HRNetV2WithClassification',  # Use our custom head with classification
         in_channels=270,  # Important: HRNet with neck outputs 270 channels (18+36+72+144)
         out_channels=19, # Number of keypoints
+        # Conv layer parameters from base config
+        conv_out_channels=(270,),  # Single conv layer with 270 channels
+        conv_kernel_sizes=(1,),    # 1x1 convolution
+        deconv_out_channels=None,  # No deconv layers in this config
         # Classification head parameters
         num_classes=3,  # Skeletal Class I, II, III
         classification_hidden_dim=256,
@@ -57,7 +61,9 @@ model = dict(
         loss=dict(  # main loss
                 type='AdaptiveWingLoss',
                 alpha=2.1,  omega=24., epsilon=1., theta=0.5,
-                use_target_weight=False, loss_weight=1.0)
+                use_target_weight=False, loss_weight=1.0),
+        # Decoder for heatmap
+        decoder=codec  # Use the same codec defined above
     )
     # The rest of the model (backbone, neck, data_preprocessor, test_cfg)
     # can be inherited or slightly adjusted if needed.

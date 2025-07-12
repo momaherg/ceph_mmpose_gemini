@@ -34,6 +34,13 @@ class HRNetV2WithClassification(HeatmapHead):
                  classification_loss: dict = dict(type='CrossEntropyLoss'),
                  classification_loss_weight: float = 1.0,
                  **kwargs):
+        # Extract HeatmapHead specific parameters
+        # Set default conv parameters if not provided
+        if 'conv_out_channels' not in kwargs:
+            kwargs['conv_out_channels'] = (kwargs.get('in_channels', 270),)
+        if 'conv_kernel_sizes' not in kwargs:
+            kwargs['conv_kernel_sizes'] = (1,)
+        
         super().__init__(**kwargs)
         
         self.num_classes = num_classes
@@ -41,7 +48,7 @@ class HRNetV2WithClassification(HeatmapHead):
         
         # Build classification head
         # We'll use the same input channels as the heatmap head
-        in_channels = kwargs.get('in_channels', 32)
+        in_channels = kwargs.get('in_channels', 270)
         
         self.classification_head = nn.Sequential(
             # Global average pooling to aggregate spatial features
@@ -71,17 +78,24 @@ class HRNetV2WithClassification(HeatmapHead):
         """
         # If feats is already a tensor, return as is
         if isinstance(feats, torch.Tensor):
+            assert feats.dim() == 4, f"Expected 4D tensor (B,C,H,W), got {feats.dim()}D with shape {feats.shape}"
             return feats
             
         # If feats is a list/tuple, we need to handle it
         if isinstance(feats, (list, tuple)):
             # If it's a single-element list, unwrap it
             if len(feats) == 1:
-                return feats[0]
+                feat = feats[0]
+                assert feat.dim() == 4, f"Expected 4D tensor (B,C,H,W), got {feat.dim()}D with shape {feat.shape}"
+                return feat
             
             # For HRNet multi-scale features, concatenate them like the neck would
             # This handles the case where the neck isn't being called during inference
             if len(feats) == 4:  # HRNet typically outputs 4 scales
+                # Ensure all features are 4D
+                for i, feat in enumerate(feats):
+                    assert feat.dim() == 4, f"Feature {i} has {feat.dim()}D shape {feat.shape}, expected 4D"
+                
                 # Upsample all features to the same size as the first one
                 target_size = feats[0].shape[2:]  # (H, W)
                 upsampled_feats = []
@@ -102,6 +116,9 @@ class HRNetV2WithClassification(HeatmapHead):
                 # Concatenate along channel dimension
                 concatenated = torch.cat(upsampled_feats, dim=1)
                 
+                # Verify the result is 4D
+                assert concatenated.dim() == 4, f"Concatenated features have {concatenated.dim()}D shape {concatenated.shape}"
+                
                 # Log that we had to do this
                 import mmengine
                 try:
@@ -121,7 +138,9 @@ class HRNetV2WithClassification(HeatmapHead):
                               'Expected concatenated features from neck. Using last feature map.')
             except:
                 pass
-            return feats[-1]
+            feat = feats[-1]
+            assert feat.dim() == 4, f"Last feature has {feat.dim()}D shape {feat.shape}, expected 4D"
+            return feat
         
         raise TypeError(f"Expected tensor or list/tuple of tensors, got {type(feats)}")
     
@@ -166,11 +185,30 @@ class HRNetV2WithClassification(HeatmapHead):
         Note: This method only returns heatmaps to maintain compatibility with parent class.
         Use forward_with_classification() to get both heatmaps and classification logits.
         """
-        # Process features to ensure correct format
-        processed_feats = self._process_features(feats)
-        
-        # Get heatmaps from parent class
-        heatmaps = super().forward(processed_feats)
+        # Debug logging
+        import mmengine
+        try:
+            logger = mmengine.logging.MMLogger.get_current_instance()
+            if isinstance(feats, (list, tuple)):
+                logger.info(f'[HRNetV2WithClassification.forward] Received {len(feats)} features with shapes: {[f.shape for f in feats]}')
+            else:
+                logger.info(f'[HRNetV2WithClassification.forward] Received tensor with shape: {feats.shape}')
+        except:
+            pass
+            
+        # Handle multi-scale features
+        if isinstance(feats, (list, tuple)) and not isinstance(feats, torch.Tensor):
+            # The parent expects concatenated features from the neck
+            # If we're getting raw multi-scale features, process them first
+            processed_feats = self._process_features(feats)
+            try:
+                logger.info(f'[HRNetV2WithClassification.forward] Processed features shape: {processed_feats.shape}')
+            except:
+                pass
+            heatmaps = super().forward(processed_feats)
+        else:
+            # Already processed by neck
+            heatmaps = super().forward(feats)
         return heatmaps
     
     def forward_with_classification(self, feats: Tuple[torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -184,13 +222,12 @@ class HRNetV2WithClassification(HeatmapHead):
                 - heatmaps: shape (N, K, H, W) for K keypoints
                 - classification_logits: shape (N, num_classes)
         """
-        # Process features to ensure correct format
+        # Get heatmaps from parent class - pass raw features
+        heatmaps = super().forward(feats)
+        
+        # Process features for classification separately
         processed_feats = self._process_features(feats)
         
-        # Get heatmaps from parent class
-        heatmaps = super().forward(processed_feats)
-        
-        # Get classification from the processed features
         # Pass through classification head
         classification_logits = self.classification_head(processed_feats)
         
