@@ -321,6 +321,12 @@ class ConcurrentMLPTrainingHook(Hook):
         """After each HRNetV2 epoch, train joint MLP on-the-fly using current predictions."""
         logger: MMLogger = runner.logger
         assert self.mlp_joint is not None
+        
+        # Check current epoch
+        current_epoch = runner.epoch  # 0-indexed
+        if current_epoch == 0:
+            logger.info('[ConcurrentMLPTrainingHook] Skipping MLP training for first epoch - model still initializing')
+            return
 
         # -----------------------------------------------------------------
         # Step 1: Generate predictions on training data (GPU-optimized with batching)
@@ -333,6 +339,15 @@ class ConcurrentMLPTrainingHook(Hook):
             actual_model = model.module
         else:
             actual_model = model
+            
+        # Check if model has loaded weights
+        try:
+            # Check if any parameters are non-zero (indicating loaded weights)
+            has_weights = any(p.abs().max() > 0 for p in model.parameters())
+            if not has_weights:
+                logger.warning('[ConcurrentMLPTrainingHook] Model appears to have no loaded weights!')
+        except Exception as e:
+            logger.warning(f'[ConcurrentMLPTrainingHook] Could not check model weights: {e}')
             
         # Ensure model has required attributes for inference
         if not hasattr(actual_model, 'cfg') and hasattr(runner, 'cfg'):
@@ -357,7 +372,14 @@ class ConcurrentMLPTrainingHook(Hook):
             except Exception as e:
                 logger.warning(f'[ConcurrentMLPTrainingHook] Could not set dataset_meta: {e}')
         
+        # IMPORTANT: Set model to eval mode
         model.eval()
+        
+        # Log model type for debugging
+        logger.info(f'[ConcurrentMLPTrainingHook] Model type: {type(model).__name__}')
+        if hasattr(model, 'head'):
+            logger.info(f'[ConcurrentMLPTrainingHook] Model head type: {type(model.head).__name__}')
+        
         all_preds: List[np.ndarray] = []
         all_gts: List[np.ndarray] = []
         all_errors: List[np.ndarray] = []  # For hard-example detection
@@ -377,11 +399,100 @@ class ConcurrentMLPTrainingHook(Hook):
             else:
                 return np.array(data)
 
+        def direct_model_inference(model, img, bbox):
+            """Direct inference using model forward pass instead of inference_topdown API."""
+            try:
+                # Prepare the image for model input
+                # img should be (H, W, C) numpy array
+                if img.shape != (224, 224, 3):
+                    logger.warning(f'[ConcurrentMLPTrainingHook] Unexpected image shape: {img.shape}')
+                    return None
+                
+                # Convert to tensor and normalize
+                img_tensor = torch.from_numpy(img).float().permute(2, 0, 1) / 255.0  # (C, H, W)
+                img_tensor = img_tensor.unsqueeze(0)  # (1, C, H, W)
+                
+                # Move to same device as model
+                device = next(model.parameters()).device
+                img_tensor = img_tensor.to(device)
+                
+                # Create a minimal data sample for the model
+                from mmengine.structures import InstanceData, PixelData
+                from mmpose.structures import PoseDataSample
+                
+                data_sample = PoseDataSample()
+                data_sample.gt_instances = InstanceData()
+                
+                # Set image metadata
+                data_sample.set_metainfo({
+                    'img_shape': (224, 224),
+                    'ori_shape': (224, 224),
+                    'input_size': (224, 224),
+                    'input_center': np.array([112., 112.]),
+                    'input_scale': np.array([224., 224.])
+                })
+                
+                # Run model forward pass
+                with torch.no_grad():
+                    # Get features from backbone
+                    if hasattr(model, 'extract_feat'):
+                        feats = model.extract_feat(img_tensor)
+                    else:
+                        # For wrapped models
+                        feats = model.backbone(img_tensor)
+                        if hasattr(model, 'neck') and model.neck is not None:
+                            feats = model.neck(feats)
+                    
+                    # Get predictions from head
+                    if hasattr(model.head, 'predict'):
+                        preds = model.head.predict(feats, [data_sample])
+                        if preds and len(preds) > 0:
+                            return preds[0].pred_instances.keypoints.cpu().numpy()
+                    else:
+                        # For simpler heads, decode heatmaps directly
+                        heatmaps = model.head(feats)
+                        if isinstance(heatmaps, tuple):
+                            heatmaps = heatmaps[0]  # Get only heatmaps if tuple
+                        
+                        # Simple heatmap to keypoint conversion
+                        keypoints = heatmaps_to_keypoints(heatmaps)
+                        return keypoints.cpu().numpy()
+                        
+            except Exception as e:
+                logger.warning(f'[ConcurrentMLPTrainingHook] Direct inference failed: {str(e)}')
+                return None
+        
+        def heatmaps_to_keypoints(heatmaps):
+            """Simple heatmap to keypoint conversion."""
+            # heatmaps shape: (N, K, H, W)
+            N, K, H, W = heatmaps.shape
+            
+            # Find max locations
+            heatmaps_reshaped = heatmaps.view(N, K, -1)
+            max_vals, max_inds = torch.max(heatmaps_reshaped, dim=2)
+            
+            # Convert to x, y coordinates
+            max_y = max_inds // W
+            max_x = max_inds % W
+            
+            # Scale to image coordinates (assuming heatmap is 96x96 for 224x224 image)
+            scale = 224.0 / W
+            keypoints = torch.stack([max_x.float() * scale, max_y.float() * scale], dim=2)
+            
+            return keypoints
+
         def batch_inference(images_batch, gt_keypoints_batch):
             """Run batched inference on a list of images."""
             batch_preds = []
             batch_gts = []
             batch_errors = []
+            
+            # Add debug counters
+            total_samples = len(images_batch)
+            none_samples = sum(1 for img in images_batch if img is None)
+            failed_inference = 0
+            invalid_results = 0
+            use_direct_inference = True  # Flag to switch between inference methods
             
             try:
                 # Process each image individually but in a batch-like manner
@@ -391,34 +502,64 @@ class ConcurrentMLPTrainingHook(Hook):
                             # Run inference on individual image
                             bbox = np.array([[0, 0, 224, 224]], dtype=np.float32)
                             
-                            with torch.no_grad():
-                                results = inference_topdown(model, img, bboxes=bbox, bbox_format='xyxy')
+                            pred_kpts = None
                             
-                            if results and len(results) > 0:
-                                pred_kpts = results[0].pred_instances.keypoints[0]
-                                pred_kpts = tensor_to_numpy(pred_kpts)
+                            if use_direct_inference:
+                                # Try direct inference first
+                                direct_result = direct_model_inference(model, img, bbox)
+                                if direct_result is not None and direct_result.shape[0] >= 19:
+                                    pred_kpts = direct_result[0] if direct_result.ndim == 3 else direct_result
+                                else:
+                                    # Fallback to inference_topdown
+                                    use_direct_inference = False
+                            
+                            if not use_direct_inference or pred_kpts is None:
+                                # Use original inference_topdown
+                                with torch.no_grad():
+                                    results = inference_topdown(model, img, bboxes=bbox, bbox_format='xyxy')
                                 
-                                # Note: The model may also output classification predictions in results[0].pred_classification
-                                # but the MLP only refines keypoints, not classification
+                                if results and len(results) > 0:
+                                    pred_kpts = results[0].pred_instances.keypoints[0]
+                                    pred_kpts = tensor_to_numpy(pred_kpts)
                                 
-                                if pred_kpts is not None and pred_kpts.shape[0] == 19:
-                                    # Flatten coordinates to 38-D vectors
-                                    pred_flat = pred_kpts.flatten()
-                                    gt_flat = gt_kpts.flatten()
-                                    
-                                    # Calculate per-landmark radial errors
-                                    landmark_errors = np.sqrt(np.sum((pred_kpts - gt_kpts)**2, axis=1))
-                                    
-                                    batch_preds.append(pred_flat)
-                                    batch_gts.append(gt_flat)
-                                    batch_errors.append(landmark_errors)
+                            # Note: The model may also output classification predictions in results[0].pred_classification
+                            # but the MLP only refines keypoints, not classification
+                            
+                            if pred_kpts is not None and pred_kpts.shape[0] == 19:
+                                # Flatten coordinates to 38-D vectors
+                                pred_flat = pred_kpts.flatten()
+                                gt_flat = gt_kpts.flatten()
+                                
+                                # Calculate per-landmark radial errors
+                                landmark_errors = np.sqrt(np.sum((pred_kpts - gt_kpts)**2, axis=1))
+                                
+                                batch_preds.append(pred_flat)
+                                batch_gts.append(gt_flat)
+                                batch_errors.append(landmark_errors)
+                            else:
+                                invalid_results += 1
+                                if i < 3:  # Log first few failures
+                                    logger.warning(f'[ConcurrentMLPTrainingHook] Invalid keypoints shape: {pred_kpts.shape if pred_kpts is not None else "None"}')
                                     
                         except Exception as e:
-                            # Skip failed individual images
+                            failed_inference += 1
+                            if i < 3 or failed_inference <= 5:  # Log first few errors
+                                logger.warning(f'[ConcurrentMLPTrainingHook] Inference failed for sample {i}: {str(e)}')
+                                import traceback
+                                if i < 2:  # Full traceback for first couple errors
+                                    traceback.print_exc()
                             continue
                              
             except Exception as e:
                 logger.warning(f'[ConcurrentMLPTrainingHook] Batch processing failed: {e}')
+            
+            # Log debug summary
+            if total_samples > 0:
+                success_count = len(batch_preds)
+                logger.info(f'[ConcurrentMLPTrainingHook] Batch inference summary: '
+                           f'Total: {total_samples}, None inputs: {none_samples}, '
+                           f'Failed inference: {failed_inference}, Invalid results: {invalid_results}, '
+                           f'Success: {success_count}')
                 
             return batch_preds, batch_gts, batch_errors
 
