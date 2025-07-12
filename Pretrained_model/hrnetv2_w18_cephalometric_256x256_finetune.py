@@ -96,7 +96,7 @@ test_pipeline = val_pipeline # Test pipeline often same as validation
 # (ann_file and data_root might become '' or None if data_df is primary)
 
 train_dataloader = dict(
-    batch_size=20, # REDUCED: Was 32 - Lower for 384x384 resolution to manage GPU memory
+    batch_size=10, # REDUCED: Was 32 - Lower for 384x384 resolution to manage GPU memory
     num_workers=2,
     persistent_workers=True,
     sampler=dict(type='DefaultSampler', shuffle=True),
@@ -118,7 +118,7 @@ train_dataloader = dict(
     ))
 
 val_dataloader = dict(
-    batch_size=20, # REDUCED: Was 32 - Lower for 384x384 resolution to manage GPU memory
+    batch_size=10, # REDUCED: Was 32 - Lower for 384x384 resolution to manage GPU memory
     num_workers=2,
     persistent_workers=True,
     drop_last=False,
