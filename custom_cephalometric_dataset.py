@@ -173,30 +173,6 @@ class CustomCephalometricDataset(BaseDataset):
             }
             data_list.append(data_info)
         
-        if data_list:
-            import pandas as pd
-            # Use .get() to avoid errors if key is missing
-            classifications = [d.get('gt_classification') for d in data_list]
-            
-            # Filter out None values before creating Series
-            valid_classifications = [c for c in classifications if c is not None]
-            
-            if valid_classifications:
-                class_counts = pd.Series(valid_classifications).value_counts().sort_index()
-                
-                print("\n" + "=" * 50)
-                print("📊 Ground Truth Skeletal Class Distribution")
-                
-                class_map = {0: 'Skeletal Class I', 1: 'Skeletal Class II', 2: 'Skeletal Class III'}
-                
-                for class_id, count in class_counts.items():
-                    class_name = class_map.get(class_id, f"Unknown Class ({class_id})")
-                    percentage = (count / len(valid_classifications)) * 100
-                    print(f"  - {class_name}: {count} samples ({percentage:.1f}%)")
-                
-                print(f"Total classified samples: {len(valid_classifications)}/{len(data_list)}")
-                print("=" * 50 + "\n")
-        
         if not data_list and not current_df.empty:
             print("Warning: Data list is empty but DataFrame was not. Check processing logic in _load_data_list.")
         elif current_df.empty:
