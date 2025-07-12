@@ -521,9 +521,9 @@ class ConcurrentMLPTrainingHook(Hook):
                                 if results and len(results) > 0:
                                     pred_kpts = results[0].pred_instances.keypoints[0]
                                     pred_kpts = tensor_to_numpy(pred_kpts)
-                                
-                            # Note: The model may also output classification predictions in results[0].pred_classification
-                            # but the MLP only refines keypoints, not classification
+                                    
+                                    # Note: The model outputs classification predictions, but we only need keypoints for MLP training
+                                    # We can safely ignore the classification predictions here
                             
                             if pred_kpts is not None and pred_kpts.shape[0] == 19:
                                 # Flatten coordinates to 38-D vectors
@@ -545,8 +545,9 @@ class ConcurrentMLPTrainingHook(Hook):
                             failed_inference += 1
                             if i < 3 or failed_inference <= 5:  # Log first few errors
                                 logger.warning(f'[ConcurrentMLPTrainingHook] Inference failed for sample {i}: {str(e)}')
-                                import traceback
+                                # Don't show full traceback for every error to avoid spam
                                 if i < 2:  # Full traceback for first couple errors
+                                    import traceback
                                     traceback.print_exc()
                             continue
                              
@@ -556,10 +557,15 @@ class ConcurrentMLPTrainingHook(Hook):
             # Log debug summary
             if total_samples > 0:
                 success_count = len(batch_preds)
+                success_rate = success_count / total_samples
                 logger.info(f'[ConcurrentMLPTrainingHook] Batch inference summary: '
                            f'Total: {total_samples}, None inputs: {none_samples}, '
                            f'Failed inference: {failed_inference}, Invalid results: {invalid_results}, '
-                           f'Success: {success_count}')
+                           f'Success: {success_count} ({success_rate:.1%})')
+                
+                # If success rate is too low, consider skipping MLP training for this epoch
+                if success_rate < 0.1:  # Less than 10% success rate
+                    logger.warning('[ConcurrentMLPTrainingHook] Very low inference success rate. Consider skipping MLP training for this epoch.')
                 
             return batch_preds, batch_gts, batch_errors
 

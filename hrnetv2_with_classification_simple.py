@@ -189,7 +189,8 @@ class HRNetV2WithClassificationSimple(HeatmapHead):
         
         # Add classification results to predictions
         for i, pred in enumerate(preds):
-            pred.pred_classification = classification_preds[i].item()
-            pred.pred_classification_probs = classification_probs[i].detach().cpu().numpy()
+            # Convert to numpy arrays to satisfy InstanceData requirements
+            pred.pred_classification = classification_preds[i:i+1].detach().cpu().numpy()  # Shape: (1,)
+            pred.pred_classification_probs = classification_probs[i:i+1].detach().cpu().numpy()  # Shape: (1, num_classes)
             
         return preds 
