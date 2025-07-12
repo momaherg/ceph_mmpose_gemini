@@ -57,8 +57,8 @@ class HRNetV2WithClassification(HeatmapHead):
             nn.Linear(classification_hidden_dim // 2, num_classes)
         )
         
-        # Build classification loss
-        self.classification_loss = MODELS.build(classification_loss)
+        # Build classification loss - use PyTorch's CrossEntropyLoss directly
+        self.classification_loss = nn.CrossEntropyLoss()
         
     def forward(self, feats: Tuple[torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor]:
         """Forward function.

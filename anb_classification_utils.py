@@ -1,5 +1,12 @@
 import numpy as np
-import torch
+
+# Try to import torch, but make the module work without it
+try:
+    import torch
+    HAS_TORCH = True
+except ImportError:
+    HAS_TORCH = False
+    
 
 def calculate_anb_angle(landmarks):
     """
@@ -11,7 +18,7 @@ def calculate_anb_angle(landmarks):
     Returns:
         ANB angles in degrees with the same batch shape as input
     """
-    if isinstance(landmarks, torch.Tensor):
+    if HAS_TORCH and isinstance(landmarks, torch.Tensor):
         landmarks_np = landmarks.detach().cpu().numpy()
         is_tensor = True
     else:
@@ -49,7 +56,7 @@ def calculate_anb_angle(landmarks):
     cross_product = NA_vector[..., 0] * NB_vector[..., 1] - NA_vector[..., 1] * NB_vector[..., 0]
     angle_degrees = np.where(cross_product > 0, -angle_degrees, angle_degrees)
     
-    if is_tensor:
+    if is_tensor and HAS_TORCH:
         return torch.from_numpy(angle_degrees).to(landmarks.device)
     else:
         return angle_degrees
@@ -68,7 +75,7 @@ def classify_from_anb_angle(anb_angle):
         - 1: Skeletal Class II (ANB >= 4)
         - 2: Skeletal Class III (ANB <= 0)
     """
-    if isinstance(anb_angle, torch.Tensor):
+    if HAS_TORCH and isinstance(anb_angle, torch.Tensor):
         # For torch tensors
         labels = torch.zeros_like(anb_angle, dtype=torch.long)
         labels[anb_angle >= 4] = 1  # Class II
