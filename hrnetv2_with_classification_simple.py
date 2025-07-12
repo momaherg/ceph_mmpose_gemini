@@ -72,10 +72,29 @@ class HRNetV2WithClassificationSimple(HeatmapHead):
         # Add classification loss
         # Extract the feature tensor for classification
         if isinstance(feats, (list, tuple)):
-            # Use the first (or only) feature map
-            feat_for_classification = feats[0] if len(feats) == 1 else feats[-1]
+            # Make sure we get a tensor, not a nested list
+            if len(feats) == 1:
+                feat_for_classification = feats[0]
+            else:
+                # Use the last feature map
+                feat_for_classification = feats[-1]
+                
+            # If it's still a list, try to extract the tensor
+            if isinstance(feat_for_classification, (list, tuple)):
+                feat_for_classification = feat_for_classification[0]
         else:
             feat_for_classification = feats
+            
+        # Ensure we have a tensor
+        if not isinstance(feat_for_classification, torch.Tensor):
+            # Log warning and return without classification loss
+            import mmengine
+            try:
+                logger = mmengine.logging.MMLogger.get_current_instance()
+                logger.warning(f'[HRNetV2WithClassificationSimple] Expected tensor for classification, got {type(feat_for_classification)}. Skipping classification loss.')
+            except:
+                pass
+            return losses
             
         # Compute classification logits
         classification_logits = self.classification_head(feat_for_classification)
@@ -137,9 +156,30 @@ class HRNetV2WithClassificationSimple(HeatmapHead):
         # Add classification predictions
         # Extract the feature tensor for classification
         if isinstance(feats, (list, tuple)):
-            feat_for_classification = feats[0] if len(feats) == 1 else feats[-1]
+            # Make sure we get a tensor, not a nested list
+            if len(feats) == 1:
+                feat_for_classification = feats[0]
+            else:
+                # Use the last feature map
+                feat_for_classification = feats[-1]
+                
+            # If it's still a list, try to extract the tensor
+            if isinstance(feat_for_classification, (list, tuple)):
+                feat_for_classification = feat_for_classification[0]
         else:
             feat_for_classification = feats
+            
+        # Ensure we have a tensor
+        if not isinstance(feat_for_classification, torch.Tensor):
+            # Log warning and skip classification
+            import mmengine
+            try:
+                logger = mmengine.logging.MMLogger.get_current_instance()
+                logger.warning(f'[HRNetV2WithClassificationSimple] Expected tensor for classification, got {type(feat_for_classification)}. Skipping classification.')
+            except:
+                pass
+            # Return predictions without classification
+            return preds
             
         # Compute classification
         with torch.no_grad():
