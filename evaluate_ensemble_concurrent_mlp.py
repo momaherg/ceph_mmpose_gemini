@@ -597,6 +597,49 @@ def load_model_components(model_dir: str, device: torch.device, config_path: str
     """Load HRNet model, MLP model, and scalers for a single ensemble model."""
     print(f"\n🔄 Loading model from: {os.path.basename(model_dir)}")
     
+    # Import custom model classes to ensure they are registered
+    try:
+        # Try to import all possible custom model classes
+        import sys
+        import os as os_module
+        if os_module.path.dirname(os_module.path.abspath(__file__)) not in sys.path:
+            sys.path.insert(0, os_module.path.dirname(os_module.path.abspath(__file__)))
+        
+        # Import custom dataset and transforms first
+        import custom_cephalometric_dataset
+        import custom_transforms
+        import cephalometric_dataset_info
+        
+        # Try to import various versions of the custom model
+        try:
+            import hrnetv2_with_classification_simple
+            print("   ✓ Imported HRNetV2WithClassificationSimple")
+        except ImportError:
+            pass
+        
+        try:
+            import hrnetv2_with_classification
+            print("   ✓ Imported HRNetV2WithClassification")
+        except ImportError:
+            pass
+            
+        try:
+            import hrnetv2_with_classification_improved
+            print("   ✓ Imported HRNetV2WithClassificationImproved")
+        except ImportError:
+            pass
+            
+        # Import MLP training hook if exists
+        try:
+            import mlp_concurrent_training_hook
+            print("   ✓ Imported MLP concurrent training hook")
+        except ImportError:
+            pass
+            
+    except Exception as e:
+        print(f"   ⚠️  Warning: Some custom modules could not be imported: {e}")
+        print(f"      This may cause issues if the model uses custom classes")
+    
     # Find HRNet checkpoint
     if epoch is not None:
         # Look for specific epoch checkpoint
@@ -3764,6 +3807,39 @@ def main():
         import custom_transforms
         import cephalometric_dataset_info
         print("✓ Custom modules imported successfully")
+        
+        # Import custom model classes to ensure they are registered
+        imported_models = []
+        try:
+            import hrnetv2_with_classification_simple
+            imported_models.append("HRNetV2WithClassificationSimple")
+        except ImportError:
+            pass
+        
+        try:
+            import hrnetv2_with_classification
+            imported_models.append("HRNetV2WithClassification")
+        except ImportError:
+            pass
+            
+        try:
+            import hrnetv2_with_classification_improved
+            imported_models.append("HRNetV2WithClassificationImproved")
+        except ImportError:
+            pass
+        
+        if imported_models:
+            print(f"✓ Custom model classes imported: {', '.join(imported_models)}")
+        else:
+            print("⚠️  No custom model classes found to import")
+        
+        # Import MLP training hook if exists
+        try:
+            import mlp_concurrent_training_hook
+            print("✓ MLP concurrent training hook imported")
+        except ImportError:
+            pass
+            
     except ImportError as e:
         print(f"✗ Failed to import custom modules: {e}")
         return
