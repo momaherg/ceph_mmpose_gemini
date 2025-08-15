@@ -960,6 +960,248 @@ def compute_metrics_with_mm(pred_coords, gt_coords, landmark_names, patient_ids,
     
     return overall_metrics, per_landmark_metrics
 
+def compute_metrics_by_anb_class(pred_coords: np.ndarray, gt_coords: np.ndarray, 
+                                landmark_names: List[str], patient_ids: List[int],
+                                ruler_data: Optional[Dict[str, Dict]] = None) -> Dict[str, Dict]:
+    """
+    Compute evaluation metrics grouped by ANB classification.
+    
+    Returns:
+        Dictionary with metrics for each ANB class (Class I, II, III)
+    """
+    print("\n🔄 Computing metrics by ANB classification...")
+    
+    # Calculate ANB angles for ground truth to classify patients
+    patient_classifications = []
+    for i in range(len(gt_coords)):
+        gt_angles = calculate_cephalometric_angles(gt_coords[i], landmark_names)
+        gt_anb = gt_angles.get('ANB', np.nan)
+        classification = classify_patient(gt_anb)
+        patient_classifications.append(classification)
+    
+    # Group patients by classification
+    class_groups = {
+        'Class I': [],
+        'Class II': [],
+        'Class III': []
+    }
+    
+    for i, classification in enumerate(patient_classifications):
+        if classification in class_groups:
+            class_groups[classification].append(i)
+    
+    # Compute metrics for each class
+    results_by_class = {}
+    
+    for class_name, indices in class_groups.items():
+        if not indices:
+            print(f"   ⚠️  No patients found for {class_name}")
+            results_by_class[class_name] = {
+                'overall': {'mre': np.nan, 'std': np.nan, 'median': np.nan, 'count': 0},
+                'per_landmark': {},
+                'patient_ids': [],
+                'n_patients': 0
+            }
+            continue
+        
+        # Extract data for this class
+        class_pred_coords = pred_coords[indices]
+        class_gt_coords = gt_coords[indices]
+        class_patient_ids = [patient_ids[i] for i in indices]
+        
+        # Compute metrics
+        if ruler_data:
+            overall_metrics, per_landmark_metrics = compute_metrics_with_mm(
+                class_pred_coords, class_gt_coords, landmark_names, 
+                class_patient_ids, ruler_data
+            )
+        else:
+            overall_metrics, per_landmark_metrics = compute_metrics(
+                class_pred_coords, class_gt_coords, landmark_names
+            )
+        
+        results_by_class[class_name] = {
+            'overall': overall_metrics,
+            'per_landmark': per_landmark_metrics,
+            'patient_ids': class_patient_ids,
+            'n_patients': len(indices)
+        }
+        
+        print(f"   ✓ {class_name}: {len(indices)} patients")
+        print(f"      - MRE: {overall_metrics['mre']:.3f} pixels")
+        if 'mre_mm' in overall_metrics:
+            print(f"      - MRE: {overall_metrics['mre_mm']:.3f} mm")
+            print(f"      - 2mm accuracy: {overall_metrics['accuracy_2mm']*100:.1f}%")
+            print(f"      - 4mm accuracy: {overall_metrics['accuracy_4mm']*100:.1f}%")
+    
+    return results_by_class
+
+def save_anb_class_metrics_to_csv(results_by_class: Dict[str, Dict], 
+                                 model_name: str, output_dir: str,
+                                 landmark_names: List[str]):
+    """Save ANB class-specific metrics to CSV files."""
+    
+    # Create subdirectory for ANB class results
+    anb_dir = os.path.join(output_dir, "anb_class_metrics")
+    os.makedirs(anb_dir, exist_ok=True)
+    
+    # 1. Save overall metrics comparison across classes
+    overall_data = []
+    for class_name in ['Class I', 'Class II', 'Class III']:
+        if class_name in results_by_class:
+            metrics = results_by_class[class_name]['overall']
+            row = {
+                'ANB_Class': class_name,
+                'Model': model_name,
+                'N_Patients': results_by_class[class_name]['n_patients'],
+                'MRE_pixels': metrics.get('mre', np.nan),
+                'STD_pixels': metrics.get('std', np.nan),
+                'Median_pixels': metrics.get('median', np.nan),
+                'P90_pixels': metrics.get('p90', np.nan),
+                'P95_pixels': metrics.get('p95', np.nan)
+            }
+            
+            # Add mm metrics if available
+            if 'mre_mm' in metrics:
+                row.update({
+                    'MRE_mm': metrics['mre_mm'],
+                    'STD_mm': metrics['std_mm'],
+                    'Median_mm': metrics['median_mm'],
+                    'P90_mm': metrics['p90_mm'],
+                    'P95_mm': metrics['p95_mm'],
+                    'Accuracy_2mm_%': metrics['accuracy_2mm'] * 100,
+                    'Accuracy_4mm_%': metrics['accuracy_4mm'] * 100,
+                    'Calibrated_Patients': metrics.get('calibrated_patients', 0)
+                })
+            
+            overall_data.append(row)
+    
+    overall_df = pd.DataFrame(overall_data)
+    overall_file = os.path.join(anb_dir, f"{model_name}_overall_metrics_by_anb_class.csv")
+    overall_df.to_csv(overall_file, index=False)
+    print(f"   ✓ Saved overall metrics by ANB class: {os.path.basename(overall_file)}")
+    
+    # 2. Save per-landmark metrics for each class
+    for class_name in ['Class I', 'Class II', 'Class III']:
+        if class_name not in results_by_class:
+            continue
+        
+        landmark_data = []
+        per_landmark = results_by_class[class_name]['per_landmark']
+        
+        for landmark_name in landmark_names:
+            if landmark_name in per_landmark:
+                metrics = per_landmark[landmark_name]
+                row = {
+                    'Landmark': landmark_name,
+                    'MRE_pixels': metrics.get('mre', np.nan),
+                    'STD_pixels': metrics.get('std', np.nan),
+                    'Median_pixels': metrics.get('median', np.nan),
+                    'Count': metrics.get('count', 0)
+                }
+                
+                # Add mm metrics if available
+                if 'mre_mm' in metrics:
+                    row.update({
+                        'MRE_mm': metrics['mre_mm'],
+                        'STD_mm': metrics['std_mm'],
+                        'Median_mm': metrics['median_mm'],
+                        'Accuracy_2mm_%': metrics.get('accuracy_2mm', 0) * 100,
+                        'Accuracy_4mm_%': metrics.get('accuracy_4mm', 0) * 100
+                    })
+                
+                landmark_data.append(row)
+        
+        if landmark_data:
+            landmark_df = pd.DataFrame(landmark_data)
+            landmark_file = os.path.join(anb_dir, f"{model_name}_{class_name.replace(' ', '_')}_landmarks.csv")
+            landmark_df.to_csv(landmark_file, index=False)
+            print(f"   ✓ Saved {class_name} landmark metrics: {os.path.basename(landmark_file)}")
+    
+    # 3. Save patient list for each class
+    patient_data = []
+    for class_name in ['Class I', 'Class II', 'Class III']:
+        if class_name in results_by_class:
+            for patient_id in results_by_class[class_name]['patient_ids']:
+                patient_data.append({
+                    'Patient_ID': patient_id,
+                    'ANB_Class': class_name
+                })
+    
+    if patient_data:
+        patient_df = pd.DataFrame(patient_data)
+        patient_file = os.path.join(anb_dir, f"{model_name}_patients_by_anb_class.csv")
+        patient_df.to_csv(patient_file, index=False)
+        print(f"   ✓ Saved patient classification list: {os.path.basename(patient_file)}")
+
+def create_anb_class_comparison_visualization(all_results_by_class: Dict[str, Dict[str, Dict]], 
+                                            output_dir: str):
+    """Create visualization comparing model performance across ANB classes."""
+    import matplotlib.pyplot as plt
+    
+    anb_dir = os.path.join(output_dir, "anb_class_metrics")
+    os.makedirs(anb_dir, exist_ok=True)
+    
+    # Prepare data for plotting
+    classes = ['Class I', 'Class II', 'Class III']
+    models = list(all_results_by_class.keys())
+    
+    fig, axes = plt.subplots(2, 3, figsize=(15, 10))
+    fig.suptitle('Model Performance by ANB Classification', fontsize=16, fontweight='bold')
+    
+    # Metrics to plot
+    metrics_to_plot = [
+        ('mre', 'MRE (pixels)', axes[0, 0]),
+        ('mre_mm', 'MRE (mm)', axes[0, 1]),
+        ('accuracy_2mm', '2mm Accuracy (%)', axes[0, 2]),
+        ('accuracy_4mm', '4mm Accuracy (%)', axes[1, 0]),
+        ('median', 'Median Error (pixels)', axes[1, 1]),
+        ('median_mm', 'Median Error (mm)', axes[1, 2])
+    ]
+    
+    for metric_key, metric_label, ax in metrics_to_plot:
+        x = np.arange(len(classes))
+        width = 0.8 / len(models)
+        
+        for i, model_name in enumerate(models):
+            values = []
+            for class_name in classes:
+                if class_name in all_results_by_class[model_name]:
+                    overall = all_results_by_class[model_name][class_name]['overall']
+                    value = overall.get(metric_key, np.nan)
+                    if 'accuracy' in metric_key and not np.isnan(value):
+                        value *= 100  # Convert to percentage
+                    values.append(value)
+                else:
+                    values.append(np.nan)
+            
+            # Plot bars
+            offset = (i - len(models)/2 + 0.5) * width
+            bars = ax.bar(x + offset, values, width, label=model_name)
+            
+            # Add value labels on bars
+            for bar, value in zip(bars, values):
+                if not np.isnan(value):
+                    height = bar.get_height()
+                    ax.text(bar.get_x() + bar.get_width()/2., height,
+                           f'{value:.2f}', ha='center', va='bottom', fontsize=8)
+        
+        ax.set_xlabel('ANB Classification')
+        ax.set_ylabel(metric_label)
+        ax.set_xticks(x)
+        ax.set_xticklabels(classes)
+        ax.legend(fontsize=8, loc='best')
+        ax.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    
+    # Save figure
+    fig_file = os.path.join(anb_dir, "anb_class_performance_comparison.png")
+    plt.savefig(fig_file, dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    print(f"   ✓ Saved ANB class comparison visualization: {os.path.basename(fig_file)}")
+
 def create_ensemble_predictions(all_hrnet_preds: List[np.ndarray], 
                               all_mlp_preds: List[np.ndarray]) -> Tuple[np.ndarray, np.ndarray]:
     """Create ensemble predictions by averaging individual model predictions."""
@@ -2640,7 +2882,8 @@ def save_overall_results_report(results: Dict[str, Dict], validation_results: Di
                                classification_results: Dict[str, Dict], 
                                landmark_names: List[str], args: argparse.Namespace,
                                output_dir: str, n_test_samples: int, n_models_evaluated: int,
-                               ruler_data: Optional[Dict[str, Dict]] = None):
+                               ruler_data: Optional[Dict[str, Dict]] = None,
+                               anb_class_results: Optional[Dict[str, Dict[str, Dict]]] = None):
     """Save a comprehensive overall results report to a text file."""
     report_path = os.path.join(output_dir, "overall_results_report.txt")
     
@@ -2955,6 +3198,117 @@ def save_overall_results_report(results: Dict[str, Dict], validation_results: Di
                                        f"Recall={class_metrics['recall']:.3f}, "
                                        f"F1={class_metrics['f1']:.3f}, "
                                        f"Support={class_metrics['support']}\n")
+        
+        # ANB Class-Specific Performance
+        if anb_class_results:
+            f.write("\n\nANB CLASS-SPECIFIC PERFORMANCE:\n")
+            f.write("=" * 80 + "\n")
+            f.write("\nEvaluation metrics grouped by ANB classification (based on ground truth ANB angle):\n\n")
+            
+            # Summary table
+            f.write("Overall Performance by ANB Class:\n")
+            f.write("-" * 60 + "\n")
+            
+            # Header - check if mm metrics are available
+            has_mm = any('mre_mm' in result.get('Class I', {}).get('overall', {}) 
+                        for result in anb_class_results.values() if 'Class I' in result)
+            
+            if has_mm:
+                f.write(f"{'Model':<20} {'Class':<10} {'N':<8} {'MRE (px)':<10} {'MRE (mm)':<10} {'2mm Acc':<10} {'4mm Acc':<10}\n")
+                f.write("-" * 88 + "\n")
+            else:
+                f.write(f"{'Model':<20} {'Class':<10} {'N':<8} {'MRE (px)':<10} {'STD (px)':<10} {'Median':<10}\n")
+                f.write("-" * 68 + "\n")
+            
+            # Write data for each model and class
+            for model_name in ['Ensemble_MLP', 'Ensemble_HRNet']:
+                if model_name in anb_class_results:
+                    model_results = anb_class_results[model_name]
+                    for class_name in ['Class I', 'Class II', 'Class III']:
+                        if class_name in model_results:
+                            class_data = model_results[class_name]
+                            overall = class_data['overall']
+                            n_patients = class_data['n_patients']
+                            
+                            if n_patients > 0:
+                                if has_mm and 'mre_mm' in overall:
+                                    acc_2mm = overall.get('accuracy_2mm', 0) * 100
+                                    acc_4mm = overall.get('accuracy_4mm', 0) * 100
+                                    f.write(f"{model_name:<20} {class_name:<10} {n_patients:<8} "
+                                           f"{overall['mre']:<10.3f} {overall['mre_mm']:<10.3f} "
+                                           f"{acc_2mm:<10.1f}% {acc_4mm:<10.1f}%\n")
+                                else:
+                                    f.write(f"{model_name:<20} {class_name:<10} {n_patients:<8} "
+                                           f"{overall['mre']:<10.3f} {overall['std']:<10.3f} "
+                                           f"{overall['median']:<10.3f}\n")
+                            else:
+                                f.write(f"{model_name:<20} {class_name:<10} {n_patients:<8} No data\n")
+                    f.write("\n")
+            
+            # Detailed landmark performance for each class
+            f.write("\nKey Landmark Performance by ANB Class:\n")
+            f.write("-" * 60 + "\n")
+            
+            key_landmarks = ['sella', 'Gonion', 'PNS', 'A_point', 'B_point', 'ANS', 'nasion']
+            
+            for class_name in ['Class I', 'Class II', 'Class III']:
+                # Check if we have data for this class
+                has_class_data = any(class_name in result and result[class_name]['n_patients'] > 0 
+                                    for result in anb_class_results.values())
+                
+                if has_class_data:
+                    f.write(f"\n{class_name}:\n")
+                    
+                    # Get patient count for this class
+                    for model_name in anb_class_results:
+                        if class_name in anb_class_results[model_name]:
+                            n_patients = anb_class_results[model_name][class_name]['n_patients']
+                            if n_patients > 0:
+                                f.write(f"  Patients: {n_patients}\n")
+                                break
+                    
+                    # Check if mm metrics are available for this class
+                    has_class_mm = False
+                    for model_name in anb_class_results:
+                        if class_name in anb_class_results[model_name]:
+                            per_landmark = anb_class_results[model_name][class_name].get('per_landmark', {})
+                            if per_landmark and any('mre_mm' in per_landmark.get(lm, {}) for lm in key_landmarks):
+                                has_class_mm = True
+                                break
+                    
+                    if has_class_mm:
+                        f.write(f"  {'Landmark':<15} {'Model':<20} {'MRE (mm)':<10} {'2mm Acc':<10} {'4mm Acc':<10}\n")
+                        f.write("  " + "-" * 65 + "\n")
+                    else:
+                        f.write(f"  {'Landmark':<15} {'Model':<20} {'MRE (px)':<10} {'STD (px)':<10}\n")
+                        f.write("  " + "-" * 55 + "\n")
+                    
+                    for landmark in key_landmarks:
+                        if landmark not in landmark_names:
+                            continue
+                        
+                        landmark_written = False
+                        for model_name in ['Ensemble_MLP', 'Ensemble_HRNet']:
+                            if model_name in anb_class_results and class_name in anb_class_results[model_name]:
+                                per_landmark = anb_class_results[model_name][class_name].get('per_landmark', {})
+                                if landmark in per_landmark:
+                                    lm_metrics = per_landmark[landmark]
+                                    landmark_display = landmark if not landmark_written else ""
+                                    landmark_written = True
+                                    
+                                    if has_class_mm and 'mre_mm' in lm_metrics:
+                                        acc_2mm = lm_metrics.get('accuracy_2mm', 0) * 100
+                                        acc_4mm = lm_metrics.get('accuracy_4mm', 0) * 100
+                                        f.write(f"  {landmark_display:<15} {model_name:<20} "
+                                               f"{lm_metrics['mre_mm']:<10.3f} "
+                                               f"{acc_2mm:<10.1f}% {acc_4mm:<10.1f}%\n")
+                                    else:
+                                        f.write(f"  {landmark_display:<15} {model_name:<20} "
+                                               f"{lm_metrics['mre']:<10.3f} "
+                                               f"{lm_metrics['std']:<10.3f}\n")
+            
+            f.write("\nNote: Patients are classified based on ground truth ANB angles.\n")
+            f.write("Class I: ANB 0-4°, Class II: ANB > 4°, Class III: ANB < 0°\n")
         
         # Summary statistics
         f.write("\n\nSUMMARY:\n")
@@ -3676,6 +4030,54 @@ def main():
         # Save angle predictions and get classification results
     classification_results = save_angle_predictions_to_csv(ensemble_hrnet, ensemble_mlp, all_hrnet_preds, all_mlp_preds, all_gt, all_patient_ids, landmark_names, output_dir, ruler_data)
     
+    # Compute and save metrics by ANB classification
+    print(f"\n📊 Computing ANB Class-Specific Metrics...")
+    
+    # Compute metrics for ensemble model by ANB class
+    ensemble_mlp_by_class = compute_metrics_by_anb_class(
+        ensemble_mlp, all_gt, landmark_names, all_patient_ids, ruler_data
+    )
+    save_anb_class_metrics_to_csv(
+        ensemble_mlp_by_class, "Ensemble_MLP", output_dir, landmark_names
+    )
+    
+    ensemble_hrnet_by_class = compute_metrics_by_anb_class(
+        ensemble_hrnet, all_gt, landmark_names, all_patient_ids, ruler_data
+    )
+    save_anb_class_metrics_to_csv(
+        ensemble_hrnet_by_class, "Ensemble_HRNet", output_dir, landmark_names
+    )
+    
+    # Store all results for comparison visualization
+    all_anb_results = {
+        'Ensemble_MLP': ensemble_mlp_by_class,
+        'Ensemble_HRNet': ensemble_hrnet_by_class
+    }
+    
+    # Compute metrics for individual models if evaluated
+    if args.evaluate_individual and all_hrnet_preds:
+        for i, (hrnet_preds, mlp_preds) in enumerate(zip(all_hrnet_preds, all_mlp_preds), 1):
+            # MLP model metrics by class
+            model_mlp_by_class = compute_metrics_by_anb_class(
+                mlp_preds, all_gt, landmark_names, all_patient_ids, ruler_data
+            )
+            save_anb_class_metrics_to_csv(
+                model_mlp_by_class, f"Model_{i}_MLP", output_dir, landmark_names
+            )
+            all_anb_results[f'Model_{i}_MLP'] = model_mlp_by_class
+            
+            # HRNet model metrics by class
+            model_hrnet_by_class = compute_metrics_by_anb_class(
+                hrnet_preds, all_gt, landmark_names, all_patient_ids, ruler_data
+            )
+            save_anb_class_metrics_to_csv(
+                model_hrnet_by_class, f"Model_{i}_HRNet", output_dir, landmark_names
+            )
+            all_anb_results[f'Model_{i}_HRNet'] = model_hrnet_by_class
+    
+    # Create comparison visualization
+    create_anb_class_comparison_visualization(all_anb_results, output_dir)
+    
     # Create patient visualizations
     create_patient_visualizations(ensemble_hrnet, ensemble_mlp, all_hrnet_preds, all_mlp_preds, all_gt, all_patient_ids, test_df, landmark_names, output_dir, ruler_data)
     
@@ -3689,7 +4091,8 @@ def main():
         output_dir=output_dir,
         n_test_samples=len(test_df),
         n_models_evaluated=len(all_hrnet_preds),
-        ruler_data=ruler_data
+        ruler_data=ruler_data,
+        anb_class_results=all_anb_results
     )
     
     print(f"\n💾 Results saved to: {output_dir}")
@@ -3698,6 +4101,11 @@ def main():
     print(f"   - Overall results JSON: overall_results.json")
     print(f"   - Test set comparison: ensemble_comparison_test.csv")
     print(f"   - Test set landmarks: key_landmarks_comparison_test.csv")
+    print(f"\n📊 ANB Class-Specific Metrics (in anb_class_metrics/):")
+    print(f"   - Overall metrics by ANB class: *_overall_metrics_by_anb_class.csv")
+    print(f"   - Per-landmark metrics for each class: *_Class_[I/II/III]_landmarks.csv")
+    print(f"   - Patient classification list: *_patients_by_anb_class.csv")
+    print(f"   - Performance comparison visualization: anb_class_performance_comparison.png")
     if validation_results:
         print(f"   - Validation comparison: ensemble_comparison_validation.csv")
         print(f"   - Validation landmarks: key_landmarks_comparison_validation.csv")
