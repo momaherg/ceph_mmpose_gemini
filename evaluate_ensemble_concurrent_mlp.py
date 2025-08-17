@@ -241,11 +241,16 @@ def calculate_cephalometric_angles(coords: np.ndarray, landmark_names: List[str]
     return angles
 
 def calculate_perpendicular_distance(point: np.ndarray, line_start: np.ndarray, line_end: np.ndarray) -> float:
-    """Calculate perpendicular distance from a point to a line defined by two points."""
+    """Calculate perpendicular distance from a point to a line defined by two points.
+    Returns negative if point is on the right side of the line, positive if on the left side."""
     # Vector from line_start to line_end
     line_vec = line_end - line_start
     # Vector from line_start to point
     point_vec = point - line_start
+    
+    # Calculate cross product to determine which side of the line the point is on
+    # In 2D, cross product gives the z-component of the 3D cross product
+    cross_product = line_vec[0] * point_vec[1] - line_vec[1] * point_vec[0]
     
     # Project point_vec onto line_vec
     line_length = np.linalg.norm(line_vec)
@@ -264,7 +269,12 @@ def calculate_perpendicular_distance(point: np.ndarray, line_start: np.ndarray, 
         closest_point = line_start + proj_length * line_unitvec
     
     # Calculate distance
-    return np.linalg.norm(point - closest_point)
+    distance = np.linalg.norm(point - closest_point)
+    
+    # Apply sign based on which side of the line the point is on
+    # If cross product is negative, point is on the right side (negative distance)
+    # If cross product is positive, point is on the left side (positive distance)
+    return distance if cross_product >= 0 else -distance
 
 def calculate_soft_tissue_measurements(coords: np.ndarray, landmark_names: List[str]) -> Dict[str, float]:
     """Calculate soft tissue measurements including Nasolabial angle and E-line distances."""
