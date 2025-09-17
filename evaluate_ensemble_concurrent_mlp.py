@@ -2221,6 +2221,7 @@ def save_angle_predictions_to_csv(ensemble_hrnet: np.ndarray, ensemble_mlp: np.n
     # Create comprehensive visualization
     create_angle_error_visualization(ensemble_angle_df, angle_names, soft_tissue_names, output_dir)
     create_classification_visualization(classification_results, output_dir)
+    save_confusion_matrices(classification_results, output_dir)
     
     # Return classification results for the overall report
     return classification_results
@@ -3194,6 +3195,125 @@ def save_overall_results_report(results: Dict[str, Dict], validation_results: Di
         else:
             f.write("Angle data not available (ensemble_angle_predictions.csv not found)\n")
         
+        # Soft tissue measurements section
+        f.write("\n\nSOFT TISSUE MEASUREMENTS PERFORMANCE (TEST SET):\n")
+        f.write("-" * 30 + "\n")
+        
+        # Try to load soft tissue data from the ensemble angle predictions file
+        angle_csv_path = os.path.join(output_dir, "ensemble_angle_predictions.csv")
+        if os.path.exists(angle_csv_path):
+            try:
+                angle_df = pd.read_csv(angle_csv_path)
+                
+                # Soft tissue measurements (nasolabial angle and E-line distances)
+                f.write("\nSoft tissue measurement statistics:\n\n")
+                
+                # Nasolabial angle (in degrees)
+                f.write("Nasolabial Angle (°):\n")
+                f.write(f"{'Model':<25} {'Mean Error (°)':<15} {'2° Accuracy':<12} {'4° Accuracy':<12} {'Count':<8}\n")
+                f.write("-" * 72 + "\n")
+                
+                for model_name in ['ensemble_hrnetv2', 'ensemble_mlp']:
+                    model_display = 'Ensemble HRNetV2' if model_name == 'ensemble_hrnetv2' else 'Ensemble MLP'
+                    error_col = f'{model_name}_nasolabial_angle_error'
+                    
+                    if error_col in angle_df.columns:
+                        errors = angle_df[error_col].dropna()
+                        if len(errors) > 0:
+                            mean_error = errors.mean()
+                            accurate_2deg_count = (errors <= 2.0).sum()
+                            accurate_4deg_count = (errors <= 4.0).sum()
+                            total_count = len(errors)
+                            accuracy_2deg = accurate_2deg_count / total_count if total_count > 0 else 0
+                            accuracy_4deg = accurate_4deg_count / total_count if total_count > 0 else 0
+                            
+                            f.write(f"{model_display:<25} {mean_error:<15.2f} "
+                                   f"{accuracy_2deg:<12.1%} {accuracy_4deg:<12.1%} {total_count:<8}\n")
+                
+                # E-line distances
+                f.write("\n\nE-Line Distances:\n")
+                f.write("-" * 30 + "\n")
+                
+                # Check if mm data is available
+                has_eline_mm = False
+                for col in angle_df.columns:
+                    if 'upper_lip_to_eline_error_mm' in col or 'lower_lip_to_eline_error_mm' in col:
+                        has_eline_mm = True
+                        break
+                
+                # Upper lip to E-line
+                f.write("\nUpper Lip to E-Line:\n")
+                if has_eline_mm:
+                    f.write(f"{'Model':<25} {'Mean Error (px)':<15} {'Mean Error (mm)':<15} {'Count':<8}\n")
+                    f.write("-" * 63 + "\n")
+                else:
+                    f.write(f"{'Model':<25} {'Mean Error (224px)':<18} {'Mean Error (600px)':<18} {'Count':<8}\n")
+                    f.write("-" * 69 + "\n")
+                
+                for model_name in ['ensemble_hrnetv2', 'ensemble_mlp']:
+                    model_display = 'Ensemble HRNetV2' if model_name == 'ensemble_hrnetv2' else 'Ensemble MLP'
+                    
+                    # Look for error columns
+                    error_col_224 = f'{model_name}_upper_lip_to_eline_error_224px'
+                    error_col_600 = f'{model_name}_upper_lip_to_eline_error_600px'
+                    error_col_mm = f'{model_name}_upper_lip_to_eline_error_mm'
+                    
+                    if error_col_224 in angle_df.columns:
+                        errors_224 = angle_df[error_col_224].dropna()
+                        if len(errors_224) > 0:
+                            mean_error_224 = errors_224.mean()
+                            
+                            if has_eline_mm and error_col_mm in angle_df.columns:
+                                errors_mm = angle_df[error_col_mm].dropna()
+                                mean_error_mm = errors_mm.mean() if len(errors_mm) > 0 else np.nan
+                                f.write(f"{model_display:<25} {mean_error_224:<15.3f} {mean_error_mm:<15.3f} {len(errors_224):<8}\n")
+                            else:
+                                errors_600 = angle_df[error_col_600].dropna() if error_col_600 in angle_df.columns else pd.Series()
+                                mean_error_600 = errors_600.mean() if len(errors_600) > 0 else mean_error_224 * SCALE_FACTOR
+                                f.write(f"{model_display:<25} {mean_error_224:<18.3f} {mean_error_600:<18.3f} {len(errors_224):<8}\n")
+                
+                # Lower lip to E-line
+                f.write("\nLower Lip to E-Line:\n")
+                if has_eline_mm:
+                    f.write(f"{'Model':<25} {'Mean Error (px)':<15} {'Mean Error (mm)':<15} {'Count':<8}\n")
+                    f.write("-" * 63 + "\n")
+                else:
+                    f.write(f"{'Model':<25} {'Mean Error (224px)':<18} {'Mean Error (600px)':<18} {'Count':<8}\n")
+                    f.write("-" * 69 + "\n")
+                
+                for model_name in ['ensemble_hrnetv2', 'ensemble_mlp']:
+                    model_display = 'Ensemble HRNetV2' if model_name == 'ensemble_hrnetv2' else 'Ensemble MLP'
+                    
+                    # Look for error columns
+                    error_col_224 = f'{model_name}_lower_lip_to_eline_error_224px'
+                    error_col_600 = f'{model_name}_lower_lip_to_eline_error_600px'
+                    error_col_mm = f'{model_name}_lower_lip_to_eline_error_mm'
+                    
+                    if error_col_224 in angle_df.columns:
+                        errors_224 = angle_df[error_col_224].dropna()
+                        if len(errors_224) > 0:
+                            mean_error_224 = errors_224.mean()
+                            
+                            if has_eline_mm and error_col_mm in angle_df.columns:
+                                errors_mm = angle_df[error_col_mm].dropna()
+                                mean_error_mm = errors_mm.mean() if len(errors_mm) > 0 else np.nan
+                                f.write(f"{model_display:<25} {mean_error_224:<15.3f} {mean_error_mm:<15.3f} {len(errors_224):<8}\n")
+                            else:
+                                errors_600 = angle_df[error_col_600].dropna() if error_col_600 in angle_df.columns else pd.Series()
+                                mean_error_600 = errors_600.mean() if len(errors_600) > 0 else mean_error_224 * SCALE_FACTOR
+                                f.write(f"{model_display:<25} {mean_error_224:<18.3f} {mean_error_600:<18.3f} {len(errors_224):<8}\n")
+                
+                # Add notes about E-line measurements
+                f.write("\nNote: E-line distances represent perpendicular distance from lip points to E-line (Tip of nose - ST Pogonion).\n")
+                f.write("Negative values indicate points are behind the E-line.\n")
+                if has_eline_mm:
+                    f.write("Millimeter values are calculated using patient-specific ruler calibration.\n")
+                
+            except Exception as e:
+                f.write(f"Could not load soft tissue data: {e}\n")
+        else:
+            f.write("Soft tissue data not available (ensemble_angle_predictions.csv not found)\n")
+        
         # Classification results if available
         if classification_results:
             f.write("\n\nPATIENT CLASSIFICATION RESULTS:\n")
@@ -3441,6 +3561,10 @@ def save_overall_results_report(results: Dict[str, Dict], validation_results: Di
         f.write("  - angle_error_analysis.png\n")
         f.write("  - classification_analysis.png (comprehensive classification results)\n")
         f.write("  - classification_results_summary.csv (detailed classification metrics)\n")
+        f.write("  - confusion_matrices/ (confusion matrices for all angle classifications)\n")
+        f.write("    - ANB_confusion_matrix_comparison.png (side-by-side comparison)\n")
+        f.write("    - [Angle]_[Model]_confusion_matrix.csv (raw confusion matrix data)\n")
+        f.write("    - [Angle]_[Model]_confusion_matrix.png (heatmap visualizations)\n")
         f.write("  - patient_visualizations/\n")
         
         f.write("\n" + "="*80 + "\n")
@@ -3757,6 +3881,143 @@ def save_classification_results_to_csv(classification_results: Dict[str, Dict], 
     
     print(f"   ✓ Classification results summary saved to: {os.path.basename(csv_path)}")
 
+def save_confusion_matrices(classification_results: Dict[str, Dict], output_dir: str):
+    """Save confusion matrices for all angle classifications as CSV files and visualizations."""
+    import seaborn as sns
+    
+    # Create subdirectory for confusion matrices
+    cm_dir = os.path.join(output_dir, "confusion_matrices")
+    os.makedirs(cm_dir, exist_ok=True)
+    
+    print(f"\n💾 Saving confusion matrices...")
+    
+    # Define the angle names we want to save confusion matrices for
+    angle_names_full = {
+        'ANB': 'ANB Skeletal Pattern',
+        'U1': 'Upper Incisor Inclination',
+        'L1': 'Lower Incisor Inclination',
+        'SN_ANS_PNS': 'Palatal Plane Angle',
+        'SN_MN_GO': 'Mandibular Plane Angle',
+        'SNA': 'Maxilla Position',
+        'SNB': 'Mandible Position'
+    }
+    
+    # Process each angle
+    for angle_key, angle_results in classification_results.items():
+        if not isinstance(angle_results, dict) or 'ensemble_hrnetv2' not in angle_results:
+            continue
+            
+        # Process both HRNetV2 and MLP models
+        for model_type in ['ensemble_hrnetv2', 'ensemble_mlp']:
+            if model_type not in angle_results:
+                continue
+                
+            metrics = angle_results[model_type]
+            
+            # Check if confusion matrix exists
+            if 'confusion_matrix' not in metrics or metrics['confusion_matrix'] is None:
+                continue
+            
+            cm = metrics['confusion_matrix']
+            class_names = metrics.get('class_names', [])
+            
+            if len(class_names) == 0:
+                continue
+            
+            # Model name for file naming
+            model_name = 'HRNetV2' if model_type == 'ensemble_hrnetv2' else 'MLP'
+            
+            # Save confusion matrix as CSV
+            cm_df = pd.DataFrame(cm, index=class_names, columns=class_names)
+            csv_filename = f"{angle_key}_{model_name}_confusion_matrix.csv"
+            csv_path = os.path.join(cm_dir, csv_filename)
+            cm_df.to_csv(csv_path)
+            
+            # Create visualization
+            plt.figure(figsize=(8, 6))
+            
+            # Calculate percentages
+            cm_normalized = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis] * 100
+            
+            # Create heatmap with both counts and percentages
+            annot_data = np.empty_like(cm, dtype=object)
+            for i in range(cm.shape[0]):
+                for j in range(cm.shape[1]):
+                    annot_data[i, j] = f'{cm[i, j]}\n({cm_normalized[i, j]:.1f}%)'
+            
+            sns.heatmap(cm, annot=annot_data, fmt='', cmap='Blues', 
+                       xticklabels=class_names, yticklabels=class_names,
+                       cbar_kws={'label': 'Count'})
+            
+            plt.title(f'{angle_names_full.get(angle_key, angle_key)} - {model_name}\nConfusion Matrix')
+            plt.xlabel('Predicted Class')
+            plt.ylabel('True Class')
+            plt.tight_layout()
+            
+            # Save visualization
+            png_filename = f"{angle_key}_{model_name}_confusion_matrix.png"
+            png_path = os.path.join(cm_dir, png_filename)
+            plt.savefig(png_path, dpi=150, bbox_inches='tight')
+            plt.close()
+            
+            print(f"   ✓ {angle_key} {model_name}: {csv_filename} & {png_filename}")
+    
+    # Create combined confusion matrix visualization for ANB classification
+    if 'ANB' in classification_results:
+        create_anb_confusion_matrix_comparison(classification_results['ANB'], cm_dir)
+    
+    print(f"   ✓ Confusion matrices saved to: {os.path.basename(cm_dir)}/")
+
+def create_anb_confusion_matrix_comparison(anb_results: Dict[str, Dict], output_dir: str):
+    """Create a side-by-side comparison of ANB confusion matrices for HRNetV2 and MLP."""
+    import seaborn as sns
+    
+    fig, axes = plt.subplots(1, 2, figsize=(16, 6))
+    
+    models = [('ensemble_hrnetv2', 'Ensemble HRNetV2', axes[0]), 
+              ('ensemble_mlp', 'Ensemble MLP', axes[1])]
+    
+    for model_type, model_name, ax in models:
+        if model_type not in anb_results:
+            continue
+            
+        metrics = anb_results[model_type]
+        cm = metrics.get('confusion_matrix')
+        class_names = metrics.get('class_names', [])
+        
+        if cm is None or len(class_names) == 0:
+            continue
+        
+        # Calculate percentages
+        cm_normalized = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis] * 100
+        
+        # Create annotations with both counts and percentages
+        annot_data = np.empty_like(cm, dtype=object)
+        for i in range(cm.shape[0]):
+            for j in range(cm.shape[1]):
+                annot_data[i, j] = f'{cm[i, j]}\n({cm_normalized[i, j]:.1f}%)'
+        
+        # Create heatmap
+        sns.heatmap(cm, annot=annot_data, fmt='', cmap='Blues', 
+                   xticklabels=class_names, yticklabels=class_names,
+                   cbar_kws={'label': 'Count'}, ax=ax)
+        
+        # Add metrics to title
+        accuracy = metrics.get('accuracy', 0)
+        ax.set_title(f'{model_name}\nANB Classification (Accuracy: {accuracy:.3f})')
+        ax.set_xlabel('Predicted Class')
+        ax.set_ylabel('True Class')
+    
+    plt.suptitle('ANB Angle Classification - Confusion Matrix Comparison', fontsize=16, fontweight='bold')
+    plt.tight_layout()
+    
+    # Save the comparison
+    comparison_path = os.path.join(output_dir, 'ANB_confusion_matrix_comparison.png')
+    plt.savefig(comparison_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    
+    print(f"   ✓ ANB comparison visualization saved: ANB_confusion_matrix_comparison.png")
+
 def main():
     """Main ensemble evaluation function."""
     
@@ -3797,7 +4058,8 @@ def main():
         help='Specific epoch number to evaluate (e.g., --epoch 20 will use epoch_20.pth checkpoints from all models)'
     )
     args = parser.parse_args()
-    
+    # python evaluate_ensemble_concurrent_mlp.py --base_work_dir /workspace/workdir --epoch 99 --test_split_file data/new_test.txt
+
     print("="*80)
     print("ENSEMBLE CONCURRENT JOINT MLP EVALUATION")
     print("="*80)
@@ -4230,8 +4492,13 @@ def main():
     print(f"   - Angle error analysis: angle_error_analysis.png")
     print(f"   - Classification analysis: classification_analysis.png")
     print(f"   - Classification results summary: classification_results_summary.csv")
+    print(f"\n📊 Confusion Matrices (in confusion_matrices/):")
+    print(f"   - ANB confusion matrix: ANB_HRNetV2_confusion_matrix.csv, ANB_MLP_confusion_matrix.csv")
+    print(f"   - ANB comparison visualization: ANB_confusion_matrix_comparison.png")
+    print(f"   - Additional matrices for all angle classifications (CSV + PNG)")
     print(f"   Note: Files include ALL angle classifications (ANB, SNA, SNB, U1, L1, SN/ANS-PNS, SN/Mn-Go)")
     print(f"   Note: Classifications based on clinical thresholds for each angle")
+    print(f"   Note: Confusion matrices show both counts and percentages")
     print(f"   Note: Coordinates are scaled to original 600x600 image space")
     print(f"   Note: Errors are provided in pixels (224x224 and 600x600) and mm (when calibration available)")
     if ruler_data:
