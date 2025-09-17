@@ -3206,32 +3206,83 @@ def save_overall_results_report(results: Dict[str, Dict], validation_results: Di
                     if angle_written:
                         f.write("\n")
                 
-                # Add summary of mean values
-                f.write("\nAngle Mean Values (Ground Truth vs Predictions):\n")
+                # Add comprehensive bias analysis tables
+                f.write("\n" + "="*80 + "\n")
+                f.write("BIAS ANALYSIS - MEAN VALUES AND DIFFERENCES\n")
+                f.write("="*80 + "\n")
+                
+                # Table 1: Mean values comparison
+                f.write("\nTable 1: Mean Values Comparison (All Angles)\n")
                 f.write("-" * 80 + "\n")
-                f.write(f"{'Angle':<20} {'GT Mean (°)':<15} {'HRNet Mean (°)':<18} {'MLP Mean (°)':<15}\n")
-                f.write("-" * 68 + "\n")
+                f.write(f"{'Angle':<20} {'GT Mean (°)':<15} {'MLP Mean (°)':<15} {'Difference (°)':<20} {'Interpretation':<20}\n")
+                f.write("-" * 90 + "\n")
+                
+                for angle_name in angle_names:
+                    gt_col = f'gt_{angle_name}'
+                    mlp_col = f'ensemble_mlp_{angle_name}'
+                    
+                    if gt_col in angle_df.columns and mlp_col in angle_df.columns:
+                        gt_values = angle_df[gt_col].dropna()
+                        mlp_values = angle_df[mlp_col].dropna()
+                        
+                        if len(gt_values) > 0 and len(mlp_values) > 0:
+                            gt_mean = gt_values.mean()
+                            mlp_mean = mlp_values.mean()
+                            difference = mlp_mean - gt_mean
+                            
+                            # Interpretation
+                            if abs(difference) < 0.5:
+                                interpretation = "Excellent"
+                            elif abs(difference) < 1.0:
+                                interpretation = "Good"
+                            elif abs(difference) < 2.0:
+                                interpretation = "Acceptable"
+                            else:
+                                interpretation = "Needs attention"
+                            
+                            if difference > 0:
+                                diff_str = f"+{difference:.2f} (overestimate)"
+                            else:
+                                diff_str = f"{difference:.2f} (underestimate)"
+                            
+                            f.write(f"{angle_name:<20} {gt_mean:<15.2f} {mlp_mean:<15.2f} {diff_str:<20} {interpretation:<20}\n")
+                
+                # Table 2: HRNetV2 vs MLP bias comparison
+                f.write("\n\nTable 2: Model Bias Comparison\n")
+                f.write("-" * 80 + "\n")
+                f.write(f"{'Angle':<20} {'HRNet Bias (°)':<18} {'MLP Bias (°)':<18} {'Improvement':<20}\n")
+                f.write("-" * 76 + "\n")
                 
                 for angle_name in angle_names:
                     gt_col = f'gt_{angle_name}'
                     hrnet_col = f'ensemble_hrnetv2_{angle_name}'
                     mlp_col = f'ensemble_mlp_{angle_name}'
                     
-                    if gt_col in angle_df.columns:
+                    if all(col in angle_df.columns for col in [gt_col, hrnet_col, mlp_col]):
                         gt_values = angle_df[gt_col].dropna()
-                        if len(gt_values) > 0:
+                        hrnet_values = angle_df[hrnet_col].dropna()
+                        mlp_values = angle_df[mlp_col].dropna()
+                        
+                        if len(gt_values) > 0 and len(hrnet_values) > 0 and len(mlp_values) > 0:
                             gt_mean = gt_values.mean()
+                            hrnet_bias = hrnet_values.mean() - gt_mean
+                            mlp_bias = mlp_values.mean() - gt_mean
                             
-                            hrnet_mean = angle_df[hrnet_col].dropna().mean() if hrnet_col in angle_df.columns else np.nan
-                            mlp_mean = angle_df[mlp_col].dropna().mean() if mlp_col in angle_df.columns else np.nan
+                            # Check if MLP reduced the bias
+                            bias_reduction = abs(hrnet_bias) - abs(mlp_bias)
+                            if bias_reduction > 0:
+                                improvement = f"↓ {bias_reduction:.2f}° better"
+                            else:
+                                improvement = f"↑ {-bias_reduction:.2f}° worse"
                             
-                            hrnet_mean_str = f"{hrnet_mean:.2f}" if not np.isnan(hrnet_mean) else "N/A"
-                            mlp_mean_str = f"{mlp_mean:.2f}" if not np.isnan(mlp_mean) else "N/A"
+                            hrnet_bias_str = f"{hrnet_bias:+.2f}"
+                            mlp_bias_str = f"{mlp_bias:+.2f}"
                             
-                            f.write(f"{angle_name:<20} {gt_mean:<15.2f} {hrnet_mean_str:<18} {mlp_mean_str:<15}\n")
+                            f.write(f"{angle_name:<20} {hrnet_bias_str:<18} {mlp_bias_str:<18} {improvement:<20}\n")
                 
                 f.write("\nNote: MAE = Mean Absolute Error (always positive)\n")
                 f.write("      Bias = Mean(Predictions) - Mean(Ground Truth): positive indicates overestimation, negative indicates underestimation\n")
+                f.write("      Interpretation thresholds: Excellent (<0.5°), Good (<1.0°), Acceptable (<2.0°), Needs attention (≥2.0°)\n")
                         
             except Exception as e:
                 f.write(f"Could not load angle data: {e}\n")
@@ -3406,6 +3457,185 @@ def save_overall_results_report(results: Dict[str, Dict], validation_results: Di
                 f.write("Bias = Mean(Predictions) - Mean(Ground Truth): positive bias indicates overestimation.\n")
                 if has_eline_mm:
                     f.write("Millimeter values are calculated using patient-specific ruler calibration.\n")
+                
+                # Add comprehensive soft tissue bias analysis tables
+                f.write("\n" + "="*80 + "\n")
+                f.write("SOFT TISSUE BIAS ANALYSIS - MEAN VALUES AND DIFFERENCES\n")
+                f.write("="*80 + "\n")
+                
+                # Table 1: Nasolabial Angle Mean Values
+                f.write("\nTable 1: Nasolabial Angle Mean Values\n")
+                f.write("-" * 80 + "\n")
+                f.write(f"{'Measurement':<25} {'GT Mean (°)':<15} {'MLP Mean (°)':<15} {'Difference (°)':<20} {'Interpretation':<20}\n")
+                f.write("-" * 95 + "\n")
+                
+                # Nasolabial angle
+                gt_col_nasolabial = 'gt_nasolabial_angle'
+                mlp_col_nasolabial = 'ensemble_mlp_nasolabial_angle'
+                
+                if gt_col_nasolabial in angle_df.columns and mlp_col_nasolabial in angle_df.columns:
+                    gt_values = angle_df[gt_col_nasolabial].dropna()
+                    mlp_values = angle_df[mlp_col_nasolabial].dropna()
+                    
+                    if len(gt_values) > 0 and len(mlp_values) > 0:
+                        gt_mean = gt_values.mean()
+                        mlp_mean = mlp_values.mean()
+                        difference = mlp_mean - gt_mean
+                        
+                        # Interpretation
+                        if abs(difference) < 2.0:
+                            interpretation = "Excellent"
+                        elif abs(difference) < 4.0:
+                            interpretation = "Good"
+                        elif abs(difference) < 6.0:
+                            interpretation = "Acceptable"
+                        else:
+                            interpretation = "Needs attention"
+                        
+                        if difference > 0:
+                            diff_str = f"+{difference:.2f} (overestimate)"
+                        else:
+                            diff_str = f"{difference:.2f} (underestimate)"
+                        
+                        f.write(f"{'Nasolabial Angle':<25} {gt_mean:<15.2f} {mlp_mean:<15.2f} {diff_str:<20} {interpretation:<20}\n")
+                
+                # Table 2: E-Line Distances Mean Values
+                f.write("\n\nTable 2: E-Line Distances Mean Values (pixels at 224x224)\n")
+                f.write("-" * 100 + "\n")
+                f.write(f"{'Measurement':<25} {'GT Mean':<15} {'MLP Mean':<15} {'Difference':<20} {'Interpretation':<20}\n")
+                f.write("-" * 95 + "\n")
+                
+                # Upper lip to E-line
+                gt_col_upper = 'gt_upper_lip_to_eline_224px'
+                mlp_col_upper = 'ensemble_mlp_upper_lip_to_eline_224px'
+                
+                if gt_col_upper in angle_df.columns and mlp_col_upper in angle_df.columns:
+                    gt_values_upper = angle_df[gt_col_upper].dropna()
+                    mlp_values_upper = angle_df[mlp_col_upper].dropna()
+                    
+                    if len(gt_values_upper) > 0 and len(mlp_values_upper) > 0:
+                        gt_mean_upper = gt_values_upper.mean()
+                        mlp_mean_upper = mlp_values_upper.mean()
+                        difference_upper = mlp_mean_upper - gt_mean_upper
+                        
+                        # Interpretation (using pixel thresholds)
+                        if abs(difference_upper) < 0.5:
+                            interpretation = "Excellent"
+                        elif abs(difference_upper) < 1.0:
+                            interpretation = "Good"
+                        elif abs(difference_upper) < 2.0:
+                            interpretation = "Acceptable"
+                        else:
+                            interpretation = "Needs attention"
+                        
+                        if difference_upper > 0:
+                            diff_str = f"+{difference_upper:.3f} (overestimate)"
+                        else:
+                            diff_str = f"{difference_upper:.3f} (underestimate)"
+                        
+                        f.write(f"{'Upper Lip to E-Line':<25} {gt_mean_upper:<15.3f} {mlp_mean_upper:<15.3f} {diff_str:<20} {interpretation:<20}\n")
+                
+                # Lower lip to E-line
+                gt_col_lower = 'gt_lower_lip_to_eline_224px'
+                mlp_col_lower = 'ensemble_mlp_lower_lip_to_eline_224px'
+                
+                if gt_col_lower in angle_df.columns and mlp_col_lower in angle_df.columns:
+                    gt_values_lower = angle_df[gt_col_lower].dropna()
+                    mlp_values_lower = angle_df[mlp_col_lower].dropna()
+                    
+                    if len(gt_values_lower) > 0 and len(mlp_values_lower) > 0:
+                        gt_mean_lower = gt_values_lower.mean()
+                        mlp_mean_lower = mlp_values_lower.mean()
+                        difference_lower = mlp_mean_lower - gt_mean_lower
+                        
+                        # Interpretation
+                        if abs(difference_lower) < 0.5:
+                            interpretation = "Excellent"
+                        elif abs(difference_lower) < 1.0:
+                            interpretation = "Good"
+                        elif abs(difference_lower) < 2.0:
+                            interpretation = "Acceptable"
+                        else:
+                            interpretation = "Needs attention"
+                        
+                        if difference_lower > 0:
+                            diff_str = f"+{difference_lower:.3f} (overestimate)"
+                        else:
+                            diff_str = f"{difference_lower:.3f} (underestimate)"
+                        
+                        f.write(f"{'Lower Lip to E-Line':<25} {gt_mean_lower:<15.3f} {mlp_mean_lower:<15.3f} {diff_str:<20} {interpretation:<20}\n")
+                
+                # If mm data is available, add mm table
+                if has_eline_mm:
+                    f.write("\n\nTable 3: E-Line Distances Mean Values (millimeters)\n")
+                    f.write("-" * 100 + "\n")
+                    f.write(f"{'Measurement':<25} {'GT Mean (mm)':<15} {'MLP Mean (mm)':<15} {'Difference (mm)':<20} {'Interpretation':<20}\n")
+                    f.write("-" * 95 + "\n")
+                    
+                    # Upper lip to E-line (mm)
+                    gt_col_upper_mm = 'gt_upper_lip_to_eline_mm'
+                    mlp_col_upper_mm = 'ensemble_mlp_upper_lip_to_eline_mm'
+                    
+                    if gt_col_upper_mm in angle_df.columns and mlp_col_upper_mm in angle_df.columns:
+                        gt_values_upper_mm = angle_df[gt_col_upper_mm].dropna()
+                        mlp_values_upper_mm = angle_df[mlp_col_upper_mm].dropna()
+                        
+                        if len(gt_values_upper_mm) > 0 and len(mlp_values_upper_mm) > 0:
+                            gt_mean_upper_mm = gt_values_upper_mm.mean()
+                            mlp_mean_upper_mm = mlp_values_upper_mm.mean()
+                            difference_upper_mm = mlp_mean_upper_mm - gt_mean_upper_mm
+                            
+                            # Interpretation (using mm thresholds)
+                            if abs(difference_upper_mm) < 0.5:
+                                interpretation = "Excellent"
+                            elif abs(difference_upper_mm) < 1.0:
+                                interpretation = "Good"
+                            elif abs(difference_upper_mm) < 2.0:
+                                interpretation = "Acceptable"
+                            else:
+                                interpretation = "Needs attention"
+                            
+                            if difference_upper_mm > 0:
+                                diff_str = f"+{difference_upper_mm:.3f} (overestimate)"
+                            else:
+                                diff_str = f"{difference_upper_mm:.3f} (underestimate)"
+                            
+                            f.write(f"{'Upper Lip to E-Line':<25} {gt_mean_upper_mm:<15.3f} {mlp_mean_upper_mm:<15.3f} {diff_str:<20} {interpretation:<20}\n")
+                    
+                    # Lower lip to E-line (mm)
+                    gt_col_lower_mm = 'gt_lower_lip_to_eline_mm'
+                    mlp_col_lower_mm = 'ensemble_mlp_lower_lip_to_eline_mm'
+                    
+                    if gt_col_lower_mm in angle_df.columns and mlp_col_lower_mm in angle_df.columns:
+                        gt_values_lower_mm = angle_df[gt_col_lower_mm].dropna()
+                        mlp_values_lower_mm = angle_df[mlp_col_lower_mm].dropna()
+                        
+                        if len(gt_values_lower_mm) > 0 and len(mlp_values_lower_mm) > 0:
+                            gt_mean_lower_mm = gt_values_lower_mm.mean()
+                            mlp_mean_lower_mm = mlp_values_lower_mm.mean()
+                            difference_lower_mm = mlp_mean_lower_mm - gt_mean_lower_mm
+                            
+                            # Interpretation
+                            if abs(difference_lower_mm) < 0.5:
+                                interpretation = "Excellent"
+                            elif abs(difference_lower_mm) < 1.0:
+                                interpretation = "Good"
+                            elif abs(difference_lower_mm) < 2.0:
+                                interpretation = "Acceptable"
+                            else:
+                                interpretation = "Needs attention"
+                            
+                            if difference_lower_mm > 0:
+                                diff_str = f"+{difference_lower_mm:.3f} (overestimate)"
+                            else:
+                                diff_str = f"{difference_lower_mm:.3f} (underestimate)"
+                            
+                            f.write(f"{'Lower Lip to E-Line':<25} {gt_mean_lower_mm:<15.3f} {mlp_mean_lower_mm:<15.3f} {diff_str:<20} {interpretation:<20}\n")
+                
+                f.write("\nNote: Interpretation thresholds vary by measurement type:\n")
+                f.write("      - Nasolabial angle: Excellent (<2°), Good (<4°), Acceptable (<6°), Needs attention (≥6°)\n")
+                f.write("      - E-line distances (pixels): Excellent (<0.5), Good (<1.0), Acceptable (<2.0), Needs attention (≥2.0)\n")
+                f.write("      - E-line distances (mm): Excellent (<0.5), Good (<1.0), Acceptable (<2.0), Needs attention (≥2.0)\n")
                 
             except Exception as e:
                 f.write(f"Could not load soft tissue data: {e}\n")
