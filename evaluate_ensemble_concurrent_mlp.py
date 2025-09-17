@@ -3162,18 +3162,33 @@ def save_overall_results_report(results: Dict[str, Dict], validation_results: Di
                         f.write(f"  Overall 4° Accuracy: {angle_accuracy_4deg:.1%} ({accurate_4deg_predictions}/{total_angle_predictions})\n")
                     f.write("\n")
                 
-                # Detailed angle performance table
-                f.write(f"{'Angle':<20} {'Model':<25} {'Mean Error (°)':<15} {'2° Accuracy':<12} {'4° Accuracy':<12} {'Count':<8}\n")
-                f.write("-" * 110 + "\n")
+                # Detailed angle performance table with bias analysis
+                f.write(f"{'Angle':<20} {'Model':<25} {'MAE (°)':<12} {'Bias (°)':<12} {'2° Acc':<10} {'4° Acc':<10} {'Count':<8}\n")
+                f.write("-" * 107 + "\n")
                 
                 for angle_name in angle_names:
                     angle_written = False
+                    
+                    # Get ground truth and predicted values for bias calculation
+                    gt_col = f'gt_{angle_name}'
+                    
                     for model_name in ['ensemble_hrnetv2', 'ensemble_mlp']:
                         model_display = 'Ensemble HRNetV2' if model_name == 'ensemble_hrnetv2' else 'Ensemble MLP'
                         error_col = f'{model_name}_{angle_name}_error'
+                        pred_col = f'{model_name}_{angle_name}'
                         
-                        if error_col in angle_df.columns:
+                        if error_col in angle_df.columns and pred_col in angle_df.columns and gt_col in angle_df.columns:
                             errors = angle_df[error_col].dropna()
+                            
+                            # Calculate bias (mean difference)
+                            valid_mask = angle_df[pred_col].notna() & angle_df[gt_col].notna()
+                            if valid_mask.sum() > 0:
+                                mean_pred = angle_df.loc[valid_mask, pred_col].mean()
+                                mean_gt = angle_df.loc[valid_mask, gt_col].mean()
+                                bias = mean_pred - mean_gt
+                            else:
+                                bias = np.nan
+                            
                             if len(errors) > 0:
                                 angle_display = angle_name if not angle_written else ""
                                 angle_written = True
@@ -3185,10 +3200,38 @@ def save_overall_results_report(results: Dict[str, Dict], validation_results: Di
                                 accuracy_2deg = accurate_2deg_count / total_count if total_count > 0 else 0
                                 accuracy_4deg = accurate_4deg_count / total_count if total_count > 0 else 0
                                 
-                                f.write(f"{angle_display:<20} {model_display:<25} {mean_error:<15.2f} "
-                                       f"{accuracy_2deg:<12.1%} {accuracy_4deg:<12.1%} {total_count:<8}\n")
+                                bias_str = f"{bias:+.2f}" if not np.isnan(bias) else "N/A"
+                                f.write(f"{angle_display:<20} {model_display:<25} {mean_error:<12.2f} {bias_str:<12} "
+                                       f"{accuracy_2deg:<10.1%} {accuracy_4deg:<10.1%} {total_count:<8}\n")
                     if angle_written:
                         f.write("\n")
+                
+                # Add summary of mean values
+                f.write("\nAngle Mean Values (Ground Truth vs Predictions):\n")
+                f.write("-" * 80 + "\n")
+                f.write(f"{'Angle':<20} {'GT Mean (°)':<15} {'HRNet Mean (°)':<18} {'MLP Mean (°)':<15}\n")
+                f.write("-" * 68 + "\n")
+                
+                for angle_name in angle_names:
+                    gt_col = f'gt_{angle_name}'
+                    hrnet_col = f'ensemble_hrnetv2_{angle_name}'
+                    mlp_col = f'ensemble_mlp_{angle_name}'
+                    
+                    if gt_col in angle_df.columns:
+                        gt_values = angle_df[gt_col].dropna()
+                        if len(gt_values) > 0:
+                            gt_mean = gt_values.mean()
+                            
+                            hrnet_mean = angle_df[hrnet_col].dropna().mean() if hrnet_col in angle_df.columns else np.nan
+                            mlp_mean = angle_df[mlp_col].dropna().mean() if mlp_col in angle_df.columns else np.nan
+                            
+                            hrnet_mean_str = f"{hrnet_mean:.2f}" if not np.isnan(hrnet_mean) else "N/A"
+                            mlp_mean_str = f"{mlp_mean:.2f}" if not np.isnan(mlp_mean) else "N/A"
+                            
+                            f.write(f"{angle_name:<20} {gt_mean:<15.2f} {hrnet_mean_str:<18} {mlp_mean_str:<15}\n")
+                
+                f.write("\nNote: MAE = Mean Absolute Error (always positive)\n")
+                f.write("      Bias = Mean(Predictions) - Mean(Ground Truth): positive indicates overestimation, negative indicates underestimation\n")
                         
             except Exception as e:
                 f.write(f"Could not load angle data: {e}\n")
@@ -3244,68 +3287,123 @@ def save_overall_results_report(results: Dict[str, Dict], validation_results: Di
                 # Upper lip to E-line
                 f.write("\nUpper Lip to E-Line:\n")
                 if has_eline_mm:
-                    f.write(f"{'Model':<25} {'Mean Error (px)':<15} {'Mean Error (mm)':<15} {'Count':<8}\n")
-                    f.write("-" * 63 + "\n")
+                    f.write(f"{'Model':<25} {'MAE (px)':<12} {'MAE (mm)':<12} {'Bias (px)':<12} {'Bias (mm)':<12} {'Count':<8}\n")
+                    f.write("-" * 81 + "\n")
                 else:
-                    f.write(f"{'Model':<25} {'Mean Error (224px)':<18} {'Mean Error (600px)':<18} {'Count':<8}\n")
-                    f.write("-" * 69 + "\n")
+                    f.write(f"{'Model':<25} {'MAE (224px)':<15} {'MAE (600px)':<15} {'Bias (224px)':<15} {'Count':<8}\n")
+                    f.write("-" * 78 + "\n")
                 
                 for model_name in ['ensemble_hrnetv2', 'ensemble_mlp']:
                     model_display = 'Ensemble HRNetV2' if model_name == 'ensemble_hrnetv2' else 'Ensemble MLP'
                     
-                    # Look for error columns
+                    # Look for error and value columns
                     error_col_224 = f'{model_name}_upper_lip_to_eline_error_224px'
                     error_col_600 = f'{model_name}_upper_lip_to_eline_error_600px'
                     error_col_mm = f'{model_name}_upper_lip_to_eline_error_mm'
+                    pred_col_224 = f'{model_name}_upper_lip_to_eline_224px'
+                    pred_col_mm = f'{model_name}_upper_lip_to_eline_mm'
+                    gt_col_224 = 'gt_upper_lip_to_eline_224px'
+                    gt_col_mm = 'gt_upper_lip_to_eline_mm'
                     
                     if error_col_224 in angle_df.columns:
                         errors_224 = angle_df[error_col_224].dropna()
                         if len(errors_224) > 0:
                             mean_error_224 = errors_224.mean()
                             
+                            # Calculate bias
+                            bias_224 = np.nan
+                            bias_mm = np.nan
+                            if pred_col_224 in angle_df.columns and gt_col_224 in angle_df.columns:
+                                valid_mask = angle_df[pred_col_224].notna() & angle_df[gt_col_224].notna()
+                                if valid_mask.sum() > 0:
+                                    mean_pred_224 = angle_df.loc[valid_mask, pred_col_224].mean()
+                                    mean_gt_224 = angle_df.loc[valid_mask, gt_col_224].mean()
+                                    bias_224 = mean_pred_224 - mean_gt_224
+                            
                             if has_eline_mm and error_col_mm in angle_df.columns:
                                 errors_mm = angle_df[error_col_mm].dropna()
                                 mean_error_mm = errors_mm.mean() if len(errors_mm) > 0 else np.nan
-                                f.write(f"{model_display:<25} {mean_error_224:<15.3f} {mean_error_mm:<15.3f} {len(errors_224):<8}\n")
+                                
+                                # Calculate mm bias
+                                if pred_col_mm in angle_df.columns and gt_col_mm in angle_df.columns:
+                                    valid_mask_mm = angle_df[pred_col_mm].notna() & angle_df[gt_col_mm].notna()
+                                    if valid_mask_mm.sum() > 0:
+                                        mean_pred_mm = angle_df.loc[valid_mask_mm, pred_col_mm].mean()
+                                        mean_gt_mm = angle_df.loc[valid_mask_mm, gt_col_mm].mean()
+                                        bias_mm = mean_pred_mm - mean_gt_mm
+                                
+                                bias_224_str = f"{bias_224:+.3f}" if not np.isnan(bias_224) else "N/A"
+                                bias_mm_str = f"{bias_mm:+.3f}" if not np.isnan(bias_mm) else "N/A"
+                                f.write(f"{model_display:<25} {mean_error_224:<12.3f} {mean_error_mm:<12.3f} {bias_224_str:<12} {bias_mm_str:<12} {len(errors_224):<8}\n")
                             else:
                                 errors_600 = angle_df[error_col_600].dropna() if error_col_600 in angle_df.columns else pd.Series()
                                 mean_error_600 = errors_600.mean() if len(errors_600) > 0 else mean_error_224 * SCALE_FACTOR
-                                f.write(f"{model_display:<25} {mean_error_224:<18.3f} {mean_error_600:<18.3f} {len(errors_224):<8}\n")
+                                bias_600 = bias_224 * SCALE_FACTOR if not np.isnan(bias_224) else np.nan
+                                bias_224_str = f"{bias_224:+.3f}" if not np.isnan(bias_224) else "N/A"
+                                f.write(f"{model_display:<25} {mean_error_224:<15.3f} {mean_error_600:<15.3f} {bias_224_str:<15} {len(errors_224):<8}\n")
                 
                 # Lower lip to E-line
                 f.write("\nLower Lip to E-Line:\n")
                 if has_eline_mm:
-                    f.write(f"{'Model':<25} {'Mean Error (px)':<15} {'Mean Error (mm)':<15} {'Count':<8}\n")
-                    f.write("-" * 63 + "\n")
+                    f.write(f"{'Model':<25} {'MAE (px)':<12} {'MAE (mm)':<12} {'Bias (px)':<12} {'Bias (mm)':<12} {'Count':<8}\n")
+                    f.write("-" * 81 + "\n")
                 else:
-                    f.write(f"{'Model':<25} {'Mean Error (224px)':<18} {'Mean Error (600px)':<18} {'Count':<8}\n")
-                    f.write("-" * 69 + "\n")
+                    f.write(f"{'Model':<25} {'MAE (224px)':<15} {'MAE (600px)':<15} {'Bias (224px)':<15} {'Count':<8}\n")
+                    f.write("-" * 78 + "\n")
                 
                 for model_name in ['ensemble_hrnetv2', 'ensemble_mlp']:
                     model_display = 'Ensemble HRNetV2' if model_name == 'ensemble_hrnetv2' else 'Ensemble MLP'
                     
-                    # Look for error columns
+                    # Look for error and value columns
                     error_col_224 = f'{model_name}_lower_lip_to_eline_error_224px'
                     error_col_600 = f'{model_name}_lower_lip_to_eline_error_600px'
                     error_col_mm = f'{model_name}_lower_lip_to_eline_error_mm'
+                    pred_col_224 = f'{model_name}_lower_lip_to_eline_224px'
+                    pred_col_mm = f'{model_name}_lower_lip_to_eline_mm'
+                    gt_col_224 = 'gt_lower_lip_to_eline_224px'
+                    gt_col_mm = 'gt_lower_lip_to_eline_mm'
                     
                     if error_col_224 in angle_df.columns:
                         errors_224 = angle_df[error_col_224].dropna()
                         if len(errors_224) > 0:
                             mean_error_224 = errors_224.mean()
                             
+                            # Calculate bias
+                            bias_224 = np.nan
+                            bias_mm = np.nan
+                            if pred_col_224 in angle_df.columns and gt_col_224 in angle_df.columns:
+                                valid_mask = angle_df[pred_col_224].notna() & angle_df[gt_col_224].notna()
+                                if valid_mask.sum() > 0:
+                                    mean_pred_224 = angle_df.loc[valid_mask, pred_col_224].mean()
+                                    mean_gt_224 = angle_df.loc[valid_mask, gt_col_224].mean()
+                                    bias_224 = mean_pred_224 - mean_gt_224
+                            
                             if has_eline_mm and error_col_mm in angle_df.columns:
                                 errors_mm = angle_df[error_col_mm].dropna()
                                 mean_error_mm = errors_mm.mean() if len(errors_mm) > 0 else np.nan
-                                f.write(f"{model_display:<25} {mean_error_224:<15.3f} {mean_error_mm:<15.3f} {len(errors_224):<8}\n")
+                                
+                                # Calculate mm bias
+                                if pred_col_mm in angle_df.columns and gt_col_mm in angle_df.columns:
+                                    valid_mask_mm = angle_df[pred_col_mm].notna() & angle_df[gt_col_mm].notna()
+                                    if valid_mask_mm.sum() > 0:
+                                        mean_pred_mm = angle_df.loc[valid_mask_mm, pred_col_mm].mean()
+                                        mean_gt_mm = angle_df.loc[valid_mask_mm, gt_col_mm].mean()
+                                        bias_mm = mean_pred_mm - mean_gt_mm
+                                
+                                bias_224_str = f"{bias_224:+.3f}" if not np.isnan(bias_224) else "N/A"
+                                bias_mm_str = f"{bias_mm:+.3f}" if not np.isnan(bias_mm) else "N/A"
+                                f.write(f"{model_display:<25} {mean_error_224:<12.3f} {mean_error_mm:<12.3f} {bias_224_str:<12} {bias_mm_str:<12} {len(errors_224):<8}\n")
                             else:
                                 errors_600 = angle_df[error_col_600].dropna() if error_col_600 in angle_df.columns else pd.Series()
                                 mean_error_600 = errors_600.mean() if len(errors_600) > 0 else mean_error_224 * SCALE_FACTOR
-                                f.write(f"{model_display:<25} {mean_error_224:<18.3f} {mean_error_600:<18.3f} {len(errors_224):<8}\n")
+                                bias_600 = bias_224 * SCALE_FACTOR if not np.isnan(bias_224) else np.nan
+                                bias_224_str = f"{bias_224:+.3f}" if not np.isnan(bias_224) else "N/A"
+                                f.write(f"{model_display:<25} {mean_error_224:<15.3f} {mean_error_600:<15.3f} {bias_224_str:<15} {len(errors_224):<8}\n")
                 
                 # Add notes about E-line measurements
                 f.write("\nNote: E-line distances represent perpendicular distance from lip points to E-line (Tip of nose - ST Pogonion).\n")
                 f.write("Negative values indicate points are behind the E-line.\n")
+                f.write("Bias = Mean(Predictions) - Mean(Ground Truth): positive bias indicates overestimation.\n")
                 if has_eline_mm:
                     f.write("Millimeter values are calculated using patient-specific ruler calibration.\n")
                 
@@ -3682,9 +3780,21 @@ def save_overall_results_report(results: Dict[str, Dict], validation_results: Di
                             accuracy_2deg = accurate_2deg_count / total_count if total_count > 0 else 0
                             accuracy_4deg = accurate_4deg_count / total_count if total_count > 0 else 0
                             
+                            # Calculate bias for JSON report
+                            bias = np.nan
+                            gt_col = f'gt_{angle_name}'
+                            pred_col = f'{model_name}_{angle_name}'
+                            if gt_col in angle_df.columns and pred_col in angle_df.columns:
+                                valid_mask = angle_df[pred_col].notna() & angle_df[gt_col].notna()
+                                if valid_mask.sum() > 0:
+                                    mean_pred = angle_df.loc[valid_mask, pred_col].mean()
+                                    mean_gt = angle_df.loc[valid_mask, gt_col].mean()
+                                    bias = mean_pred - mean_gt
+                            
                             json_report['angle_results'][model_display][angle_name] = {
                                 'mean_error': float(mean_error),
                                 'std_error': float(std_error),
+                                'bias': float(bias) if not np.isnan(bias) else None,
                                 'accuracy_2deg': float(accuracy_2deg),
                                 'accuracy_4deg': float(accuracy_4deg),
                                 'accurate_2deg_count': int(accurate_2deg_count),
