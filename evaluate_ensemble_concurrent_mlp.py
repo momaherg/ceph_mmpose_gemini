@@ -274,7 +274,7 @@ def calculate_perpendicular_distance(point: np.ndarray, line_start: np.ndarray, 
     # Apply sign based on which side of the line the point is on
     # If cross product is negative, point is on the right side (negative distance)
     # If cross product is positive, point is on the left side (positive distance)
-    return distance if cross_product >= 0 else -distance
+    return -distance if cross_product >= 0 else distance
 
 def calculate_soft_tissue_measurements(coords: np.ndarray, landmark_names: List[str]) -> Dict[str, float]:
     """Calculate soft tissue measurements including Nasolabial angle and E-line distances."""
@@ -3529,9 +3529,9 @@ def save_overall_results_report(results: Dict[str, Dict], validation_results: Di
                             interpretation = "Needs attention"
                         
                         if difference_upper > 0:
-                            diff_str = f"+{difference_upper:.3f} (overestimate)"
+                            diff_str = f"+{difference_upper:.3f} (more anterior)"
                         else:
-                            diff_str = f"{difference_upper:.3f} (underestimate)"
+                            diff_str = f"{difference_upper:.3f} (more posterior)"
                         
                         f.write(f"{'Upper Lip to E-Line':<25} {gt_mean_upper:<15.3f} {mlp_mean_upper:<15.3f} {diff_str:<20} {interpretation:<20}\n")
                 
@@ -3559,9 +3559,9 @@ def save_overall_results_report(results: Dict[str, Dict], validation_results: Di
                             interpretation = "Needs attention"
                         
                         if difference_lower > 0:
-                            diff_str = f"+{difference_lower:.3f} (overestimate)"
+                            diff_str = f"+{difference_lower:.3f} (more anterior)"
                         else:
-                            diff_str = f"{difference_lower:.3f} (underestimate)"
+                            diff_str = f"{difference_lower:.3f} (more posterior)"
                         
                         f.write(f"{'Lower Lip to E-Line':<25} {gt_mean_lower:<15.3f} {mlp_mean_lower:<15.3f} {diff_str:<20} {interpretation:<20}\n")
                 
@@ -3596,9 +3596,9 @@ def save_overall_results_report(results: Dict[str, Dict], validation_results: Di
                                 interpretation = "Needs attention"
                             
                             if difference_upper_mm > 0:
-                                diff_str = f"+{difference_upper_mm:.3f} (overestimate)"
+                                diff_str = f"+{difference_upper_mm:.3f} (more anterior)"
                             else:
-                                diff_str = f"{difference_upper_mm:.3f} (underestimate)"
+                                diff_str = f"{difference_upper_mm:.3f} (more posterior)"
                             
                             f.write(f"{'Upper Lip to E-Line':<25} {gt_mean_upper_mm:<15.3f} {mlp_mean_upper_mm:<15.3f} {diff_str:<20} {interpretation:<20}\n")
                     
@@ -3626,9 +3626,9 @@ def save_overall_results_report(results: Dict[str, Dict], validation_results: Di
                                 interpretation = "Needs attention"
                             
                             if difference_lower_mm > 0:
-                                diff_str = f"+{difference_lower_mm:.3f} (overestimate)"
+                                diff_str = f"+{difference_lower_mm:.3f} (more anterior)"
                             else:
-                                diff_str = f"{difference_lower_mm:.3f} (underestimate)"
+                                diff_str = f"{difference_lower_mm:.3f} (more posterior)"
                             
                             f.write(f"{'Lower Lip to E-Line':<25} {gt_mean_lower_mm:<15.3f} {mlp_mean_lower_mm:<15.3f} {diff_str:<20} {interpretation:<20}\n")
                 
@@ -3636,6 +3636,13 @@ def save_overall_results_report(results: Dict[str, Dict], validation_results: Di
                 f.write("      - Nasolabial angle: Excellent (<2°), Good (<4°), Acceptable (<6°), Needs attention (≥6°)\n")
                 f.write("      - E-line distances (pixels): Excellent (<0.5), Good (<1.0), Acceptable (<2.0), Needs attention (≥2.0)\n")
                 f.write("      - E-line distances (mm): Excellent (<0.5), Good (<1.0), Acceptable (<2.0), Needs attention (≥2.0)\n")
+                f.write("\nE-line Distance Interpretation:\n")
+                f.write("      - Negative values: Lip is posterior to (behind) the E-line\n")
+                f.write("      - Positive values: Lip is anterior to (in front of) the E-line\n")
+                f.write("      - Positive bias: Model predicts lips more anterior (forward) than ground truth\n")
+                f.write("      - Negative bias: Model predicts lips more posterior (backward) than ground truth\n")
+                f.write("\n      Example: If GT mean = -2.0mm and MLP mean = -1.5mm, bias = +0.5mm (more anterior)\n")
+                f.write("               This means MLP predicts lips 0.5mm more forward than they actually are.\n")
                 
             except Exception as e:
                 f.write(f"Could not load soft tissue data: {e}\n")
