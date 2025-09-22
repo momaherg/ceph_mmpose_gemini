@@ -3211,11 +3211,11 @@ def save_overall_results_report(results: Dict[str, Dict], validation_results: Di
                 f.write("BIAS ANALYSIS - MEAN VALUES AND DIFFERENCES\n")
                 f.write("="*80 + "\n")
                 
-                # Table 1: Mean values comparison
-                f.write("\nTable 1: Mean Values Comparison (All Angles)\n")
-                f.write("-" * 80 + "\n")
-                f.write(f"{'Angle':<20} {'GT Mean (°)':<15} {'MLP Mean (°)':<15} {'Difference (°)':<20} {'Interpretation':<20}\n")
-                f.write("-" * 90 + "\n")
+                # Table 1: Mean values comparison with standard deviation
+                f.write("\nTable 1: Mean Values and Standard Deviations (All Angles)\n")
+                f.write("-" * 110 + "\n")
+                f.write(f"{'Angle':<20} {'GT Mean±SD (°)':<20} {'MLP Mean±SD (°)':<20} {'Difference (°)':<20} {'Interpretation':<20}\n")
+                f.write("-" * 110 + "\n")
                 
                 for angle_name in angle_names:
                     gt_col = f'gt_{angle_name}'
@@ -3227,7 +3227,9 @@ def save_overall_results_report(results: Dict[str, Dict], validation_results: Di
                         
                         if len(gt_values) > 0 and len(mlp_values) > 0:
                             gt_mean = gt_values.mean()
+                            gt_std = gt_values.std()
                             mlp_mean = mlp_values.mean()
+                            mlp_std = mlp_values.std()
                             difference = mlp_mean - gt_mean
                             
                             # Interpretation
@@ -3245,7 +3247,10 @@ def save_overall_results_report(results: Dict[str, Dict], validation_results: Di
                             else:
                                 diff_str = f"{difference:.2f} (underestimate)"
                             
-                            f.write(f"{angle_name:<20} {gt_mean:<15.2f} {mlp_mean:<15.2f} {diff_str:<20} {interpretation:<20}\n")
+                            gt_str = f"{gt_mean:.2f}±{gt_std:.2f}"
+                            mlp_str = f"{mlp_mean:.2f}±{mlp_std:.2f}"
+                            
+                            f.write(f"{angle_name:<20} {gt_str:<20} {mlp_str:<20} {diff_str:<20} {interpretation:<20}\n")
                 
                 # Table 2: HRNetV2 vs MLP bias comparison
                 f.write("\n\nTable 2: Model Bias Comparison\n")
@@ -3463,11 +3468,11 @@ def save_overall_results_report(results: Dict[str, Dict], validation_results: Di
                 f.write("SOFT TISSUE BIAS ANALYSIS - MEAN VALUES AND DIFFERENCES\n")
                 f.write("="*80 + "\n")
                 
-                # Table 1: Nasolabial Angle Mean Values
-                f.write("\nTable 1: Nasolabial Angle Mean Values\n")
-                f.write("-" * 80 + "\n")
-                f.write(f"{'Measurement':<25} {'GT Mean (°)':<15} {'MLP Mean (°)':<15} {'Difference (°)':<20} {'Interpretation':<20}\n")
-                f.write("-" * 95 + "\n")
+                # Table 1: Nasolabial Angle Mean Values with Standard Deviation
+                f.write("\nTable 1: Nasolabial Angle Mean Values and Standard Deviations\n")
+                f.write("-" * 110 + "\n")
+                f.write(f"{'Measurement':<25} {'GT Mean±SD (°)':<20} {'MLP Mean±SD (°)':<20} {'Difference (°)':<20} {'Interpretation':<20}\n")
+                f.write("-" * 110 + "\n")
                 
                 # Nasolabial angle
                 gt_col_nasolabial = 'gt_nasolabial_angle'
@@ -3479,7 +3484,9 @@ def save_overall_results_report(results: Dict[str, Dict], validation_results: Di
                     
                     if len(gt_values) > 0 and len(mlp_values) > 0:
                         gt_mean = gt_values.mean()
+                        gt_std = gt_values.std()
                         mlp_mean = mlp_values.mean()
+                        mlp_std = mlp_values.std()
                         difference = mlp_mean - gt_mean
                         
                         # Interpretation
@@ -3497,13 +3504,16 @@ def save_overall_results_report(results: Dict[str, Dict], validation_results: Di
                         else:
                             diff_str = f"{difference:.2f} (underestimate)"
                         
-                        f.write(f"{'Nasolabial Angle':<25} {gt_mean:<15.2f} {mlp_mean:<15.2f} {diff_str:<20} {interpretation:<20}\n")
+                        gt_str = f"{gt_mean:.2f}±{gt_std:.2f}"
+                        mlp_str = f"{mlp_mean:.2f}±{mlp_std:.2f}"
+                        
+                        f.write(f"{'Nasolabial Angle':<25} {gt_str:<20} {mlp_str:<20} {diff_str:<20} {interpretation:<20}\n")
                 
-                # Table 2: E-Line Distances Mean Values
-                f.write("\n\nTable 2: E-Line Distances Mean Values (pixels at 224x224)\n")
-                f.write("-" * 100 + "\n")
-                f.write(f"{'Measurement':<25} {'GT Mean':<15} {'MLP Mean':<15} {'Difference':<20} {'Interpretation':<20}\n")
-                f.write("-" * 95 + "\n")
+                # Table 2: E-Line Distances Mean Values with Standard Deviation
+                f.write("\n\nTable 2: E-Line Distances Mean Values and Standard Deviations (pixels at 224x224)\n")
+                f.write("-" * 120 + "\n")
+                f.write(f"{'Measurement':<25} {'GT Mean±SD':<20} {'MLP Mean±SD':<20} {'Difference':<20} {'Interpretation':<20}\n")
+                f.write("-" * 120 + "\n")
                 
                 # Upper lip to E-line
                 gt_col_upper = 'gt_upper_lip_to_eline_224px'
@@ -3515,7 +3525,9 @@ def save_overall_results_report(results: Dict[str, Dict], validation_results: Di
                     
                     if len(gt_values_upper) > 0 and len(mlp_values_upper) > 0:
                         gt_mean_upper = gt_values_upper.mean()
+                        gt_std_upper = gt_values_upper.std()
                         mlp_mean_upper = mlp_values_upper.mean()
+                        mlp_std_upper = mlp_values_upper.std()
                         difference_upper = mlp_mean_upper - gt_mean_upper
                         
                         # Interpretation (using pixel thresholds)
@@ -3533,7 +3545,10 @@ def save_overall_results_report(results: Dict[str, Dict], validation_results: Di
                         else:
                             diff_str = f"{difference_upper:.3f} (more posterior)"
                         
-                        f.write(f"{'Upper Lip to E-Line':<25} {gt_mean_upper:<15.3f} {mlp_mean_upper:<15.3f} {diff_str:<20} {interpretation:<20}\n")
+                        gt_str = f"{gt_mean_upper:.3f}±{gt_std_upper:.3f}"
+                        mlp_str = f"{mlp_mean_upper:.3f}±{mlp_std_upper:.3f}"
+                        
+                        f.write(f"{'Upper Lip to E-Line':<25} {gt_str:<20} {mlp_str:<20} {diff_str:<20} {interpretation:<20}\n")
                 
                 # Lower lip to E-line
                 gt_col_lower = 'gt_lower_lip_to_eline_224px'
@@ -3545,7 +3560,9 @@ def save_overall_results_report(results: Dict[str, Dict], validation_results: Di
                     
                     if len(gt_values_lower) > 0 and len(mlp_values_lower) > 0:
                         gt_mean_lower = gt_values_lower.mean()
+                        gt_std_lower = gt_values_lower.std()
                         mlp_mean_lower = mlp_values_lower.mean()
+                        mlp_std_lower = mlp_values_lower.std()
                         difference_lower = mlp_mean_lower - gt_mean_lower
                         
                         # Interpretation
@@ -3563,14 +3580,17 @@ def save_overall_results_report(results: Dict[str, Dict], validation_results: Di
                         else:
                             diff_str = f"{difference_lower:.3f} (more posterior)"
                         
-                        f.write(f"{'Lower Lip to E-Line':<25} {gt_mean_lower:<15.3f} {mlp_mean_lower:<15.3f} {diff_str:<20} {interpretation:<20}\n")
+                        gt_str = f"{gt_mean_lower:.3f}±{gt_std_lower:.3f}"
+                        mlp_str = f"{mlp_mean_lower:.3f}±{mlp_std_lower:.3f}"
+                        
+                        f.write(f"{'Lower Lip to E-Line':<25} {gt_str:<20} {mlp_str:<20} {diff_str:<20} {interpretation:<20}\n")
                 
                 # If mm data is available, add mm table
                 if has_eline_mm:
-                    f.write("\n\nTable 3: E-Line Distances Mean Values (millimeters)\n")
-                    f.write("-" * 100 + "\n")
-                    f.write(f"{'Measurement':<25} {'GT Mean (mm)':<15} {'MLP Mean (mm)':<15} {'Difference (mm)':<20} {'Interpretation':<20}\n")
-                    f.write("-" * 95 + "\n")
+                    f.write("\n\nTable 3: E-Line Distances Mean Values and Standard Deviations (millimeters)\n")
+                    f.write("-" * 120 + "\n")
+                    f.write(f"{'Measurement':<25} {'GT Mean±SD (mm)':<20} {'MLP Mean±SD (mm)':<20} {'Difference (mm)':<20} {'Interpretation':<20}\n")
+                    f.write("-" * 120 + "\n")
                     
                     # Upper lip to E-line (mm)
                     gt_col_upper_mm = 'gt_upper_lip_to_eline_mm'
@@ -3582,7 +3602,9 @@ def save_overall_results_report(results: Dict[str, Dict], validation_results: Di
                         
                         if len(gt_values_upper_mm) > 0 and len(mlp_values_upper_mm) > 0:
                             gt_mean_upper_mm = gt_values_upper_mm.mean()
+                            gt_std_upper_mm = gt_values_upper_mm.std()
                             mlp_mean_upper_mm = mlp_values_upper_mm.mean()
+                            mlp_std_upper_mm = mlp_values_upper_mm.std()
                             difference_upper_mm = mlp_mean_upper_mm - gt_mean_upper_mm
                             
                             # Interpretation (using mm thresholds)
@@ -3600,7 +3622,10 @@ def save_overall_results_report(results: Dict[str, Dict], validation_results: Di
                             else:
                                 diff_str = f"{difference_upper_mm:.3f} (more posterior)"
                             
-                            f.write(f"{'Upper Lip to E-Line':<25} {gt_mean_upper_mm:<15.3f} {mlp_mean_upper_mm:<15.3f} {diff_str:<20} {interpretation:<20}\n")
+                            gt_str = f"{gt_mean_upper_mm:.3f}±{gt_std_upper_mm:.3f}"
+                            mlp_str = f"{mlp_mean_upper_mm:.3f}±{mlp_std_upper_mm:.3f}"
+                            
+                            f.write(f"{'Upper Lip to E-Line':<25} {gt_str:<20} {mlp_str:<20} {diff_str:<20} {interpretation:<20}\n")
                     
                     # Lower lip to E-line (mm)
                     gt_col_lower_mm = 'gt_lower_lip_to_eline_mm'
@@ -3612,7 +3637,9 @@ def save_overall_results_report(results: Dict[str, Dict], validation_results: Di
                         
                         if len(gt_values_lower_mm) > 0 and len(mlp_values_lower_mm) > 0:
                             gt_mean_lower_mm = gt_values_lower_mm.mean()
+                            gt_std_lower_mm = gt_values_lower_mm.std()
                             mlp_mean_lower_mm = mlp_values_lower_mm.mean()
+                            mlp_std_lower_mm = mlp_values_lower_mm.std()
                             difference_lower_mm = mlp_mean_lower_mm - gt_mean_lower_mm
                             
                             # Interpretation
@@ -3630,7 +3657,10 @@ def save_overall_results_report(results: Dict[str, Dict], validation_results: Di
                             else:
                                 diff_str = f"{difference_lower_mm:.3f} (more posterior)"
                             
-                            f.write(f"{'Lower Lip to E-Line':<25} {gt_mean_lower_mm:<15.3f} {mlp_mean_lower_mm:<15.3f} {diff_str:<20} {interpretation:<20}\n")
+                            gt_str = f"{gt_mean_lower_mm:.3f}±{gt_std_lower_mm:.3f}"
+                            mlp_str = f"{mlp_mean_lower_mm:.3f}±{mlp_std_lower_mm:.3f}"
+                            
+                            f.write(f"{'Lower Lip to E-Line':<25} {gt_str:<20} {mlp_str:<20} {diff_str:<20} {interpretation:<20}\n")
                 
                 f.write("\nNote: Interpretation thresholds vary by measurement type:\n")
                 f.write("      - Nasolabial angle: Excellent (<2°), Good (<4°), Acceptable (<6°), Needs attention (≥6°)\n")
