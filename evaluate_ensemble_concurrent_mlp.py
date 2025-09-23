@@ -3162,9 +3162,9 @@ def save_overall_results_report(results: Dict[str, Dict], validation_results: Di
                         f.write(f"  Overall 4° Accuracy: {angle_accuracy_4deg:.1%} ({accurate_4deg_predictions}/{total_angle_predictions})\n")
                     f.write("\n")
                 
-                # Detailed angle performance table with bias analysis
-                f.write(f"{'Angle':<20} {'Model':<25} {'MAE (°)':<12} {'Bias (°)':<12} {'2° Acc':<10} {'4° Acc':<10} {'Count':<8}\n")
-                f.write("-" * 107 + "\n")
+                # Detailed angle performance table with bias analysis and standard deviations
+                f.write(f"{'Angle':<20} {'Model':<25} {'MAE±SD (°)':<18} {'Bias±SD (°)':<18} {'2° Acc':<10} {'4° Acc':<10} {'Count':<8}\n")
+                f.write("-" * 131 + "\n")
                 
                 for angle_name in angle_names:
                     angle_written = False
@@ -3180,28 +3180,35 @@ def save_overall_results_report(results: Dict[str, Dict], validation_results: Di
                         if error_col in angle_df.columns and pred_col in angle_df.columns and gt_col in angle_df.columns:
                             errors = angle_df[error_col].dropna()
                             
-                            # Calculate bias (mean difference)
+                            # Calculate bias (mean difference) and its SD
                             valid_mask = angle_df[pred_col].notna() & angle_df[gt_col].notna()
                             if valid_mask.sum() > 0:
-                                mean_pred = angle_df.loc[valid_mask, pred_col].mean()
-                                mean_gt = angle_df.loc[valid_mask, gt_col].mean()
+                                pred_values = angle_df.loc[valid_mask, pred_col]
+                                gt_values = angle_df.loc[valid_mask, gt_col]
+                                differences = pred_values - gt_values
+                                mean_pred = pred_values.mean()
+                                mean_gt = gt_values.mean()
                                 bias = mean_pred - mean_gt
+                                bias_std = differences.std()
                             else:
                                 bias = np.nan
+                                bias_std = np.nan
                             
                             if len(errors) > 0:
                                 angle_display = angle_name if not angle_written else ""
                                 angle_written = True
                                 
                                 mean_error = errors.mean()
+                                error_std = errors.std()
                                 accurate_2deg_count = (errors <= 2.0).sum()
                                 accurate_4deg_count = (errors <= 4.0).sum()
                                 total_count = len(errors)
                                 accuracy_2deg = accurate_2deg_count / total_count if total_count > 0 else 0
                                 accuracy_4deg = accurate_4deg_count / total_count if total_count > 0 else 0
                                 
-                                bias_str = f"{bias:+.2f}" if not np.isnan(bias) else "N/A"
-                                f.write(f"{angle_display:<20} {model_display:<25} {mean_error:<12.2f} {bias_str:<12} "
+                                mae_str = f"{mean_error:.2f}±{error_std:.2f}"
+                                bias_str = f"{bias:+.2f}±{bias_std:.2f}" if not np.isnan(bias) else "N/A"
+                                f.write(f"{angle_display:<20} {model_display:<25} {mae_str:<18} {bias_str:<18} "
                                        f"{accuracy_2deg:<10.1%} {accuracy_4deg:<10.1%} {total_count:<8}\n")
                     if angle_written:
                         f.write("\n")
@@ -3285,8 +3292,11 @@ def save_overall_results_report(results: Dict[str, Dict], validation_results: Di
                             
                             f.write(f"{angle_name:<20} {hrnet_bias_str:<18} {mlp_bias_str:<18} {improvement:<20}\n")
                 
-                f.write("\nNote: MAE = Mean Absolute Error (always positive)\n")
-                f.write("      Bias = Mean(Predictions) - Mean(Ground Truth): positive indicates overestimation, negative indicates underestimation\n")
+                f.write("\nNote: MAE±SD = Mean Absolute Error ± Standard Deviation of errors across patients\n")
+                f.write("      Bias±SD = Mean(Predictions) - Mean(Ground Truth) ± Standard Deviation of differences\n")
+                f.write("      - MAE shows average prediction accuracy; SD shows consistency across patients\n")
+                f.write("      - Bias shows systematic over/underestimation; SD shows variability in bias\n")
+                f.write("      - Positive bias = overestimation, Negative bias = underestimation\n")
                 f.write("      Interpretation thresholds: Excellent (<0.5°), Good (<1.0°), Acceptable (<2.0°), Needs attention (≥2.0°)\n")
                         
             except Exception as e:
@@ -4047,21 +4057,27 @@ def save_overall_results_report(results: Dict[str, Dict], validation_results: Di
                             accuracy_2deg = accurate_2deg_count / total_count if total_count > 0 else 0
                             accuracy_4deg = accurate_4deg_count / total_count if total_count > 0 else 0
                             
-                            # Calculate bias for JSON report
+                            # Calculate bias and its SD for JSON report
                             bias = np.nan
+                            bias_std = np.nan
                             gt_col = f'gt_{angle_name}'
                             pred_col = f'{model_name}_{angle_name}'
                             if gt_col in angle_df.columns and pred_col in angle_df.columns:
                                 valid_mask = angle_df[pred_col].notna() & angle_df[gt_col].notna()
                                 if valid_mask.sum() > 0:
-                                    mean_pred = angle_df.loc[valid_mask, pred_col].mean()
-                                    mean_gt = angle_df.loc[valid_mask, gt_col].mean()
+                                    pred_values = angle_df.loc[valid_mask, pred_col]
+                                    gt_values = angle_df.loc[valid_mask, gt_col]
+                                    differences = pred_values - gt_values
+                                    mean_pred = pred_values.mean()
+                                    mean_gt = gt_values.mean()
                                     bias = mean_pred - mean_gt
+                                    bias_std = differences.std()
                             
                             json_report['angle_results'][model_display][angle_name] = {
                                 'mean_error': float(mean_error),
                                 'std_error': float(std_error),
                                 'bias': float(bias) if not np.isnan(bias) else None,
+                                'bias_std': float(bias_std) if not np.isnan(bias_std) else None,
                                 'accuracy_2deg': float(accuracy_2deg),
                                 'accuracy_4deg': float(accuracy_4deg),
                                 'accurate_2deg_count': int(accurate_2deg_count),
