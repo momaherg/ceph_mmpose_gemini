@@ -491,6 +491,194 @@ def calculate_classification_metrics(true_labels: List[str], pred_labels: List[s
         'n_samples': len(true_valid)
     }
 
+def evaluate_native_classification(gt_coords: np.ndarray, native_classifications: np.ndarray, 
+                                 native_probs: Optional[np.ndarray], patient_ids: List[int],
+                                 landmark_names: List[str]) -> Dict[str, any]:
+    """Evaluate native model classification predictions against ground truth."""
+    
+    # Calculate ground truth classifications from ANB angles
+    gt_classifications = []
+    gt_classifications_numeric = []
+    
+    for i in range(len(gt_coords)):
+        gt_angles = calculate_cephalometric_angles(gt_coords[i], landmark_names)
+        gt_anb = gt_angles.get('ANB', np.nan)
+        gt_class = classify_patient(gt_anb)
+        gt_classifications.append(gt_class)
+        
+        # Convert to numeric (0=Class I, 1=Class II, 2=Class III)
+        if gt_class == 'Class I':
+            gt_classifications_numeric.append(0)
+        elif gt_class == 'Class II':
+            gt_classifications_numeric.append(1)
+        elif gt_class == 'Class III':
+            gt_classifications_numeric.append(2)
+        else:
+            gt_classifications_numeric.append(-1)
+    
+    # Filter valid native predictions
+    valid_indices = []
+    valid_gt_numeric = []
+    valid_native_numeric = []
+    valid_native_probs = []
+    valid_patient_ids = []
+    
+    for i in range(len(native_classifications)):
+        if native_classifications[i] >= 0 and gt_classifications_numeric[i] >= 0:
+            valid_indices.append(i)
+            valid_gt_numeric.append(gt_classifications_numeric[i])
+            valid_native_numeric.append(native_classifications[i])
+            valid_patient_ids.append(patient_ids[i])
+            if native_probs is not None:
+                valid_native_probs.append(native_probs[i])
+    
+    if len(valid_indices) == 0:
+        return {
+            'has_predictions': False,
+            'message': 'No valid native classification predictions found'
+        }
+    
+    # Convert numeric to string labels for metrics
+    class_names = ['Class I', 'Class II', 'Class III']
+    valid_gt_labels = [class_names[idx] for idx in valid_gt_numeric]
+    valid_native_labels = [class_names[idx] for idx in valid_native_numeric]
+    
+    # Calculate metrics
+    from sklearn.metrics import accuracy_score, confusion_matrix, classification_report
+    
+    accuracy = accuracy_score(valid_gt_numeric, valid_native_numeric)
+    cm = confusion_matrix(valid_gt_numeric, valid_native_numeric, labels=[0, 1, 2])
+    
+    # Get classification report as dict
+    report = classification_report(valid_gt_numeric, valid_native_numeric, 
+                                 labels=[0, 1, 2], 
+                                 target_names=class_names,
+                                 output_dict=True,
+                                 zero_division=0)
+    
+    # Calculate per-class metrics
+    per_class_metrics = {}
+    for i, class_name in enumerate(class_names):
+        class_data = report.get(class_name, {})
+        per_class_metrics[class_name] = {
+            'precision': class_data.get('precision', 0),
+            'recall': class_data.get('recall', 0),
+            'f1-score': class_data.get('f1-score', 0),
+            'support': class_data.get('support', 0)
+        }
+    
+    # Calculate confidence statistics if probabilities available
+    confidence_stats = None
+    if len(valid_native_probs) > 0:
+        valid_native_probs = np.array(valid_native_probs)
+        
+        # Get confidence (max probability) for each prediction
+        confidences = np.max(valid_native_probs, axis=1)
+        
+        # Separate correct and incorrect predictions
+        correct_mask = np.array(valid_gt_numeric) == np.array(valid_native_numeric)
+        correct_confidences = confidences[correct_mask]
+        incorrect_confidences = confidences[~correct_mask]
+        
+        confidence_stats = {
+            'mean_confidence': float(np.mean(confidences)),
+            'std_confidence': float(np.std(confidences)),
+            'mean_confidence_correct': float(np.mean(correct_confidences)) if len(correct_confidences) > 0 else 0,
+            'mean_confidence_incorrect': float(np.mean(incorrect_confidences)) if len(incorrect_confidences) > 0 else 0,
+            'confidence_percentiles': {
+                'p25': float(np.percentile(confidences, 25)),
+                'p50': float(np.percentile(confidences, 50)),
+                'p75': float(np.percentile(confidences, 75)),
+                'p90': float(np.percentile(confidences, 90))
+            }
+        }
+    
+    return {
+        'has_predictions': True,
+        'accuracy': float(accuracy),
+        'confusion_matrix': cm.tolist(),
+        'per_class_metrics': per_class_metrics,
+        'total_samples': len(gt_coords),
+        'valid_samples': len(valid_indices),
+        'invalid_samples': len(gt_coords) - len(valid_indices),
+        'confidence_stats': confidence_stats,
+        'valid_patient_ids': valid_patient_ids,
+        'macro_avg': {
+            'precision': report['macro avg']['precision'],
+            'recall': report['macro avg']['recall'],
+            'f1-score': report['macro avg']['f1-score']
+        },
+        'weighted_avg': {
+            'precision': report['weighted avg']['precision'],
+            'recall': report['weighted avg']['recall'],
+            'f1-score': report['weighted avg']['f1-score']
+        }
+    }
+
+def compare_native_vs_computed_classifications(native_classifications: np.ndarray,
+                                              computed_classifications: List[str],
+                                              patient_ids: List[int]) -> Dict[str, any]:
+    """Compare native model classifications with computed (ANB-based) classifications."""
+    
+    # Convert computed classifications to numeric
+    computed_numeric = []
+    for cls in computed_classifications:
+        if cls == 'Class I':
+            computed_numeric.append(0)
+        elif cls == 'Class II':
+            computed_numeric.append(1)
+        elif cls == 'Class III':
+            computed_numeric.append(2)
+        else:
+            computed_numeric.append(-1)
+    
+    # Find valid comparisons
+    valid_indices = []
+    valid_native = []
+    valid_computed = []
+    disagreement_patients = []
+    
+    for i in range(len(native_classifications)):
+        if native_classifications[i] >= 0 and computed_numeric[i] >= 0:
+            valid_indices.append(i)
+            valid_native.append(native_classifications[i])
+            valid_computed.append(computed_numeric[i])
+            
+            if native_classifications[i] != computed_numeric[i]:
+                disagreement_patients.append({
+                    'patient_id': patient_ids[i],
+                    'native': ['Class I', 'Class II', 'Class III'][native_classifications[i]],
+                    'computed': computed_classifications[i]
+                })
+    
+    if len(valid_indices) == 0:
+        return {
+            'has_comparison': False,
+            'message': 'No valid classifications for comparison'
+        }
+    
+    # Calculate agreement
+    agreement_count = sum(1 for n, c in zip(valid_native, valid_computed) if n == c)
+    agreement_rate = agreement_count / len(valid_native)
+    
+    # Cohen's kappa for agreement
+    from sklearn.metrics import cohen_kappa_score
+    kappa = cohen_kappa_score(valid_native, valid_computed)
+    
+    # Confusion matrix between native and computed
+    cm = confusion_matrix(valid_computed, valid_native, labels=[0, 1, 2])
+    
+    return {
+        'has_comparison': True,
+        'agreement_rate': float(agreement_rate),
+        'agreement_count': agreement_count,
+        'total_compared': len(valid_native),
+        'cohen_kappa': float(kappa),
+        'confusion_matrix': cm.tolist(),
+        'disagreement_patients': disagreement_patients,
+        'disagreement_count': len(disagreement_patients)
+    }
+
 # Suppress warnings
 warnings.filterwarnings('ignore')
 
@@ -824,12 +1012,14 @@ def load_model_components(model_dir: str, device: torch.device, config_path: str
     return hrnet_model, mlp_joint, scaler_input, scaler_target, model_type, hrnet_checkpoint_name
 
 def evaluate_single_model(hrnet_model, mlp_joint, scaler_input, scaler_target, 
-                         test_df, landmark_names, landmark_cols, device) -> Tuple[np.ndarray, np.ndarray, np.ndarray, List[int]]:
-    """Evaluate a single model and return predictions with patient IDs."""
+                         test_df, landmark_names, landmark_cols, device) -> Tuple[np.ndarray, np.ndarray, np.ndarray, List[int], Optional[np.ndarray], Optional[np.ndarray]]:
+    """Evaluate a single model and return predictions with patient IDs and native classifications."""
     hrnet_predictions = []
     mlp_predictions = []
     ground_truths = []
     patient_ids = []
+    native_classifications = []  # Model's classification predictions
+    native_classification_probs = []  # Model's classification probabilities
     
     print(f"   🔄 Running inference on {len(test_df)} samples...")
     
@@ -862,6 +1052,36 @@ def evaluate_single_model(hrnet_model, mlp_joint, scaler_input, scaler_target,
                 pred_keypoints = results[0].pred_instances.keypoints[0]
                 if isinstance(pred_keypoints, torch.Tensor):
                     pred_keypoints = pred_keypoints.cpu().numpy()
+                    
+                # Extract native classification predictions if available
+                native_class = None
+                native_probs = None
+                
+                # Try to get classification from pred_instances first
+                if hasattr(results[0].pred_instances, 'pred_classification'):
+                    native_class = results[0].pred_instances.pred_classification
+                    if isinstance(native_class, np.ndarray) and len(native_class) > 0:
+                        native_class = int(native_class[0])
+                    else:
+                        native_class = None
+                        
+                if hasattr(results[0].pred_instances, 'classification_scores'):
+                    native_probs = results[0].pred_instances.classification_scores
+                    if isinstance(native_probs, np.ndarray) and native_probs.shape[0] > 0:
+                        native_probs = native_probs[0]  # Get first sample's probabilities
+                    else:
+                        native_probs = None
+                        
+                # If not in pred_instances, try the result object directly
+                if native_class is None and hasattr(results[0], 'pred_classification'):
+                    native_class = results[0].pred_classification
+                    if isinstance(native_class, np.ndarray) and len(native_class) > 0:
+                        native_class = int(native_class[0])
+                        
+                if native_probs is None and hasattr(results[0], 'pred_classification_probs'):
+                    native_probs = results[0].pred_classification_probs
+                    if isinstance(native_probs, np.ndarray) and native_probs.shape[0] > 0:
+                        native_probs = native_probs[0]
             else:
                 continue
 
@@ -879,13 +1099,40 @@ def evaluate_single_model(hrnet_model, mlp_joint, scaler_input, scaler_target,
             ground_truths.append(gt_keypoints)
             patient_ids.append(row['patient_id'])
             
+            # Store classification results
+            if native_class is not None:
+                native_classifications.append(native_class)
+            else:
+                native_classifications.append(-1)  # -1 indicates no classification available
+                
+            if native_probs is not None:
+                native_classification_probs.append(native_probs)
+            else:
+                native_classification_probs.append(np.array([-1, -1, -1]))  # Invalid probs
+            
         except Exception as e:
             continue
     
     if len(hrnet_predictions) == 0:
-        return None, None, None, []
+        return None, None, None, [], None, None
     
-    return np.array(hrnet_predictions), np.array(mlp_predictions), np.array(ground_truths), patient_ids
+    # Convert to numpy arrays
+    native_classifications = np.array(native_classifications) if native_classifications else None
+    native_classification_probs = np.array(native_classification_probs) if native_classification_probs else None
+    
+    # Check if we have valid classification predictions
+    has_valid_classifications = False
+    if native_classifications is not None:
+        valid_count = np.sum(native_classifications >= 0)
+        if valid_count > 0:
+            has_valid_classifications = True
+            print(f"   ✓ Found native classification predictions for {valid_count}/{len(native_classifications)} samples")
+        else:
+            print(f"   ⚠️  No valid native classification predictions found")
+            native_classifications = None
+            native_classification_probs = None
+    
+    return np.array(hrnet_predictions), np.array(mlp_predictions), np.array(ground_truths), patient_ids, native_classifications, native_classification_probs
 
 def compute_metrics(pred_coords, gt_coords, landmark_names) -> Tuple[Dict, Dict]:
     """Compute comprehensive evaluation metrics."""
@@ -1269,6 +1516,77 @@ def create_ensemble_predictions(all_hrnet_preds: List[np.ndarray],
     print(f"   ✓ Ensemble shape: {ensemble_hrnet.shape}")
     
     return ensemble_hrnet, ensemble_mlp
+
+def create_ensemble_native_classifications(all_native_classifications: List[np.ndarray],
+                                         all_native_probs: List[Optional[np.ndarray]]) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+    """Create ensemble native classification predictions using majority voting and averaged probabilities."""
+    
+    if not all_native_classifications:
+        return None, None
+    
+    print(f"\n🔄 Creating ensemble native classification predictions from {len(all_native_classifications)} models...")
+    
+    # Convert to numpy arrays
+    all_classifications = np.array(all_native_classifications)  # Shape: (n_models, n_samples)
+    
+    # Filter out invalid predictions (-1)
+    valid_models_per_sample = []
+    ensemble_classifications = []
+    ensemble_probs = []
+    
+    n_samples = all_classifications.shape[1]
+    
+    for sample_idx in range(n_samples):
+        sample_predictions = all_classifications[:, sample_idx]
+        valid_mask = sample_predictions >= 0
+        valid_predictions = sample_predictions[valid_mask]
+        
+        if len(valid_predictions) == 0:
+            # No valid predictions for this sample
+            ensemble_classifications.append(-1)
+            ensemble_probs.append(np.array([-1, -1, -1]))
+        else:
+            # Majority voting for classification
+            from scipy import stats
+            mode_result = stats.mode(valid_predictions, keepdims=False)
+            ensemble_class = int(mode_result.mode)
+            ensemble_classifications.append(ensemble_class)
+            
+            # Average probabilities if available
+            if all_native_probs and any(p is not None for p in all_native_probs):
+                valid_probs = []
+                for model_idx, probs_array in enumerate(all_native_probs):
+                    if probs_array is not None and valid_mask[model_idx]:
+                        valid_probs.append(probs_array[sample_idx])
+                
+                if valid_probs:
+                    avg_probs = np.mean(valid_probs, axis=0)
+                    ensemble_probs.append(avg_probs)
+                else:
+                    # Create one-hot probabilities based on majority vote
+                    one_hot_probs = np.zeros(3)
+                    one_hot_probs[ensemble_class] = 1.0
+                    ensemble_probs.append(one_hot_probs)
+            else:
+                # No probability information available
+                ensemble_probs.append(np.array([-1, -1, -1]))
+        
+        valid_models_per_sample.append(np.sum(valid_mask))
+    
+    ensemble_classifications = np.array(ensemble_classifications)
+    ensemble_probs = np.array(ensemble_probs)
+    
+    # Report statistics
+    valid_count = np.sum(ensemble_classifications >= 0)
+    avg_models_per_sample = np.mean(valid_models_per_sample)
+    
+    print(f"   ✓ Valid ensemble classifications: {valid_count}/{n_samples} samples")
+    print(f"   ✓ Average models contributing per sample: {avg_models_per_sample:.2f}")
+    
+    if valid_count == 0:
+        return None, None
+    
+    return ensemble_classifications, ensemble_probs
 
 def save_ensemble_predictions_to_csv(ensemble_hrnet: np.ndarray, ensemble_mlp: np.ndarray,
                                    gt_coords: np.ndarray, patient_ids: List[int],
@@ -2937,7 +3255,8 @@ def save_overall_results_report(results: Dict[str, Dict], validation_results: Di
                                landmark_names: List[str], args: argparse.Namespace,
                                output_dir: str, n_test_samples: int, n_models_evaluated: int,
                                ruler_data: Optional[Dict[str, Dict]] = None,
-                               anb_class_results: Optional[Dict[str, Dict[str, Dict]]] = None):
+                               anb_class_results: Optional[Dict[str, Dict[str, Dict]]] = None,
+                               native_classification_results: Optional[Dict[str, any]] = None):
     """Save a comprehensive overall results report to a text file."""
     report_path = os.path.join(output_dir, "overall_results_report.txt")
     
@@ -3912,6 +4231,114 @@ def save_overall_results_report(results: Dict[str, Dict], validation_results: Di
             f.write("\nNote: Patients are classified based on ground truth ANB angles.\n")
             f.write("Class I: ANB 0-4°, Class II: ANB > 4°, Class III: ANB < 0°\n")
         
+        # Native Classification Results (from model's classification head)
+        if native_classification_results:
+            f.write("\n\nNATIVE CLASSIFICATION HEAD RESULTS:\n")
+            f.write("-" * 30 + "\n")
+            f.write("Note: These results are from the model's built-in classification head,\n")
+            f.write("      trained jointly with landmark detection using multi-task learning.\n\n")
+            
+            if 'ensemble' in native_classification_results:
+                ensemble_native = native_classification_results['ensemble']
+                
+                if ensemble_native.get('has_predictions', False):
+                    f.write(f"Overall Native Classification Performance:\n")
+                    f.write(f"  - Accuracy: {ensemble_native['accuracy']:.3f}\n")
+                    f.write(f"  - Valid samples: {ensemble_native['valid_samples']}/{ensemble_native['total_samples']}\n")
+                    
+                    if ensemble_native['invalid_samples'] > 0:
+                        f.write(f"  - Invalid/missing predictions: {ensemble_native['invalid_samples']}\n")
+                    
+                    # Per-class metrics
+                    f.write(f"\nPer-Class Metrics:\n")
+                    f.write(f"{'Class':<15} {'Precision':<12} {'Recall':<12} {'F1-Score':<12} {'Support':<10}\n")
+                    f.write("-" * 61 + "\n")
+                    
+                    for class_name in ['Class I', 'Class II', 'Class III']:
+                        if class_name in ensemble_native['per_class_metrics']:
+                            metrics = ensemble_native['per_class_metrics'][class_name]
+                            f.write(f"{class_name:<15} {metrics['precision']:<12.3f} "
+                                   f"{metrics['recall']:<12.3f} {metrics['f1-score']:<12.3f} "
+                                   f"{metrics['support']:<10}\n")
+                    
+                    # Macro and weighted averages
+                    f.write("-" * 61 + "\n")
+                    macro = ensemble_native.get('macro_avg', {})
+                    weighted = ensemble_native.get('weighted_avg', {})
+                    f.write(f"{'Macro avg':<15} {macro.get('precision', 0):<12.3f} "
+                           f"{macro.get('recall', 0):<12.3f} {macro.get('f1-score', 0):<12.3f}\n")
+                    f.write(f"{'Weighted avg':<15} {weighted.get('precision', 0):<12.3f} "
+                           f"{weighted.get('recall', 0):<12.3f} {weighted.get('f1-score', 0):<12.3f}\n")
+                    
+                    # Confusion matrix
+                    if 'confusion_matrix' in ensemble_native:
+                        f.write(f"\nConfusion Matrix:\n")
+                        f.write(f"{'':15} {'Pred Class I':<15} {'Pred Class II':<15} {'Pred Class III':<15}\n")
+                        cm = ensemble_native['confusion_matrix']
+                        class_labels = ['GT Class I', 'GT Class II', 'GT Class III']
+                        for i, label in enumerate(class_labels):
+                            f.write(f"{label:<15}")
+                            for j in range(3):
+                                f.write(f"{cm[i][j]:<15}")
+                            f.write("\n")
+                    
+                    # Confidence statistics
+                    if ensemble_native.get('confidence_stats'):
+                        conf_stats = ensemble_native['confidence_stats']
+                        f.write(f"\nClassification Confidence Statistics:\n")
+                        f.write(f"  - Mean confidence: {conf_stats['mean_confidence']:.3f}\n")
+                        f.write(f"  - Std confidence: {conf_stats['std_confidence']:.3f}\n")
+                        f.write(f"  - Mean confidence (correct predictions): {conf_stats['mean_confidence_correct']:.3f}\n")
+                        f.write(f"  - Mean confidence (incorrect predictions): {conf_stats['mean_confidence_incorrect']:.3f}\n")
+                        
+                        if 'confidence_percentiles' in conf_stats:
+                            perc = conf_stats['confidence_percentiles']
+                            f.write(f"  - Confidence percentiles: 25%={perc['p25']:.3f}, 50%={perc['p50']:.3f}, "
+                                   f"75%={perc['p75']:.3f}, 90%={perc['p90']:.3f}\n")
+                else:
+                    f.write("No valid native classification predictions found.\n")
+            
+            # Native vs Computed comparison
+            if 'native_vs_computed' in native_classification_results:
+                comparison = native_classification_results['native_vs_computed']
+                
+                if comparison.get('has_comparison', False):
+                    f.write(f"\nNative vs Computed Classification Comparison:\n")
+                    f.write(f"  - Agreement rate: {comparison['agreement_rate']:.3f}\n")
+                    f.write(f"  - Cohen's kappa: {comparison['cohen_kappa']:.3f} ")
+                    
+                    # Interpret kappa
+                    kappa = comparison['cohen_kappa']
+                    if kappa < 0.2:
+                        interpretation = "(Slight agreement)"
+                    elif kappa < 0.4:
+                        interpretation = "(Fair agreement)"
+                    elif kappa < 0.6:
+                        interpretation = "(Moderate agreement)"
+                    elif kappa < 0.8:
+                        interpretation = "(Substantial agreement)"
+                    else:
+                        interpretation = "(Almost perfect agreement)"
+                    f.write(f"{interpretation}\n")
+                    
+                    f.write(f"  - Total samples compared: {comparison['total_compared']}\n")
+                    f.write(f"  - Disagreements: {comparison['disagreement_count']}\n")
+                    
+                    # Confusion matrix between native and computed
+                    if 'confusion_matrix' in comparison:
+                        f.write(f"\nNative vs Computed Confusion Matrix:\n")
+                        f.write(f"{'':20} {'Native Class I':<15} {'Native Class II':<15} {'Native Class III':<15}\n")
+                        cm = comparison['confusion_matrix']
+                        comp_labels = ['Computed Class I', 'Computed Class II', 'Computed Class III']
+                        for i, label in enumerate(comp_labels):
+                            f.write(f"{label:<20}")
+                            for j in range(3):
+                                f.write(f"{cm[i][j]:<15}")
+                            f.write("\n")
+                    
+                    f.write(f"\nNote: 'Computed' classifications are derived from predicted ANB angles,\n")
+                    f.write(f"      while 'Native' classifications come from the model's classification head.\n")
+        
         # Summary statistics
         f.write("\n\nSUMMARY:\n")
         f.write("-" * 30 + "\n")
@@ -3994,6 +4421,15 @@ def save_overall_results_report(results: Dict[str, Dict], validation_results: Di
         f.write("    - ANB_confusion_matrix_comparison.png (side-by-side comparison)\n")
         f.write("    - [Angle]_[Model]_confusion_matrix.csv (raw confusion matrix data)\n")
         f.write("    - [Angle]_[Model]_confusion_matrix.png (heatmap visualizations)\n")
+        
+        # Add native classification files if available
+        if native_classification_results:
+            f.write("  - native_classification/ (native model classification results)\n")
+            f.write("    - native_confusion_matrix.csv (native classification confusion matrix)\n")
+            f.write("    - native_per_class_metrics.csv (precision, recall, F1 for each class)\n")
+            f.write("    - native_vs_computed_confusion_matrix.csv (comparison with ANB-based classification)\n")
+            f.write("    - native_vs_computed_disagreements.csv (cases where methods disagree)\n")
+        
         f.write("  - patient_visualizations/\n")
         
         f.write("\n" + "="*80 + "\n")
@@ -4044,7 +4480,8 @@ def save_overall_results_report(results: Dict[str, Dict], validation_results: Di
         },
         'test_results': {},
         'validation_results': {},
-        'classification_results': convert_numpy_to_list(classification_results)
+        'classification_results': convert_numpy_to_list(classification_results),
+        'native_classification_results': convert_numpy_to_list(native_classification_results) if native_classification_results else None
     }
     
     # Add test results
@@ -4619,10 +5056,13 @@ def main():
     all_model_components = []
     all_hrnet_preds = []
     all_mlp_preds = []
+    all_native_classifications = []  # Store native classification predictions
+    all_native_probs = []  # Store native classification probabilities
     all_gt = None
     all_patient_ids = None
     results = {}
     validation_results = {}
+    native_classification_results = {}  # Store native classification metrics
     
     for i, model_dir in enumerate(model_dirs, 1):
         components = load_model_components(model_dir, device, config_path, args.epoch)
@@ -4635,10 +5075,19 @@ def main():
         all_model_components.append((hrnet_model, mlp_joint, scaler_input, scaler_target, model_type, checkpoint_name))
         
         # Evaluate this model on test set
-        hrnet_preds, mlp_preds, gt_coords, patient_ids = evaluate_single_model(
+        evaluation_results = evaluate_single_model(
             hrnet_model, mlp_joint, scaler_input, scaler_target,
             test_df, landmark_names, landmark_cols, device
         )
+        
+        # Unpack results (now includes native classifications)
+        if len(evaluation_results) == 6:
+            hrnet_preds, mlp_preds, gt_coords, patient_ids, native_classifications, native_probs = evaluation_results
+        else:
+            # Fallback for old version without native classifications
+            hrnet_preds, mlp_preds, gt_coords, patient_ids = evaluation_results
+            native_classifications = None
+            native_probs = None
         
         if hrnet_preds is None:
             print(f"   ❌ No valid predictions from model {i}")
@@ -4648,6 +5097,14 @@ def main():
         
         all_hrnet_preds.append(hrnet_preds)
         all_mlp_preds.append(mlp_preds)
+        
+        # Store native classification predictions if available
+        if native_classifications is not None:
+            all_native_classifications.append(native_classifications)
+            if native_probs is not None:
+                all_native_probs.append(native_probs)
+            else:
+                all_native_probs.append(None)
         
         if all_gt is None:
             all_gt = gt_coords
@@ -4680,10 +5137,16 @@ def main():
                     print(f"      ✓ Loaded validation set: {len(val_df)} samples")
                     
                     # Evaluate on validation set
-                    val_hrnet_preds, val_mlp_preds, val_gt_coords, val_patient_ids = evaluate_single_model(
+                    val_evaluation_results = evaluate_single_model(
                         hrnet_model, mlp_joint, scaler_input, scaler_target,
                         val_df, landmark_names, landmark_cols, device
                     )
+                    
+                    # Unpack validation results
+                    if len(val_evaluation_results) == 6:
+                        val_hrnet_preds, val_mlp_preds, val_gt_coords, val_patient_ids, _, _ = val_evaluation_results
+                    else:
+                        val_hrnet_preds, val_mlp_preds, val_gt_coords, val_patient_ids = val_evaluation_results
                     
                     if val_hrnet_preds is not None:
                         print(f"      ✓ Model {i} validation evaluation: {len(val_hrnet_preds)} samples")
@@ -4709,6 +5172,14 @@ def main():
     # Create ensemble predictions
     ensemble_hrnet, ensemble_mlp = create_ensemble_predictions(all_hrnet_preds, all_mlp_preds)
     
+    # Create ensemble native classifications if available
+    ensemble_native_classifications = None
+    ensemble_native_probs = None
+    if all_native_classifications:
+        ensemble_native_classifications, ensemble_native_probs = create_ensemble_native_classifications(
+            all_native_classifications, all_native_probs
+        )
+    
     # Evaluate ensemble
     print(f"\n🔄 Computing ensemble metrics...")
     if ruler_data:
@@ -4721,8 +5192,80 @@ def main():
     results['Ensemble HRNet (Test)'] = {'overall': ensemble_hrnet_overall, 'per_landmark': ensemble_hrnet_per_landmark}
     results['Ensemble MLP (Test)'] = {'overall': ensemble_mlp_overall, 'per_landmark': ensemble_mlp_per_landmark}
     
+    # Evaluate native classifications if available
+    if ensemble_native_classifications is not None:
+        print(f"\n🎯 Evaluating native classification predictions...")
+        native_eval_results = evaluate_native_classification(
+            all_gt, ensemble_native_classifications, ensemble_native_probs,
+            all_patient_ids, landmark_names
+        )
+        
+        if native_eval_results['has_predictions']:
+            native_classification_results['ensemble'] = native_eval_results
+            print(f"   ✓ Native classification accuracy: {native_eval_results['accuracy']:.3f}")
+            print(f"   ✓ Valid samples: {native_eval_results['valid_samples']}/{native_eval_results['total_samples']}")
+            
+            # Compare native vs computed classifications
+            print(f"\n🔄 Comparing native vs computed classifications...")
+            
+            # First compute the classifications from predicted landmarks
+            computed_classifications = []
+            for i in range(len(ensemble_mlp)):
+                angles = calculate_cephalometric_angles(ensemble_mlp[i], landmark_names)
+                anb = angles.get('ANB', np.nan)
+                computed_classifications.append(classify_patient(anb))
+            
+            comparison_results = compare_native_vs_computed_classifications(
+                ensemble_native_classifications, computed_classifications, all_patient_ids
+            )
+            
+            if comparison_results['has_comparison']:
+                native_classification_results['native_vs_computed'] = comparison_results
+                print(f"   ✓ Agreement rate: {comparison_results['agreement_rate']:.3f}")
+                print(f"   ✓ Cohen's kappa: {comparison_results['cohen_kappa']:.3f}")
+                print(f"   ✓ Disagreements: {comparison_results['disagreement_count']} samples")
+        else:
+            print(f"   ⚠️  No valid native classification predictions found")
+    else:
+        print(f"\n⚠️  Native classification head not available in this model")
+    
     # Print results
     print_results_table(results, landmark_names)
+    
+    # Print native classification results if available
+    if native_classification_results:
+        print(f"\n{'='*100}")
+        print(f"🤖 NATIVE CLASSIFICATION HEAD RESULTS")
+        print(f"{'='*100}")
+        
+        if 'ensemble' in native_classification_results:
+            ensemble_results = native_classification_results['ensemble']
+            print(f"\n📊 Ensemble Native Classification Performance:")
+            print(f"   Accuracy: {ensemble_results['accuracy']:.3f}")
+            print(f"   Valid samples: {ensemble_results['valid_samples']}/{ensemble_results['total_samples']}")
+            
+            print(f"\n📊 Per-class Metrics:")
+            for class_name, metrics in ensemble_results['per_class_metrics'].items():
+                print(f"   {class_name}:")
+                print(f"      Precision: {metrics['precision']:.3f}")
+                print(f"      Recall: {metrics['recall']:.3f}")
+                print(f"      F1-score: {metrics['f1-score']:.3f}")
+                print(f"      Support: {metrics['support']}")
+            
+            if ensemble_results.get('confidence_stats'):
+                conf_stats = ensemble_results['confidence_stats']
+                print(f"\n📊 Confidence Statistics:")
+                print(f"   Mean confidence: {conf_stats['mean_confidence']:.3f}")
+                print(f"   Confidence on correct predictions: {conf_stats['mean_confidence_correct']:.3f}")
+                print(f"   Confidence on incorrect predictions: {conf_stats['mean_confidence_incorrect']:.3f}")
+        
+        if 'native_vs_computed' in native_classification_results:
+            comparison = native_classification_results['native_vs_computed']
+            print(f"\n📊 Native vs Computed Classification Comparison:")
+            print(f"   Agreement rate: {comparison['agreement_rate']:.3f}")
+            print(f"   Cohen's kappa: {comparison['cohen_kappa']:.3f}")
+            print(f"   Total compared: {comparison['total_compared']}")
+            print(f"   Disagreements: {comparison['disagreement_count']}")
     
     # Print validation results if available
     if validation_results:
@@ -4822,7 +5365,54 @@ def main():
     # Save all models combined
     save_all_models_combined(all_hrnet_preds, all_mlp_preds, ensemble_hrnet, ensemble_mlp, all_gt, all_patient_ids, landmark_names, output_dir, ruler_data)
     
-        # Save angle predictions and get classification results
+    # Save native classification results if available
+    if native_classification_results:
+        native_class_dir = os.path.join(output_dir, "native_classification")
+        os.makedirs(native_class_dir, exist_ok=True)
+        
+        # Save detailed native classification report
+        if 'ensemble' in native_classification_results:
+            ensemble_native = native_classification_results['ensemble']
+            
+            # Save confusion matrix
+            cm = np.array(ensemble_native['confusion_matrix'])
+            cm_df = pd.DataFrame(cm, 
+                               index=['GT Class I', 'GT Class II', 'GT Class III'],
+                               columns=['Pred Class I', 'Pred Class II', 'Pred Class III'])
+            cm_df.to_csv(os.path.join(native_class_dir, 'native_confusion_matrix.csv'))
+            
+            # Save per-class metrics
+            metrics_data = []
+            for class_name, metrics in ensemble_native['per_class_metrics'].items():
+                metrics_data.append({
+                    'class': class_name,
+                    'precision': metrics['precision'],
+                    'recall': metrics['recall'],
+                    'f1_score': metrics['f1-score'],
+                    'support': metrics['support']
+                })
+            metrics_df = pd.DataFrame(metrics_data)
+            metrics_df.to_csv(os.path.join(native_class_dir, 'native_per_class_metrics.csv'), index=False)
+            
+            # Save comparison with computed classifications
+            if 'native_vs_computed' in native_classification_results:
+                comparison = native_classification_results['native_vs_computed']
+                
+                # Save disagreement analysis
+                if comparison['disagreement_patients']:
+                    disagreement_df = pd.DataFrame(comparison['disagreement_patients'])
+                    disagreement_df.to_csv(os.path.join(native_class_dir, 'native_vs_computed_disagreements.csv'), index=False)
+                
+                # Save comparison confusion matrix
+                comp_cm = np.array(comparison['confusion_matrix'])
+                comp_cm_df = pd.DataFrame(comp_cm,
+                                        index=['Computed Class I', 'Computed Class II', 'Computed Class III'],
+                                        columns=['Native Class I', 'Native Class II', 'Native Class III'])
+                comp_cm_df.to_csv(os.path.join(native_class_dir, 'native_vs_computed_confusion_matrix.csv'))
+        
+        print(f"   ✓ Native classification results saved to: {native_class_dir}")
+    
+    # Save angle predictions and get classification results
     classification_results = save_angle_predictions_to_csv(ensemble_hrnet, ensemble_mlp, all_hrnet_preds, all_mlp_preds, all_gt, all_patient_ids, landmark_names, output_dir, ruler_data)
     
     # Compute and save metrics by ANB classification
@@ -4887,7 +5477,8 @@ def main():
         n_test_samples=len(test_df),
         n_models_evaluated=len(all_hrnet_preds),
         ruler_data=ruler_data,
-        anb_class_results=all_anb_results
+        anb_class_results=all_anb_results,
+        native_classification_results=native_classification_results
     )
     
     print(f"\n💾 Results saved to: {output_dir}")
