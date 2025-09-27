@@ -3353,11 +3353,11 @@ def save_overall_results_report(results: Dict[str, Dict], validation_results: Di
                 # Upper lip to E-line
                 f.write("\nUpper Lip to E-Line:\n")
                 if has_eline_mm:
-                    f.write(f"{'Model':<25} {'MAE (px)':<12} {'MAE (mm)':<12} {'Bias (px)':<12} {'Bias (mm)':<12} {'Count':<8}\n")
-                    f.write("-" * 81 + "\n")
+                    f.write(f"{'Model':<25} {'MAE±SD (px)':<18} {'MAE±SD (mm)':<18} {'Bias±SD (px)':<18} {'Bias±SD (mm)':<18} {'Count':<8}\n")
+                    f.write("-" * 117 + "\n")
                 else:
-                    f.write(f"{'Model':<25} {'MAE (224px)':<15} {'MAE (600px)':<15} {'Bias (224px)':<15} {'Count':<8}\n")
-                    f.write("-" * 78 + "\n")
+                    f.write(f"{'Model':<25} {'MAE±SD (224px)':<20} {'MAE±SD (600px)':<20} {'Bias±SD (224px)':<20} {'Count':<8}\n")
+                    f.write("-" * 118 + "\n")
                 
                 for model_name in ['ensemble_hrnetv2', 'ensemble_mlp']:
                     model_display = 'Ensemble HRNetV2' if model_name == 'ensemble_hrnetv2' else 'Ensemble MLP'
@@ -3375,47 +3375,74 @@ def save_overall_results_report(results: Dict[str, Dict], validation_results: Di
                         errors_224 = angle_df[error_col_224].dropna()
                         if len(errors_224) > 0:
                             mean_error_224 = errors_224.mean()
+                            std_error_224 = errors_224.std()
                             
-                            # Calculate bias
+                            # Calculate bias and its SD
                             bias_224 = np.nan
+                            bias_std_224 = np.nan
                             bias_mm = np.nan
+                            bias_std_mm = np.nan
                             if pred_col_224 in angle_df.columns and gt_col_224 in angle_df.columns:
                                 valid_mask = angle_df[pred_col_224].notna() & angle_df[gt_col_224].notna()
                                 if valid_mask.sum() > 0:
-                                    mean_pred_224 = angle_df.loc[valid_mask, pred_col_224].mean()
-                                    mean_gt_224 = angle_df.loc[valid_mask, gt_col_224].mean()
+                                    pred_values = angle_df.loc[valid_mask, pred_col_224]
+                                    gt_values = angle_df.loc[valid_mask, gt_col_224]
+                                    differences = pred_values - gt_values
+                                    mean_pred_224 = pred_values.mean()
+                                    mean_gt_224 = gt_values.mean()
                                     bias_224 = mean_pred_224 - mean_gt_224
+                                    bias_std_224 = differences.std()
                             
                             if has_eline_mm and error_col_mm in angle_df.columns:
                                 errors_mm = angle_df[error_col_mm].dropna()
-                                mean_error_mm = errors_mm.mean() if len(errors_mm) > 0 else np.nan
+                                if len(errors_mm) > 0:
+                                    mean_error_mm = errors_mm.mean()
+                                    std_error_mm = errors_mm.std()
+                                else:
+                                    mean_error_mm = np.nan
+                                    std_error_mm = np.nan
                                 
-                                # Calculate mm bias
+                                # Calculate mm bias and its SD
                                 if pred_col_mm in angle_df.columns and gt_col_mm in angle_df.columns:
                                     valid_mask_mm = angle_df[pred_col_mm].notna() & angle_df[gt_col_mm].notna()
                                     if valid_mask_mm.sum() > 0:
-                                        mean_pred_mm = angle_df.loc[valid_mask_mm, pred_col_mm].mean()
-                                        mean_gt_mm = angle_df.loc[valid_mask_mm, gt_col_mm].mean()
+                                        pred_values_mm = angle_df.loc[valid_mask_mm, pred_col_mm]
+                                        gt_values_mm = angle_df.loc[valid_mask_mm, gt_col_mm]
+                                        differences_mm = pred_values_mm - gt_values_mm
+                                        mean_pred_mm = pred_values_mm.mean()
+                                        mean_gt_mm = gt_values_mm.mean()
                                         bias_mm = mean_pred_mm - mean_gt_mm
+                                        bias_std_mm = differences_mm.std()
                                 
-                                bias_224_str = f"{bias_224:+.3f}" if not np.isnan(bias_224) else "N/A"
-                                bias_mm_str = f"{bias_mm:+.3f}" if not np.isnan(bias_mm) else "N/A"
-                                f.write(f"{model_display:<25} {mean_error_224:<12.3f} {mean_error_mm:<12.3f} {bias_224_str:<12} {bias_mm_str:<12} {len(errors_224):<8}\n")
+                                mae_224_str = f"{mean_error_224:.3f}±{std_error_224:.3f}"
+                                mae_mm_str = f"{mean_error_mm:.3f}±{std_error_mm:.3f}" if not np.isnan(mean_error_mm) else "N/A"
+                                bias_224_str = f"{bias_224:+.3f}±{bias_std_224:.3f}" if not np.isnan(bias_224) else "N/A"
+                                bias_mm_str = f"{bias_mm:+.3f}±{bias_std_mm:.3f}" if not np.isnan(bias_mm) else "N/A"
+                                f.write(f"{model_display:<25} {mae_224_str:<18} {mae_mm_str:<18} {bias_224_str:<18} {bias_mm_str:<18} {len(errors_224):<8}\n")
                             else:
                                 errors_600 = angle_df[error_col_600].dropna() if error_col_600 in angle_df.columns else pd.Series()
-                                mean_error_600 = errors_600.mean() if len(errors_600) > 0 else mean_error_224 * SCALE_FACTOR
+                                if len(errors_600) > 0:
+                                    mean_error_600 = errors_600.mean()
+                                    std_error_600 = errors_600.std()
+                                else:
+                                    mean_error_600 = mean_error_224 * SCALE_FACTOR
+                                    std_error_600 = std_error_224 * SCALE_FACTOR
                                 bias_600 = bias_224 * SCALE_FACTOR if not np.isnan(bias_224) else np.nan
-                                bias_224_str = f"{bias_224:+.3f}" if not np.isnan(bias_224) else "N/A"
-                                f.write(f"{model_display:<25} {mean_error_224:<15.3f} {mean_error_600:<15.3f} {bias_224_str:<15} {len(errors_224):<8}\n")
+                                bias_std_600 = bias_std_224 * SCALE_FACTOR if not np.isnan(bias_std_224) else np.nan
+                                
+                                mae_224_str = f"{mean_error_224:.3f}±{std_error_224:.3f}"
+                                mae_600_str = f"{mean_error_600:.3f}±{std_error_600:.3f}"
+                                bias_224_str = f"{bias_224:+.3f}±{bias_std_224:.3f}" if not np.isnan(bias_224) else "N/A"
+                                f.write(f"{model_display:<25} {mae_224_str:<20} {mae_600_str:<20} {bias_224_str:<20} {len(errors_224):<8}\n")
                 
                 # Lower lip to E-line
                 f.write("\nLower Lip to E-Line:\n")
                 if has_eline_mm:
-                    f.write(f"{'Model':<25} {'MAE (px)':<12} {'MAE (mm)':<12} {'Bias (px)':<12} {'Bias (mm)':<12} {'Count':<8}\n")
-                    f.write("-" * 81 + "\n")
+                    f.write(f"{'Model':<25} {'MAE±SD (px)':<18} {'MAE±SD (mm)':<18} {'Bias±SD (px)':<18} {'Bias±SD (mm)':<18} {'Count':<8}\n")
+                    f.write("-" * 117 + "\n")
                 else:
-                    f.write(f"{'Model':<25} {'MAE (224px)':<15} {'MAE (600px)':<15} {'Bias (224px)':<15} {'Count':<8}\n")
-                    f.write("-" * 78 + "\n")
+                    f.write(f"{'Model':<25} {'MAE±SD (224px)':<20} {'MAE±SD (600px)':<20} {'Bias±SD (224px)':<20} {'Count':<8}\n")
+                    f.write("-" * 118 + "\n")
                 
                 for model_name in ['ensemble_hrnetv2', 'ensemble_mlp']:
                     model_display = 'Ensemble HRNetV2' if model_name == 'ensemble_hrnetv2' else 'Ensemble MLP'
@@ -3433,38 +3460,65 @@ def save_overall_results_report(results: Dict[str, Dict], validation_results: Di
                         errors_224 = angle_df[error_col_224].dropna()
                         if len(errors_224) > 0:
                             mean_error_224 = errors_224.mean()
+                            std_error_224 = errors_224.std()
                             
-                            # Calculate bias
+                            # Calculate bias and its SD
                             bias_224 = np.nan
+                            bias_std_224 = np.nan
                             bias_mm = np.nan
+                            bias_std_mm = np.nan
                             if pred_col_224 in angle_df.columns and gt_col_224 in angle_df.columns:
                                 valid_mask = angle_df[pred_col_224].notna() & angle_df[gt_col_224].notna()
                                 if valid_mask.sum() > 0:
-                                    mean_pred_224 = angle_df.loc[valid_mask, pred_col_224].mean()
-                                    mean_gt_224 = angle_df.loc[valid_mask, gt_col_224].mean()
+                                    pred_values = angle_df.loc[valid_mask, pred_col_224]
+                                    gt_values = angle_df.loc[valid_mask, gt_col_224]
+                                    differences = pred_values - gt_values
+                                    mean_pred_224 = pred_values.mean()
+                                    mean_gt_224 = gt_values.mean()
                                     bias_224 = mean_pred_224 - mean_gt_224
+                                    bias_std_224 = differences.std()
                             
                             if has_eline_mm and error_col_mm in angle_df.columns:
                                 errors_mm = angle_df[error_col_mm].dropna()
-                                mean_error_mm = errors_mm.mean() if len(errors_mm) > 0 else np.nan
+                                if len(errors_mm) > 0:
+                                    mean_error_mm = errors_mm.mean()
+                                    std_error_mm = errors_mm.std()
+                                else:
+                                    mean_error_mm = np.nan
+                                    std_error_mm = np.nan
                                 
-                                # Calculate mm bias
+                                # Calculate mm bias and its SD
                                 if pred_col_mm in angle_df.columns and gt_col_mm in angle_df.columns:
                                     valid_mask_mm = angle_df[pred_col_mm].notna() & angle_df[gt_col_mm].notna()
                                     if valid_mask_mm.sum() > 0:
-                                        mean_pred_mm = angle_df.loc[valid_mask_mm, pred_col_mm].mean()
-                                        mean_gt_mm = angle_df.loc[valid_mask_mm, gt_col_mm].mean()
+                                        pred_values_mm = angle_df.loc[valid_mask_mm, pred_col_mm]
+                                        gt_values_mm = angle_df.loc[valid_mask_mm, gt_col_mm]
+                                        differences_mm = pred_values_mm - gt_values_mm
+                                        mean_pred_mm = pred_values_mm.mean()
+                                        mean_gt_mm = gt_values_mm.mean()
                                         bias_mm = mean_pred_mm - mean_gt_mm
+                                        bias_std_mm = differences_mm.std()
                                 
-                                bias_224_str = f"{bias_224:+.3f}" if not np.isnan(bias_224) else "N/A"
-                                bias_mm_str = f"{bias_mm:+.3f}" if not np.isnan(bias_mm) else "N/A"
-                                f.write(f"{model_display:<25} {mean_error_224:<12.3f} {mean_error_mm:<12.3f} {bias_224_str:<12} {bias_mm_str:<12} {len(errors_224):<8}\n")
+                                mae_224_str = f"{mean_error_224:.3f}±{std_error_224:.3f}"
+                                mae_mm_str = f"{mean_error_mm:.3f}±{std_error_mm:.3f}" if not np.isnan(mean_error_mm) else "N/A"
+                                bias_224_str = f"{bias_224:+.3f}±{bias_std_224:.3f}" if not np.isnan(bias_224) else "N/A"
+                                bias_mm_str = f"{bias_mm:+.3f}±{bias_std_mm:.3f}" if not np.isnan(bias_mm) else "N/A"
+                                f.write(f"{model_display:<25} {mae_224_str:<18} {mae_mm_str:<18} {bias_224_str:<18} {bias_mm_str:<18} {len(errors_224):<8}\n")
                             else:
                                 errors_600 = angle_df[error_col_600].dropna() if error_col_600 in angle_df.columns else pd.Series()
-                                mean_error_600 = errors_600.mean() if len(errors_600) > 0 else mean_error_224 * SCALE_FACTOR
+                                if len(errors_600) > 0:
+                                    mean_error_600 = errors_600.mean()
+                                    std_error_600 = errors_600.std()
+                                else:
+                                    mean_error_600 = mean_error_224 * SCALE_FACTOR
+                                    std_error_600 = std_error_224 * SCALE_FACTOR
                                 bias_600 = bias_224 * SCALE_FACTOR if not np.isnan(bias_224) else np.nan
-                                bias_224_str = f"{bias_224:+.3f}" if not np.isnan(bias_224) else "N/A"
-                                f.write(f"{model_display:<25} {mean_error_224:<15.3f} {mean_error_600:<15.3f} {bias_224_str:<15} {len(errors_224):<8}\n")
+                                bias_std_600 = bias_std_224 * SCALE_FACTOR if not np.isnan(bias_std_224) else np.nan
+                                
+                                mae_224_str = f"{mean_error_224:.3f}±{std_error_224:.3f}"
+                                mae_600_str = f"{mean_error_600:.3f}±{std_error_600:.3f}"
+                                bias_224_str = f"{bias_224:+.3f}±{bias_std_224:.3f}" if not np.isnan(bias_224) else "N/A"
+                                f.write(f"{model_display:<25} {mae_224_str:<20} {mae_600_str:<20} {bias_224_str:<20} {len(errors_224):<8}\n")
                 
                 # Add notes about E-line measurements
                 f.write("\nNote: E-line distances represent perpendicular distance from lip points to E-line (Tip of nose - ST Pogonion).\n")
