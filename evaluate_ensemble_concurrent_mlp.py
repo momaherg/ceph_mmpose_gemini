@@ -662,7 +662,7 @@ def compare_native_vs_computed_classifications(native_classifications: np.ndarra
     agreement_rate = agreement_count / len(valid_native)
     
     # Cohen's kappa for agreement
-    from sklearn.metrics import cohen_kappa_score
+    from sklearn.metrics import cohen_kappa_score, confusion_matrix
     kappa = cohen_kappa_score(valid_native, valid_computed)
     
     # Confusion matrix between native and computed
